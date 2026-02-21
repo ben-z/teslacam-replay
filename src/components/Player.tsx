@@ -73,7 +73,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
-  const loadedCamerasRef = useRef<Set<CameraAngle>>(new Set());
 
   // Keep refs in sync with state
   playbackRateRef.current = playbackRate;
@@ -313,26 +312,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       }
       if (isPlayingRef.current) {
         syncAll();
-        // Auto-advance: only when ALL loaded non-errored cameras have ended
-        const loaded = loadedCamerasRef.current;
-        if (loaded.size > 0) {
-          const errors = videoErrorsRef.current;
-          let anyHealthy = false;
-          let anyPlaying = false;
-          for (const cam of loaded) {
-            if (errors.has(cam)) continue;
-            const v = videoElsRef.current.get(cam);
-            if (v?.currentSrc) {
-              anyHealthy = true;
-              // Treat as ended if actually ended or stalled near end of stream
-              const atEnd = v.ended ||
-                (isFinite(v.duration) && v.currentTime >= v.duration - 0.5);
-              if (!atEnd) { anyPlaying = true; break; }
-            }
-          }
-          if (anyHealthy && !anyPlaying) {
-            advanceSegmentRef.current();
-          }
+        // Auto-advance: when the reference video has ended
+        if (ref) {
+          const atEnd = ref.ended ||
+            (isFinite(ref.duration) && ref.duration > 0 && ref.currentTime >= ref.duration - 0.5);
+          if (atEnd) advanceSegmentRef.current();
         }
       }
     }, SYNC_INTERVAL);
@@ -352,7 +336,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       setVideoErrors(new Set());
       setBufferingCameras(new Set());
-      loadedCamerasRef.current = new Set();
       setSegmentLoading(true);
       segmentLoadingRef.current = true;
       setTelemetryData(null);
@@ -410,15 +393,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         if (hls) {
           // Use HLS.js event — works reliably for both fresh and reused instances
           // (canplay/readyState can be stale when HLS instance is reused)
-          const hlsHandler = () => { hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler); loadedCamerasRef.current.add(cam); onReady(); };
+          const hlsHandler = () => { hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler); onReady(); };
           hls.on(Hls.Events.FRAG_BUFFERED, hlsHandler);
           cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler));
         } else {
           // Safari native HLS — use canplay
           const v = videoElsRef.current.get(cam);
           if (!v) continue;
-          if (v.readyState >= 3) { loadedCamerasRef.current.add(cam); onReady(); break; }
-          const handler = () => { loadedCamerasRef.current.add(cam); onReady(); };
+          if (v.readyState >= 3) { onReady(); break; }
+          const handler = () => onReady();
           v.addEventListener("canplay", handler, { once: true });
           cleanups.push(() => v.removeEventListener("canplay", handler));
         }
