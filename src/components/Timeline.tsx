@@ -3,23 +3,21 @@ import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
 interface Props {
-  events: DashcamEvent[]; // only RecentClips events
+  events: DashcamEvent[];
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
 }
 
-// Zoom levels: hours visible in the bar. 24 = full day, 1 = one hour.
 const ZOOM_LEVELS = [24, 12, 6, 3, 1];
-const DEFAULT_ZOOM = 0; // index into ZOOM_LEVELS (24h)
 
 interface DayData {
-  dateStr: string; // "YYYY-MM-DD"
+  dateStr: string;
   weekday: string;
   dateLabel: string;
   sessions: SessionBlock[];
 }
 
 interface SessionBlock {
-  startHour: number; // fractional hours from midnight (0-24)
+  startHour: number;
   endHour: number;
   durationMin: number;
   event: DashcamEvent;
@@ -51,7 +49,8 @@ function formatTimeDetailed(h: number): string {
   const hr = Math.floor(totalMin / 60) % 24;
   const min = totalMin % 60;
   const ampm = hr < 12 ? "AM" : "PM";
-  const hr12 = hr === 0 ? 12 : hr > 12 ? hr - 12 : hr;
+  let hr12 = hr % 12;
+  if (hr12 === 0) hr12 = 12;
   return `${hr12}:${String(min).padStart(2, "0")} ${ampm}`;
 }
 
@@ -65,22 +64,30 @@ function formatDurationShort(min: number): string {
 }
 
 export function Timeline({ events, onSelectEvent }: Props) {
-  const [zoomIdx, setZoomIdx] = useState(DEFAULT_ZOOM);
+  const [zoomIdx, setZoomIdx] = useState(0);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const scrollRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const hoursVisible = ZOOM_LEVELS[zoomIdx];
+  const barWidthPercent = (24 / hoursVisible) * 100;
+  const hourStep = hoursVisible <= 3 ? 0.5 : hoursVisible <= 6 ? 1 : hoursVisible <= 12 ? 2 : 3;
 
-  // Build day data: one block per session (event), not per clip
+  const hourTicks = useMemo((): number[] => {
+    const ticks: number[] = [];
+    for (let h = 0; h <= 24; h += hourStep) ticks.push(h);
+    return ticks;
+  }, [hourStep]);
+
   const days: DayData[] = useMemo(() => {
     const dayMap = new Map<string, SessionBlock[]>();
 
     for (const event of events) {
       if (event.clips.length === 0) continue;
-      const firstClip = event.clips[0];
-      const lastClip = event.clips[event.clips.length - 1];
-      const startDate = parseTimestamp(firstClip.timestamp);
-      const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-${String(startDate.getDate()).padStart(2, "0")}`;
+      const startDate = parseTimestamp(event.clips[0].timestamp);
+      const y = startDate.getFullYear();
+      const mo = String(startDate.getMonth() + 1).padStart(2, "0");
+      const da = String(startDate.getDate()).padStart(2, "0");
+      const dateStr = `${y}-${mo}-${da}`;
       const startHour = toFractionalHour(startDate);
       const endHour = startHour + event.totalDurationSec / 3600;
       const durationMin = Math.round(event.totalDurationSec / 60);
@@ -141,10 +148,8 @@ export function Timeline({ events, onSelectEvent }: Props) {
     const rect = scrollEl.getBoundingClientRect();
     const x = e.clientX - rect.left + scrollEl.scrollLeft;
     const hour = (x / bar.clientWidth) * 24;
-    if (hour < 0 || hour > 24) {
-      setTooltip(null);
-      return;
-    }
+    if (hour < 0 || hour > 24) return setTooltip(null);
+
     const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
     const timeStr = formatTimeDetailed(hour);
     const text = session
@@ -153,14 +158,6 @@ export function Timeline({ events, onSelectEvent }: Props) {
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
-  const handleBarMouseLeave = useCallback(() => {
-    setTooltip(null);
-  }, []);
-
-  const hourStep = hoursVisible <= 3 ? 0.5 : hoursVisible <= 6 ? 1 : hoursVisible <= 12 ? 2 : 3;
-  const barWidthPercent = (24 / hoursVisible) * 100;
-
-  const totalSessions = events.length;
   const totalMinutes = Math.round(events.reduce((s, e) => s + e.totalDurationSec, 0) / 60);
 
   if (days.length === 0) {
@@ -175,7 +172,7 @@ export function Timeline({ events, onSelectEvent }: Props) {
     <div className="timeline" onWheel={handleWheel}>
       <div className="timeline-toolbar">
         <div className="timeline-summary">
-          <strong>{totalSessions}</strong> session{totalSessions !== 1 ? "s" : ""} across{" "}
+          <strong>{events.length}</strong> session{events.length !== 1 ? "s" : ""} across{" "}
           <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
           &middot; {formatDurationShort(totalMinutes)} total
         </div>
@@ -219,7 +216,7 @@ export function Timeline({ events, onSelectEvent }: Props) {
                   className="timeline-bar-inner"
                   style={{ width: `${barWidthPercent}%` }}
                   onMouseMove={(e) => handleBarMouseMove(e, day)}
-                  onMouseLeave={handleBarMouseLeave}
+                  onMouseLeave={() => setTooltip(null)}
                 >
                   <div className="timeline-track">
                     {day.sessions.map((session, i) => {
@@ -236,17 +233,13 @@ export function Timeline({ events, onSelectEvent }: Props) {
                       );
                     })}
                   </div>
-                  {Array.from({ length: Math.ceil(24 / hourStep) + 1 }, (_, i) => {
-                    const h = i * hourStep;
-                    if (h > 24) return null;
-                    return (
-                      <div
-                        key={h}
-                        className="timeline-hour-mark"
-                        style={{ left: `${(h / 24) * 100}%` }}
-                      />
-                    );
-                  })}
+                  {hourTicks.map((h) => (
+                    <div
+                      key={h}
+                      className="timeline-hour-mark"
+                      style={{ left: `${(h / 24) * 100}%` }}
+                    />
+                  ))}
                 </div>
               </div>
             </div>
@@ -256,21 +249,17 @@ export function Timeline({ events, onSelectEvent }: Props) {
 
       <div className="timeline-axis">
         <div className="timeline-axis-inner">
-          {Array.from({ length: Math.ceil(24 / hourStep) + 1 }, (_, i) => {
-            const h = i * hourStep;
-            if (h > 24) return null;
-            const showLabel = hoursVisible >= 12 ? h % 3 === 0 : true;
-            if (!showLabel) return null;
-            return (
+          {hourTicks
+            .filter((h) => hoursVisible < 12 || h % 3 === 0)
+            .map((h) => (
               <span
                 key={h}
                 className="timeline-axis-label"
                 style={{ left: `${(h / 24) * barWidthPercent}%` }}
               >
-                {h === 24 ? "12a" : formatHour(h)}
+                {formatHour(h)}
               </span>
-            );
-          })}
+            ))}
         </div>
       </div>
 

@@ -58,7 +58,6 @@
   overflow-x: hidden;
 }
 
-/* Day row */
 .timeline-day {
   display: flex;
   align-items: stretch;
@@ -73,8 +72,6 @@
   flex-shrink: 0;
   width: 100px;
   padding: 8px 12px 8px 0;
-  font-size: 12px;
-  color: var(--text-muted);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -93,7 +90,6 @@
   color: var(--text-dim);
 }
 
-/* The bar container for a single day */
 .timeline-bar-container {
   flex: 1;
   position: relative;
@@ -101,7 +97,6 @@
   cursor: crosshair;
 }
 
-/* The scrollable inner portion (for zoom) */
 .timeline-bar-scroll {
   position: relative;
   height: 100%;
@@ -125,23 +120,17 @@
   min-width: 100%;
 }
 
-/* Track background */
 .timeline-track {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 0;
-  right: 0;
+  inset: 8px 0;
   background: var(--bg-surface);
   border-radius: 4px;
   overflow: hidden;
 }
 
-/* Individual clip segment */
 .timeline-segment {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  inset-block: 0;
   background: var(--recent-color);
   opacity: 0.7;
   border-radius: 2px;
@@ -153,29 +142,15 @@
   opacity: 1;
 }
 
-/* Hour markers */
 .timeline-hour-mark {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  inset-block: 0;
   width: 1px;
   background: var(--border);
   opacity: 0.4;
   pointer-events: none;
 }
 
-.timeline-hour-label {
-  position: absolute;
-  top: -1px;
-  font-size: 9px;
-  color: var(--text-dim);
-  transform: translateX(-50%);
-  pointer-events: none;
-  white-space: nowrap;
-  opacity: 0.7;
-}
-
-/* Hover tooltip */
 .timeline-tooltip {
   position: fixed;
   padding: 4px 8px;
@@ -190,7 +165,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Time axis at bottom */
 .timeline-axis {
   flex-shrink: 0;
   display: flex;
@@ -217,7 +191,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Empty state */
 .timeline-empty {
   display: flex;
   align-items: center;
@@ -227,7 +200,6 @@
   font-size: 13px;
 }
 
-/* Summary line */
 .timeline-summary {
   font-size: 12px;
   color: var(--text-dim);
