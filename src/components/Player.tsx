@@ -173,9 +173,12 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     const video = videoElsRef.current.get(cam);
     if (!video) return;
 
-    // Destroy previous instance for this camera
-    const prev = hlsInstancesRef.current.get(cam);
-    if (prev) { prev.destroy(); hlsInstancesRef.current.delete(cam); }
+    // Reuse existing HLS instance (avoids black flash between segments)
+    const existing = hlsInstancesRef.current.get(cam);
+    if (existing) {
+      existing.loadSource(url);
+      return;
+    }
 
     if (Hls.isSupported()) {
       const hls = new Hls({
