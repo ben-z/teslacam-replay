@@ -277,6 +277,13 @@ const port = parseInt(process.env.PORT || "3001");
 console.log(`DashReplay server starting on http://localhost:${port}`);
 console.log(`Teslacam path: ${TESLACAM_PATH}`);
 
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Server running on http://localhost:${info.port}`);
 });
+
+function shutdown() {
+  server.close();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
