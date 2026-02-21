@@ -1,13 +1,11 @@
-import { useMemo, useState, useRef, useCallback, useEffect } from "react";
+import { useMemo, useState, useCallback, useRef } from "react";
+import { Player } from "./Player";
 import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
 interface Props {
   events: DashcamEvent[];
-  onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
 }
-
-const ZOOM_LEVELS = [24, 12, 6, 3, 1];
 
 interface DayData {
   dateStr: string;
@@ -22,6 +20,8 @@ interface SessionBlock {
   durationMin: number;
   event: DashcamEvent;
 }
+
+const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
 
 function parseTimestamp(ts: string): Date {
   const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
@@ -63,20 +63,22 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent }: Props) {
-  const [zoomIdx, setZoomIdx] = useState(0);
+export function Timeline({ events }: Props) {
+  const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
-  const scrollRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const playerWrapperRef = useRef<HTMLDivElement>(null);
 
-  const hoursVisible = ZOOM_LEVELS[zoomIdx];
-  const barWidthPercent = (24 / hoursVisible) * 100;
-  const hourStep = hoursVisible <= 3 ? 0.5 : hoursVisible <= 6 ? 1 : hoursVisible <= 12 ? 2 : 3;
+  // Flat ordered list of all sessions for prev/next navigation
+  const sessionList = useMemo(() => {
+    return [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [events]);
 
-  const hourTicks = useMemo((): number[] => {
-    const ticks: number[] = [];
-    for (let h = 0; h <= 24; h += hourStep) ticks.push(h);
-    return ticks;
-  }, [hourStep]);
+  const selectedIdx = useMemo(() => {
+    if (!selectedEvent) return -1;
+    return sessionList.findIndex(
+      (e) => e.type === selectedEvent.type && e.id === selectedEvent.id
+    );
+  }, [sessionList, selectedEvent]);
 
   const days: DayData[] = useMemo(() => {
     const dayMap = new Map<string, SessionBlock[]>();
@@ -114,40 +116,33 @@ export function Timeline({ events, onSelectEvent }: Props) {
     });
   }, [events]);
 
-  // When zoom changes, auto-scroll each bar to center on first session
-  useEffect(() => {
-    if (hoursVisible >= 24) return;
-    for (const [dateStr, el] of scrollRefs.current) {
-      const day = days.find((d) => d.dateStr === dateStr);
-      if (!day || day.sessions.length === 0) continue;
-      const firstStart = day.sessions[0].startHour;
-      const pxPerHour = el.scrollWidth / 24;
-      const scrollTo = firstStart * pxPerHour - el.clientWidth / 2;
-      el.scrollTo({ left: Math.max(0, scrollTo), behavior: "smooth" });
-    }
-  }, [hoursVisible, days]);
-
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    setZoomIdx((prev) => {
-      if (e.deltaY < 0) return Math.min(prev + 1, ZOOM_LEVELS.length - 1);
-      if (e.deltaY > 0) return Math.max(prev - 1, 0);
-      return prev;
+  const handleSessionClick = useCallback((session: SessionBlock) => {
+    setSelectedEvent(session.event);
+    // Scroll to player
+    requestAnimationFrame(() => {
+      playerWrapperRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }, []);
 
-  const handleSegmentClick = useCallback((session: SessionBlock) => {
-    onSelectEvent(session.event, events);
-  }, [onSelectEvent, events]);
+  const handleBack = useCallback(() => {
+    setSelectedEvent(null);
+  }, []);
+
+  const handleNavigate = useCallback(
+    (direction: -1 | 1) => {
+      const nextIdx = selectedIdx + direction;
+      if (nextIdx >= 0 && nextIdx < sessionList.length) {
+        setSelectedEvent(sessionList[nextIdx]);
+      }
+    },
+    [sessionList, selectedIdx]
+  );
 
   const handleBarMouseMove = useCallback((e: React.MouseEvent, day: DayData) => {
     const bar = e.currentTarget as HTMLElement;
-    const scrollEl = bar.closest(".timeline-bar-scroll") as HTMLElement;
-    if (!scrollEl) return;
-    const rect = scrollEl.getBoundingClientRect();
-    const x = e.clientX - rect.left + scrollEl.scrollLeft;
-    const hour = (x / bar.clientWidth) * 24;
+    const rect = bar.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const hour = (x / rect.width) * 24;
     if (hour < 0 || hour > 24) return setTooltip(null);
 
     const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
@@ -168,53 +163,44 @@ export function Timeline({ events, onSelectEvent }: Props) {
     );
   }
 
-  return (
-    <div className="timeline" onWheel={handleWheel}>
-      <div className="timeline-toolbar">
-        <div className="timeline-summary">
-          <strong>{events.length}</strong> session{events.length !== 1 ? "s" : ""} across{" "}
-          <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
-          &middot; {formatDurationShort(totalMinutes)} total
-        </div>
-        <div className="timeline-zoom-group">
-          <button
-            className="timeline-zoom-btn"
-            onClick={() => setZoomIdx((i) => Math.max(i - 1, 0))}
-            disabled={zoomIdx === 0}
-            title="Zoom out"
-          >
-            &minus;
-          </button>
-          <span className="timeline-zoom-label">{hoursVisible}h</span>
-          <button
-            className="timeline-zoom-btn"
-            onClick={() => setZoomIdx((i) => Math.min(i + 1, ZOOM_LEVELS.length - 1))}
-            disabled={zoomIdx === ZOOM_LEVELS.length - 1}
-            title="Zoom in"
-          >
-            +
-          </button>
-        </div>
-      </div>
+  const isSelected = (event: DashcamEvent) =>
+    selectedEvent?.type === event.type && selectedEvent?.id === event.id;
 
-      <div className="timeline-scroll">
-        {days.map((day) => (
-          <div className="timeline-day" key={day.dateStr}>
-            <div className="timeline-day-label">
-              <span className="timeline-day-label-weekday">{day.weekday}</span>
-              <span className="timeline-day-label-date">{day.dateLabel}</span>
-            </div>
-            <div className="timeline-bar-container">
-              <div
-                className="timeline-bar-scroll"
-                ref={(el) => {
-                  if (el) scrollRefs.current.set(day.dateStr, el);
-                  else scrollRefs.current.delete(day.dateStr);
-                }}
-              >
+  return (
+    <div className="timeline">
+      {/* Inline Player */}
+      {selectedEvent && (
+        <div className="timeline-player-wrapper" ref={playerWrapperRef}>
+          <Player
+            event={selectedEvent}
+            onBack={handleBack}
+            onNavigate={handleNavigate}
+            hasPrev={selectedIdx > 0}
+            hasNext={selectedIdx < sessionList.length - 1}
+          />
+        </div>
+      )}
+
+      {/* Aggregate Overview */}
+      <div className="timeline-overview">
+        <div className="timeline-toolbar">
+          <div className="timeline-summary">
+            <strong>{events.length}</strong> session{events.length !== 1 ? "s" : ""} across{" "}
+            <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
+            &middot; {formatDurationShort(totalMinutes)} total
+          </div>
+        </div>
+
+        <div className="timeline-scroll">
+          {days.map((day) => (
+            <div className="timeline-day" key={day.dateStr}>
+              <div className="timeline-day-label">
+                <span className="timeline-day-label-weekday">{day.weekday}</span>
+                <span className="timeline-day-label-date">{day.dateLabel}</span>
+              </div>
+              <div className="timeline-bar-container">
                 <div
                   className="timeline-bar-inner"
-                  style={{ width: `${barWidthPercent}%` }}
                   onMouseMove={(e) => handleBarMouseMove(e, day)}
                   onMouseLeave={() => setTooltip(null)}
                 >
@@ -225,15 +211,15 @@ export function Timeline({ events, onSelectEvent }: Props) {
                       return (
                         <div
                           key={i}
-                          className="timeline-segment"
+                          className={`timeline-segment ${isSelected(session.event) ? "active" : ""}`}
                           style={{ left: `${left}%`, width: `${width}%` }}
-                          onClick={() => handleSegmentClick(session)}
+                          onClick={() => handleSessionClick(session)}
                           title={`${formatTimeDetailed(session.startHour)} — ${formatDurationShort(session.durationMin)}`}
                         />
                       );
                     })}
                   </div>
-                  {hourTicks.map((h) => (
+                  {HOUR_TICKS.map((h) => (
                     <div
                       key={h}
                       className="timeline-hour-mark"
@@ -243,23 +229,21 @@ export function Timeline({ events, onSelectEvent }: Props) {
                 </div>
               </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
 
-      <div className="timeline-axis">
-        <div className="timeline-axis-inner">
-          {hourTicks
-            .filter((h) => hoursVisible < 12 || h % 3 === 0)
-            .map((h) => (
+        <div className="timeline-axis">
+          <div className="timeline-axis-inner">
+            {HOUR_TICKS.filter((h) => h % 3 === 0).map((h) => (
               <span
                 key={h}
                 className="timeline-axis-label"
-                style={{ left: `${(h / 24) * barWidthPercent}%` }}
+                style={{ left: `${(h / 24) * 100}%` }}
               >
                 {formatHour(h)}
               </span>
             ))}
+          </div>
         </div>
       </div>
 

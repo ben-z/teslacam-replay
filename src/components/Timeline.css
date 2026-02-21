@@ -5,51 +5,29 @@
   overflow: hidden;
 }
 
+/* Inline player container */
+.timeline-player-wrapper {
+  flex-shrink: 0;
+  height: 55vh;
+  min-height: 300px;
+  max-height: 600px;
+  border-bottom: 2px solid var(--accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.timeline-overview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .timeline-toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 0 16px;
   flex-shrink: 0;
-}
-
-.timeline-zoom-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-}
-
-.timeline-zoom-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-surface);
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 16px;
-  cursor: pointer;
-  line-height: 1;
-  user-select: none;
-}
-.timeline-zoom-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-.timeline-zoom-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-.timeline-zoom-label {
-  font-size: 11px;
-  color: var(--text-dim);
-  min-width: 48px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
 .timeline-scroll {
@@ -97,27 +75,10 @@
   cursor: crosshair;
 }
 
-.timeline-bar-scroll {
-  position: relative;
-  height: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.timeline-bar-scroll::-webkit-scrollbar {
-  height: 4px;
-}
-.timeline-bar-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.timeline-bar-scroll::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
-}
-
 .timeline-bar-inner {
   position: relative;
   height: 100%;
-  min-width: 100%;
+  width: 100%;
 }
 
 .timeline-track {
@@ -140,6 +101,12 @@
 }
 .timeline-segment:hover {
   opacity: 1;
+}
+.timeline-segment.active {
+  opacity: 1;
+  box-shadow: 0 0 8px var(--recent-color);
+  outline: 1px solid var(--recent-color);
+  z-index: 1;
 }
 
 .timeline-hour-mark {

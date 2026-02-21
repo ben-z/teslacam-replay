@@ -253,10 +253,7 @@ export function EventBrowser({
             </p>
           </div>
         ) : filter === "RecentClips" ? (
-          <Timeline
-            events={filtered}
-            onSelectEvent={onSelectEvent}
-          />
+          <Timeline events={filtered} />
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
