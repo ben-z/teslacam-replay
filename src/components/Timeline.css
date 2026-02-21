@@ -91,7 +91,7 @@
 .timeline-segment {
   position: absolute;
   inset-block: 0;
-  background: var(--recent-color);
+  background: var(--seg-color);
   opacity: 0.6;
   border-radius: 2px;
   min-width: 2px;
@@ -101,36 +101,23 @@
 .timeline-segment:hover {
   opacity: 1;
 }
+/* Type-specific colors via local custom property for DRY active state */
+.timeline-segment--recent { --seg-color: var(--recent-color); }
+.timeline-segment--sentry { --seg-color: var(--sentry-color); }
+.timeline-segment--saved { --seg-color: var(--saved-color); }
+
+/* Event segments (sentry/saved) render above the recent base layer */
+.timeline-segment--sentry,
+.timeline-segment--saved {
+  opacity: 0.85;
+  z-index: 1;
+}
+
 .timeline-segment.active {
   opacity: 1;
   z-index: 2;
-}
-
-/* Type-specific colors */
-.timeline-segment--recent {
-  background: var(--recent-color);
-}
-.timeline-segment--recent.active {
-  box-shadow: 0 0 8px var(--recent-color);
-  outline: 1px solid var(--recent-color);
-}
-.timeline-segment--sentry {
-  background: var(--sentry-color);
-  opacity: 0.85;
-  z-index: 1;
-}
-.timeline-segment--sentry.active {
-  box-shadow: 0 0 8px var(--sentry-color);
-  outline: 1px solid var(--sentry-color);
-}
-.timeline-segment--saved {
-  background: var(--saved-color);
-  opacity: 0.85;
-  z-index: 1;
-}
-.timeline-segment--saved.active {
-  box-shadow: 0 0 8px var(--saved-color);
-  outline: 1px solid var(--saved-color);
+  box-shadow: 0 0 8px var(--seg-color);
+  outline: 1px solid var(--seg-color);
 }
 
 .timeline-hour-mark {

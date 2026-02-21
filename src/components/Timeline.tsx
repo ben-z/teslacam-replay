@@ -23,6 +23,12 @@ interface SessionBlock {
 
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
 
+const EVENT_TYPE_CLASS: Record<DashcamEvent["type"], "recent" | "sentry" | "saved"> = {
+  RecentClips: "recent",
+  SentryClips: "sentry",
+  SavedClips: "saved",
+};
+
 function parseTimestamp(ts: string): Date {
   const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
   if (!m) return new Date(ts);
@@ -112,9 +118,9 @@ export function Timeline({ events }: Props) {
         dateLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
         // Sort: RecentClips first (base layer), then Sentry/Saved on top; within same type, by time
         sessions: sessions.sort((a, b) => {
-          const aEvent = a.event.type === "RecentClips" ? 0 : 1;
-          const bEvent = b.event.type === "RecentClips" ? 0 : 1;
-          if (aEvent !== bEvent) return aEvent - bEvent;
+          const aOrder = a.event.type === "RecentClips" ? 0 : 1;
+          const bOrder = b.event.type === "RecentClips" ? 0 : 1;
+          if (aOrder !== bOrder) return aOrder - bOrder;
           return a.startHour - b.startHour;
         }),
       };
@@ -151,14 +157,17 @@ export function Timeline({ events }: Props) {
     }
 
     // Prefer Sentry/Saved hits over Recent when overlapping
-    const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour && s.event.type !== "RecentClips")
-      || day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
+    const hitTest = (s: SessionBlock) => hour >= s.startHour && hour <= s.endHour;
+    const session = day.sessions.find((s) => hitTest(s) && s.event.type !== "RecentClips")
+      || day.sessions.find(hitTest);
     const timeStr = formatTimeDetailed(hour);
-    const typeLabel = session?.event.type === "SentryClips" ? " sentry"
-      : session?.event.type === "SavedClips" ? " saved" : "";
-    const text = session
-      ? `${timeStr} — ${formatDurationShort(session.durationMin)}${typeLabel} session`
-      : timeStr;
+    if (!session) {
+      setTooltip({ x: e.clientX, y: e.clientY - 32, text: timeStr });
+      return;
+    }
+    const typeClass = EVENT_TYPE_CLASS[session.event.type];
+    const typeLabel = typeClass === "recent" ? "" : ` ${typeClass}`;
+    const text = `${timeStr} — ${formatDurationShort(session.durationMin)}${typeLabel} session`;
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
@@ -228,14 +237,13 @@ export function Timeline({ events }: Props) {
                   onMouseLeave={() => setTooltip(null)}
                 >
                   <div className="timeline-track">
-                    {day.sessions.map((session, i) => {
+                    {day.sessions.map((session) => {
                       const left = (session.startHour / 24) * 100;
                       const width = Math.max(((session.endHour - session.startHour) / 24) * 100, 0.3);
-                      const typeClass = session.event.type === "SentryClips" ? "sentry"
-                        : session.event.type === "SavedClips" ? "saved" : "recent";
+                      const typeClass = EVENT_TYPE_CLASS[session.event.type];
                       return (
                         <div
-                          key={i}
+                          key={`${session.event.type}-${session.event.id}`}
                           className={`timeline-segment timeline-segment--${typeClass} ${isSelected(session.event) ? "active" : ""}`}
                           style={{ left: `${left}%`, width: `${width}%` }}
                           onClick={() => handleSessionClick(session)}
