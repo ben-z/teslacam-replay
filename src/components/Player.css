@@ -246,8 +246,6 @@
   min-width: 0;
   cursor: pointer;
   container-type: inline-size;
-  /* Prevent layout shift: reserve space even when video source is switching */
-  contain: strict;
 }
 
 .player-video-cell:not(.focused):hover {
