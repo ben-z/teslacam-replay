@@ -414,21 +414,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     }
   }, []);
 
-  // Capture screenshot from focused video
-  const captureFrame = useCallback(() => {
-    const v = videoElsRef.current.get(effectiveFocusCamera);
-    if (!v || !v.videoWidth) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = v.videoWidth;
-    canvas.height = v.videoHeight;
-    canvas.getContext("2d")!.drawImage(v, 0, 0);
-    const a = document.createElement("a");
-    a.href = canvas.toDataURL("image/png");
-    // Use ref to avoid re-creating this callback every 200ms during playback
-    a.download = `dashreplay-${event.id}-${CAMERA_LABELS[effectiveFocusCamera]}-${formatTime(displayTimeRef.current).replace(":", "m")}s.png`;
-    a.click();
-  }, [effectiveFocusCamera, event.id]);
-
   // Audio toggle (only front camera has audio)
   const toggleMute = useCallback(() => {
     setIsMuted((prev) => {
@@ -529,9 +514,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         case "m":
           toggleMute();
           break;
-        case "s":
-          captureFrame();
-          break;
         case "t":
           setShowTelemetry((s) => !s);
           break;
@@ -547,7 +529,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     };
     window.addEventListener("keydown", handle);
     return () => window.removeEventListener("keydown", handle);
-  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, captureFrame, allEventCameras, showShortcuts]);
+  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts]);
 
   // Compute cell position based on layout
   const getCellStyle = (
@@ -678,18 +660,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           )}
         </div>
 
-        <button
-          className="player-capture-btn"
-          onClick={captureFrame}
-          title="Save screenshot (S)"
-          aria-label="Save screenshot"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <circle cx="12" cy="13" r="4" />
-            <path d="M5 3v2M19 3v2" />
-          </svg>
-        </button>
         <div className="player-layout-toggle" role="group" aria-label="Layout">
           {(["grid", "focus"] as const).map((l) => (
             <button
@@ -726,7 +696,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                 ["[ ]", "Previous / Next event"],
                 ["F", "Toggle grid / focus layout"],
                 ["M", "Mute / Unmute"],
-                ["S", "Save screenshot"],
                 ["T", "Toggle telemetry HUD"],
                 ["1\u20136", "Switch camera"],
                 ["Esc", "Back to browse"],

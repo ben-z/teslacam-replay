@@ -101,24 +101,6 @@
   background: var(--border);
 }
 
-.player-capture-btn {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-surface);
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.player-capture-btn:hover {
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-
 .player-layout-toggle {
   display: flex;
   gap: 2px;
@@ -596,8 +578,7 @@
 }
 
 @media (max-width: 480px) {
-  .player-segment-group,
-  .player-capture-btn {
+  .player-segment-group {
     display: none;
   }
   .player-videos-grid {
