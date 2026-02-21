@@ -595,7 +595,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     };
   };
 
-  const isSentry = event.type === "SentryClips";
+  const badgeLabel = event.type === "SentryClips" ? "Sentry"
+    : event.type === "RecentClips" ? "Recent" : "Saved";
+  const badgeColor = event.type === "SentryClips" ? "var(--sentry-color)"
+    : event.type === "RecentClips" ? "var(--recent-color)" : "var(--saved-color)";
 
   if (allEventCameras.length === 0) {
     return (
@@ -655,13 +658,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         <div className="player-header-info">
           <span
             className="player-badge"
-            style={{
-              background: isSentry
-                ? "var(--sentry-color)"
-                : "var(--saved-color)",
-            }}
+            style={{ background: badgeColor }}
           >
-            {isSentry ? "Sentry" : "Saved"}
+            {badgeLabel}
           </span>
           <span className="player-header-title">
             {event.city || event.id}

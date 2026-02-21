@@ -45,7 +45,7 @@ class ErrorBoundary extends Component<
 
 // Parse hash: "#/event/SavedClips/2025-..." -> { type, id }
 function parseHash(): { type: string; id: string } | null {
-  const m = location.hash.match(/^#\/event\/(SavedClips|SentryClips)\/(.+)$/);
+  const m = location.hash.match(/^#\/event\/(SavedClips|SentryClips|RecentClips)\/(.+)$/);
   return m ? { type: m[1], id: m[2] } : null;
 }
 

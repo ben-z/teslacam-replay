@@ -79,6 +79,35 @@ async function createFixture() {
   // Non-timestamp folder — should be skipped
   const junkDir = path.join(tmpDir, "SavedClips", ".DS_Store");
   await mkdir(junkDir, { recursive: true });
+
+  // RecentClips: flat MP4 files (two driving sessions with a gap)
+  const recentDir = path.join(tmpDir, "RecentClips");
+  await mkdir(recentDir, { recursive: true });
+
+  // Session 1: 3 segments, 60s apart
+  const recentCameras = ["front", "back", "left_repeater", "right_repeater"];
+  const session1 = ["2026-02-01_10-00-00", "2026-02-01_10-01-00", "2026-02-01_10-02-00"];
+  for (const ts of session1) {
+    for (const cam of recentCameras) {
+      await writeFile(path.join(recentDir, `${ts}-${cam}.mp4`), "");
+    }
+  }
+
+  // Session 2: 2 segments, 60s apart, 10min gap from session 1
+  const session2 = ["2026-02-01_10-12-00", "2026-02-01_10-13-00"];
+  for (const ts of session2) {
+    for (const cam of recentCameras) {
+      await writeFile(path.join(recentDir, `${ts}-${cam}.mp4`), "");
+    }
+  }
+
+  // RecentClips: date subfolder
+  const dateSub = path.join(recentDir, "2026-01-15");
+  await mkdir(dateSub, { recursive: true });
+  const subCams = ["front", "back"];
+  for (const cam of subCams) {
+    await writeFile(path.join(dateSub, `2026-01-15_08-00-00-${cam}.mp4`), "");
+  }
 }
 
 beforeAll(async () => {
@@ -90,17 +119,19 @@ afterAll(async () => {
 });
 
 describe("scanTeslacamFolder", () => {
-  it("finds SavedClips and SentryClips events", async () => {
+  it("finds SavedClips, SentryClips, and RecentClips events", async () => {
     const events = await scanTeslacamFolder(tmpDir);
-    expect(events).toHaveLength(2);
     expect(events.map((e) => e.type)).toContain("SavedClips");
     expect(events.map((e) => e.type)).toContain("SentryClips");
+    expect(events.map((e) => e.type)).toContain("RecentClips");
   });
 
   it("sorts events by id descending (newest first)", async () => {
     const events = await scanTeslacamFolder(tmpDir);
-    expect(events[0].id).toBe("2025-11-08_16-41-34");
-    expect(events[1].id).toBe("2025-06-01_18-17-49");
+    // Should be sorted newest first
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i - 1].id >= events[i].id).toBe(true);
+    }
   });
 
   it("skips empty folders and non-timestamp folders", async () => {
@@ -176,8 +207,42 @@ describe("scanTeslacamFolder", () => {
   });
 });
 
+describe("RecentClips scanning", () => {
+  it("groups flat files into driving sessions by timestamp gaps", async () => {
+    const events = await scanTeslacamFolder(tmpDir);
+    const recent = events.filter((e) => e.type === "RecentClips");
+    // Should have 3 sessions: session1 (3 clips), session2 (2 clips), subfolder (1 clip)
+    expect(recent).toHaveLength(3);
+  });
+
+  it("splits sessions at gaps > 2 minutes", async () => {
+    const events = await scanTeslacamFolder(tmpDir);
+    const recent = events.filter((e) => e.type === "RecentClips");
+    const session1 = recent.find((e) => e.id === "2026-02-01_10-00-00");
+    const session2 = recent.find((e) => e.id === "2026-02-01_10-12-00");
+    expect(session1).toBeDefined();
+    expect(session2).toBeDefined();
+    expect(session1!.clips).toHaveLength(3);
+    expect(session2!.clips).toHaveLength(2);
+  });
+
+  it("tracks subfolder for date-organized files", async () => {
+    const events = await scanTeslacamFolder(tmpDir);
+    const subfolderEvent = events.find((e) => e.id === "2026-01-15_08-00-00");
+    expect(subfolderEvent).toBeDefined();
+    expect(subfolderEvent!.clips[0].subfolder).toBe("2026-01-15");
+  });
+
+  it("has no subfolder for flat files", async () => {
+    const events = await scanTeslacamFolder(tmpDir);
+    const flatEvent = events.find((e) => e.id === "2026-02-01_10-00-00");
+    expect(flatEvent).toBeDefined();
+    expect(flatEvent!.clips[0].subfolder).toBeUndefined();
+  });
+});
+
 describe("getVideoPath", () => {
-  it("constructs correct path", () => {
+  it("constructs correct path for SavedClips", () => {
     const p = getVideoPath(
       "/data/teslacam",
       "SavedClips",
@@ -187,6 +252,33 @@ describe("getVideoPath", () => {
     );
     expect(p).toBe(
       "/data/teslacam/SavedClips/2025-06-01_18-17-49/2025-06-01_18-07-09-front.mp4"
+    );
+  });
+
+  it("constructs correct path for RecentClips flat files", () => {
+    const p = getVideoPath(
+      "/data/teslacam",
+      "RecentClips",
+      "2026-02-01_10-00-00",
+      "2026-02-01_10-00-00",
+      "front"
+    );
+    expect(p).toBe(
+      "/data/teslacam/RecentClips/2026-02-01_10-00-00-front.mp4"
+    );
+  });
+
+  it("constructs correct path for RecentClips with subfolder", () => {
+    const p = getVideoPath(
+      "/data/teslacam",
+      "RecentClips",
+      "2026-01-15_08-00-00",
+      "2026-01-15_08-00-00",
+      "front",
+      "2026-01-15"
+    );
+    expect(p).toBe(
+      "/data/teslacam/RecentClips/2026-01-15/2026-01-15_08-00-00-front.mp4"
     );
   });
 });

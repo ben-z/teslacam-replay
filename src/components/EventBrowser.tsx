@@ -14,7 +14,7 @@ interface Props {
   onClearWatched?: () => void;
 }
 
-type FilterType = "all" | "SavedClips" | "SentryClips";
+type FilterType = "all" | "SavedClips" | "SentryClips" | "RecentClips";
 type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 48;
@@ -119,11 +119,13 @@ export function EventBrowser({
   }, []);
 
   const counts = useMemo(() => {
-    let saved = 0;
+    let saved = 0, sentry = 0, recent = 0;
     for (const e of events) {
       if (e.type === "SavedClips") saved++;
+      else if (e.type === "SentryClips") sentry++;
+      else if (e.type === "RecentClips") recent++;
     }
-    return { total: events.length, saved, sentry: events.length - saved };
+    return { total: events.length, saved, sentry, recent };
   }, [events]);
 
   // Count events per date (from full filtered list for accurate counts)
@@ -189,6 +191,7 @@ export function EventBrowser({
                 ["all", `All (${counts.total})`],
                 ["SavedClips", `Saved (${counts.saved})`],
                 ["SentryClips", `Sentry (${counts.sentry})`],
+                ...(counts.recent > 0 ? [["RecentClips", `Recent (${counts.recent})`]] : []),
               ] as [FilterType, string][]
             ).map(([value, label]) => (
               <button
@@ -309,7 +312,10 @@ function EventCard({
   watched: boolean;
   onClick: () => void;
 }) {
-  const isSentry = event.type === "SentryClips";
+  const badgeLabel = event.type === "SentryClips" ? "Sentry"
+    : event.type === "RecentClips" ? "Recent" : "Saved";
+  const badgeColor = event.type === "SentryClips" ? "var(--sentry-color)"
+    : event.type === "RecentClips" ? "var(--recent-color)" : "var(--saved-color)";
   const [thumbState, setThumbState] = useState<"loading" | "loaded" | "error">(
     event.hasThumbnail ? "loading" : "error"
   );
@@ -334,13 +340,9 @@ function EventCard({
         )}
         <span
           className="browse-card-badge"
-          style={{
-            background: isSentry
-              ? "var(--sentry-color)"
-              : "var(--saved-color)",
-          }}
+          style={{ background: badgeColor }}
         >
-          {isSentry ? "Sentry" : "Saved"}
+          {badgeLabel}
         </span>
         <span className="browse-card-duration">
           {formatDuration(event.totalDurationSec)}

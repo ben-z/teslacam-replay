@@ -5,11 +5,14 @@ export interface EventClip {
   timestamp: string; // e.g. "2025-06-01_18-07-09"
   cameras: string[]; // available camera angles
   durationSec: number; // estimated from timestamp gaps, ~60s
+  subfolder?: string; // for RecentClips: date subfolder if files are in one (e.g. "2025-12-19")
 }
 
+export type EventType = "SavedClips" | "SentryClips" | "RecentClips";
+
 export interface DashcamEvent {
-  id: string; // folder name (trigger timestamp)
-  type: "SavedClips" | "SentryClips";
+  id: string; // folder name (trigger timestamp) or first clip timestamp for RecentClips
+  type: EventType;
   timestamp: string; // from event.json or folder name
   city?: string;
   lat?: number;
@@ -26,6 +29,12 @@ const CAMERA_ORDER = ["front", "left_repeater", "right_repeater", "back", "left_
 
 // Folder names match this pattern: "YYYY-MM-DD_HH-MM-SS"
 const FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
+// Date-only folder pattern for RecentClips subfolders: "YYYY-MM-DD"
+const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// Max gap between consecutive clips before splitting into separate events (seconds)
+const SESSION_GAP_THRESHOLD = 120;
 
 export async function scanTeslacamFolder(
   rootPath: string
@@ -56,6 +65,10 @@ export async function scanTeslacamFolder(
       }
     }
   }
+
+  // Scan RecentClips (flat files + date subfolders)
+  const recentEvents = await scanRecentClips(rootPath);
+  events.push(...recentEvents);
 
   events.sort((a, b) => b.id.localeCompare(a.id));
   return events;
@@ -161,13 +174,122 @@ function folderNameToISO(name: string): string {
   return `${match[1]}T${match[2]}:${match[3]}:${match[4]}`;
 }
 
+/**
+ * Scan RecentClips: flat MP4 files + date subfolders, grouped into driving sessions.
+ */
+async function scanRecentClips(rootPath: string): Promise<DashcamEvent[]> {
+  const recentDir = path.join(rootPath, "RecentClips");
+  let entries: string[];
+  try {
+    entries = await readdir(recentDir);
+  } catch {
+    return [];
+  }
+
+  // Collect all clip files: { timestamp, camera, subfolder? }
+  const segmentMap = new Map<string, { cameras: Set<string>; subfolder?: string }>();
+
+  // Parse flat MP4 files
+  for (const file of entries) {
+    const match = file.match(CLIP_REGEX);
+    if (!match) continue;
+    const [, timestamp, camera] = match;
+    if (!segmentMap.has(timestamp)) {
+      segmentMap.set(timestamp, { cameras: new Set() });
+    }
+    segmentMap.get(timestamp)!.cameras.add(camera);
+  }
+
+  // Parse date subfolders
+  const dateFolders = entries.filter((f) => DATE_FOLDER_PATTERN.test(f));
+  for (const folder of dateFolders) {
+    let files: string[];
+    try {
+      files = await readdir(path.join(recentDir, folder));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      const match = file.match(CLIP_REGEX);
+      if (!match) continue;
+      const [, timestamp, camera] = match;
+      if (!segmentMap.has(timestamp)) {
+        segmentMap.set(timestamp, { cameras: new Set(), subfolder: folder });
+      }
+      segmentMap.get(timestamp)!.cameras.add(camera);
+    }
+  }
+
+  if (segmentMap.size === 0) return [];
+
+  // Sort all segments by timestamp
+  const sorted = Array.from(segmentMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  // Group into driving sessions (split on gaps > SESSION_GAP_THRESHOLD)
+  const sessions: typeof sorted[] = [];
+  let current: typeof sorted = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prevEpoch = segmentTimestampToEpoch(sorted[i - 1][0]);
+    const curEpoch = segmentTimestampToEpoch(sorted[i][0]);
+    if (prevEpoch > 0 && curEpoch > 0 && curEpoch - prevEpoch > SESSION_GAP_THRESHOLD) {
+      sessions.push(current);
+      current = [];
+    }
+    current.push(sorted[i]);
+  }
+  sessions.push(current);
+
+  // Convert sessions to events
+  return sessions.map((session) => {
+    const clips: EventClip[] = session.map(([timestamp, { cameras, subfolder }], i) => {
+      let durationSec = 60;
+      if (i + 1 < session.length) {
+        const cur = segmentTimestampToEpoch(timestamp);
+        const next = segmentTimestampToEpoch(session[i + 1][0]);
+        if (cur > 0 && next > 0) {
+          const diff = next - cur;
+          if (diff >= 10 && diff <= 120) durationSec = diff;
+        }
+      }
+      return {
+        timestamp,
+        cameras: Array.from(cameras).sort((a, b) =>
+          CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
+        ),
+        durationSec,
+        subfolder,
+      };
+    });
+
+    const firstTimestamp = session[0][0];
+    return {
+      id: firstTimestamp,
+      type: "RecentClips" as const,
+      timestamp: folderNameToISO(firstTimestamp),
+      hasThumbnail: false,
+      clips,
+      totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
+    };
+  });
+}
+
 export function getVideoPath(
   rootPath: string,
   type: string,
   eventId: string,
   segment: string,
-  camera: string
+  camera: string,
+  subfolder?: string
 ): string {
+  if (type === "RecentClips") {
+    // RecentClips: files are either in a date subfolder or flat in RecentClips/
+    if (subfolder) {
+      return path.join(rootPath, type, subfolder, `${segment}-${camera}.mp4`);
+    }
+    return path.join(rootPath, type, `${segment}-${camera}.mp4`);
+  }
   return path.join(rootPath, type, eventId, `${segment}-${camera}.mp4`);
 }
 

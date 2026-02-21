@@ -44,7 +44,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
     const raw = await readFile(CACHE_FILE, "utf-8");
     const data = JSON.parse(raw);
-    if (!data || data.version !== 2 || !Array.isArray(data.events)) {
+    if (!data || data.version !== 3 || !Array.isArray(data.events)) {
       console.log("Disk cache outdated (version mismatch), re-scanning");
       return null;
     }
@@ -58,7 +58,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify({ version: 2, events }));
+    await writeFile(CACHE_FILE, JSON.stringify({ version: 3, events }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);
@@ -175,7 +175,7 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const camera = clip.cameras.includes("front") ? "front" : clip.cameras[0];
   if (!camera) return c.json({ error: "No camera available" }, 404);
 
-  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera);
+  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera, clip.subfolder);
   if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
 
   try {
@@ -198,7 +198,17 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
   if (!validateParams(type, eventId, segment, camera)) {
     return c.json({ error: "Invalid params" }, 400);
   }
-  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera);
+
+  // Look up clip subfolder for RecentClips
+  let subfolder: string | undefined;
+  if (type === "RecentClips") {
+    const events = await getEvents();
+    const event = events.find((e) => e.type === type && e.id === eventId);
+    const clip = event?.clips.find((cl) => cl.timestamp === segment);
+    subfolder = clip?.subfolder;
+  }
+
+  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera, subfolder);
   if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
 
   // Verify source file exists
