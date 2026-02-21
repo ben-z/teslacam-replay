@@ -1,0 +1,238 @@
+.timeline {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.timeline-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 16px;
+  flex-shrink: 0;
+}
+
+.timeline-zoom-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.timeline-zoom-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+  user-select: none;
+}
+.timeline-zoom-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.timeline-zoom-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.timeline-zoom-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 48px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Day row */
+.timeline-day {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  min-height: 40px;
+}
+.timeline-day:last-child {
+  border-bottom: none;
+}
+
+.timeline-day-label {
+  flex-shrink: 0;
+  width: 100px;
+  padding: 8px 12px 8px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.3;
+  text-align: right;
+}
+.timeline-day-label-weekday {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.timeline-day-label-date {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* The bar container for a single day */
+.timeline-bar-container {
+  flex: 1;
+  position: relative;
+  min-height: 36px;
+  cursor: crosshair;
+}
+
+/* The scrollable inner portion (for zoom) */
+.timeline-bar-scroll {
+  position: relative;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.timeline-bar-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+.timeline-bar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.timeline-bar-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.timeline-bar-inner {
+  position: relative;
+  height: 100%;
+  min-width: 100%;
+}
+
+/* Track background */
+.timeline-track {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  right: 0;
+  background: var(--bg-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Individual clip segment */
+.timeline-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--recent-color);
+  opacity: 0.7;
+  border-radius: 2px;
+  min-width: 2px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.timeline-segment:hover {
+  opacity: 1;
+}
+
+/* Hour markers */
+.timeline-hour-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.timeline-hour-label {
+  position: absolute;
+  top: -1px;
+  font-size: 9px;
+  color: var(--text-dim);
+  transform: translateX(-50%);
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+/* Hover tooltip */
+.timeline-tooltip {
+  position: fixed;
+  padding: 4px 8px;
+  background: #222;
+  color: var(--text);
+  font-size: 11px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 100;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Time axis at bottom */
+.timeline-axis {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  border-top: 1px solid var(--border);
+  padding-left: 100px;
+  position: relative;
+  height: 24px;
+  overflow: hidden;
+}
+
+.timeline-axis-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.timeline-axis-label {
+  position: absolute;
+  top: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+  transform: translateX(-50%);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Empty state */
+.timeline-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Summary line */
+.timeline-summary {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.timeline-summary strong {
+  color: var(--text-muted);
+  font-weight: 600;
+}

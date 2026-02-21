@@ -2,6 +2,7 @@ import { Fragment, useState, useMemo, useCallback, useRef, useEffect } from "rea
 import { thumbnailUrl } from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
+import { Timeline } from "./Timeline";
 import "./EventBrowser.css";
 
 interface Props {
@@ -247,6 +248,11 @@ export function EventBrowser({
               First load may take a few minutes if files are on a cloud drive
             </p>
           </div>
+        ) : filter === "RecentClips" ? (
+          <Timeline
+            events={filtered}
+            onSelectEvent={onSelectEvent}
+          />
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
