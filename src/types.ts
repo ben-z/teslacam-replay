@@ -46,6 +46,25 @@ export const ALL_CAMERAS: CameraAngle[] = [
   "right_pillar",
 ];
 
+export interface TelemetryFrame {
+  vehicleSpeedMps: number;
+  steeringWheelAngle: number;
+  gearState: number; // 0=P, 1=D, 2=R, 3=N
+  autopilotState: number; // 0=none, 1=FSD, 2=autosteer, 3=TACC
+  brakeApplied: boolean;
+  blinkerOnLeft: boolean;
+  blinkerOnRight: boolean;
+  latitudeDeg: number;
+  longitudeDeg: number;
+  headingDeg: number;
+}
+
+export interface TelemetryData {
+  hasSei: boolean;
+  frameTimesMs: number[];
+  frames: TelemetryFrame[];
+}
+
 export function formatReason(reason?: string): string {
   if (!reason) return "";
   return reason

@@ -12,6 +12,7 @@ import {
   getThumbnailPath,
   type DashcamEvent,
 } from "./scan.js";
+import { extractTelemetry, type TelemetryData } from "./sei.js";
 
 const TESLACAM_PATH: string = process.env.TESLACAM_PATH ?? "";
 if (!TESLACAM_PATH) {
@@ -145,6 +146,50 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
     });
   } catch {
     return c.json({ error: "Thumbnail not found" }, 404);
+  }
+});
+
+// --- Telemetry (SEI extraction with in-memory cache) ---
+// Must be registered before the video streaming route (which has :camera wildcard)
+const telemetryCache = new Map<string, { hasSei: true; frameTimesMs: number[]; frames: TelemetryData["frames"] } | { hasSei: false }>();
+
+app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
+  const { type, eventId, segment } = c.req.param();
+  if (!validateParams(type, eventId, segment)) {
+    return c.json({ error: "Invalid params" }, 400);
+  }
+
+  const cacheKey = `${type}/${eventId}/${segment}`;
+  const cached = telemetryCache.get(cacheKey);
+  if (cached) return c.json(cached);
+
+  // Find the front camera file (or first available)
+  const events = await getEvents();
+  const event = events.find((e) => e.type === type && e.id === eventId);
+  if (!event) return c.json({ error: "Event not found" }, 404);
+
+  const clip = event.clips.find((cl) => cl.timestamp === segment);
+  if (!clip) return c.json({ error: "Segment not found" }, 404);
+
+  const camera = clip.cameras.includes("front") ? "front" : clip.cameras[0];
+  if (!camera) return c.json({ error: "No camera available" }, 404);
+
+  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera);
+  if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
+
+  try {
+    const data = await extractTelemetry(videoPath);
+    if (data) {
+      const result = { hasSei: true as const, frameTimesMs: data.frameTimesMs, frames: data.frames };
+      telemetryCache.set(cacheKey, result);
+      return c.json(result);
+    } else {
+      const result = { hasSei: false as const };
+      telemetryCache.set(cacheKey, result);
+      return c.json(result);
+    }
+  } catch {
+    return c.json({ hasSei: false });
   }
 });
 

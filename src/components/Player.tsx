@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { videoUrl } from "../api";
-import type { DashcamEvent, CameraAngle } from "../types";
+import { videoUrl, fetchTelemetry } from "../api";
+import type { DashcamEvent, CameraAngle, TelemetryData, TelemetryFrame } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
+import { TelemetryOverlay } from "./TelemetryOverlay";
 import "./Player.css";
 
 interface Props {
@@ -48,6 +49,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [isMuted, setIsMuted] = useState(true);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showTelemetry, setShowTelemetry] = useState(true);
+  const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
+  const [currentTelemFrame, setCurrentTelemFrame] = useState<TelemetryFrame | null>(null);
 
   // Refs for mutable state (avoid stale closures)
   const videoElsRef = useRef<Map<CameraAngle, HTMLVideoElement>>(new Map());
@@ -58,10 +62,12 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const syncIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const segmentOffsetsRef = useRef<number[]>([0]);
+  const telemetryDataRef = useRef<TelemetryData | null>(null);
 
   // Keep refs in sync with state
   playbackRateRef.current = playbackRate;
   displayTimeRef.current = displayTime;
+  telemetryDataRef.current = telemetryData;
 
   // Cumulative start offsets for each segment, plus total duration
   const segmentOffsets = useMemo(() => {
@@ -143,6 +149,20 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         const t = (segmentOffsetsRef.current[segmentIdxRef.current] || 0) + p.currentTime;
         setDisplayTime(t);
         displayTimeRef.current = t;
+
+        // Find current telemetry frame via precomputed timestamps
+        const td = telemetryDataRef.current;
+        if (td && td.frames.length > 0) {
+          const localTimeMs = p.currentTime * 1000;
+          // Binary search for last frame at or before current time
+          let lo = 0, hi = td.frameTimesMs.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (td.frameTimesMs[mid] <= localTimeMs) lo = mid;
+            else hi = mid - 1;
+          }
+          setCurrentTelemFrame(td.frames[lo]);
+        }
       }
       if (isPlayingRef.current) {
         syncAll();
@@ -165,7 +185,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       setVideoErrors(new Set());
       setSegmentLoading(true);
+      telemetryDataRef.current = null;
+      setTelemetryData(null);
+      setCurrentTelemFrame(null);
       clearTimeout(loadTimeoutRef.current);
+
+      // Fetch telemetry in parallel (fire-and-forget, won't block video)
+      fetchTelemetry(event.type, event.id, seg.timestamp).then((data) => {
+        setTelemetryData(data);
+      });
 
       videoElsRef.current.forEach((v, cam) => {
         if (seg.cameras.includes(cam)) {
@@ -327,6 +355,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     setDisplayTime(0);
     displayTimeRef.current = 0;
     setVideoErrors(new Set());
+    setTelemetryData(null);
+    setCurrentTelemFrame(null);
 
     // Load the first segment (ensures canplay + loading state are properly handled)
     loadSegment(0, 0);
@@ -393,6 +423,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           break;
         case "s":
           captureFrame();
+          break;
+        case "t":
+          setShowTelemetry((s) => !s);
           break;
         case "1": case "2": case "3": case "4": case "5": case "6": {
           const idx = parseInt(e.key) - 1;
@@ -586,6 +619,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                 ["F", "Toggle grid / focus layout"],
                 ["M", "Mute / Unmute"],
                 ["S", "Save screenshot"],
+                ["T", "Toggle telemetry HUD"],
                 ["1\u20136", "Switch camera"],
                 ["Esc", "Back to browse"],
               ] as const).map(([key, desc]) => (
@@ -639,6 +673,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
               <span className="player-cam-label">{CAMERA_LABELS[cam]}</span>
               {videoErrors.has(cam) && (
                 <span className="player-video-error">Failed to load</span>
+              )}
+              {showTelemetry && currentTelemFrame && layout === "focus" && cam === effectiveFocusCamera && (
+                <TelemetryOverlay frame={currentTelemFrame} />
               )}
             </div>
           );

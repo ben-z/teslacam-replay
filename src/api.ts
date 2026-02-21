@@ -1,4 +1,4 @@
-import type { DashcamEvent } from "./types";
+import type { DashcamEvent, TelemetryData } from "./types";
 
 const BASE = "/api";
 
@@ -16,6 +16,21 @@ export async function refreshEvents(): Promise<DashcamEvent[]> {
 
 export function thumbnailUrl(type: string, id: string): string {
   return `${BASE}/events/${type}/${id}/thumbnail`;
+}
+
+export async function fetchTelemetry(
+  type: string,
+  eventId: string,
+  segment: string
+): Promise<TelemetryData | null> {
+  try {
+    const res = await fetch(`${BASE}/video/${type}/${eventId}/${segment}/telemetry`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.hasSei ? data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function videoUrl(
