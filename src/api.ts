@@ -33,11 +33,11 @@ export async function fetchTelemetry(
   }
 }
 
-export function videoUrl(
+export function hlsManifestUrl(
   type: string,
   eventId: string,
   segment: string,
   camera: string
 ): string {
-  return `${BASE}/video/${type}/${eventId}/${segment}/${camera}`;
+  return `${BASE}/hls/${type}/${eventId}/${segment}/${camera}/stream.m3u8`;
 }

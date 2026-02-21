@@ -13,6 +13,7 @@ import {
   type DashcamEvent,
 } from "./scan.js";
 import { extractTelemetry, type TelemetryData } from "./sei.js";
+import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 
 const TESLACAM_PATH: string = process.env.TESLACAM_PATH ?? "";
 if (!TESLACAM_PATH) {
@@ -43,16 +44,12 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
     const raw = await readFile(CACHE_FILE, "utf-8");
     const data = JSON.parse(raw);
-    if (
-      !Array.isArray(data) ||
-      (data.length > 0 && !data[0].id) ||
-      (data.length > 0 && data[0].clips?.[0] && !data[0].clips[0].durationSec)
-    ) {
-      console.log("Disk cache invalid or outdated schema, ignoring");
+    if (!data || data.version !== 2 || !Array.isArray(data.events)) {
+      console.log("Disk cache outdated (version mismatch), re-scanning");
       return null;
     }
-    console.log(`Loaded ${data.length} events from disk cache`);
-    return data;
+    console.log(`Loaded ${data.events.length} events from disk cache`);
+    return data.events;
   } catch {
     return null;
   }
@@ -61,7 +58,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify(events));
+    await writeFile(CACHE_FILE, JSON.stringify({ version: 2, events }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);
@@ -193,7 +190,10 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   }
 });
 
-app.get("/api/video/:type/:eventId/:segment/:camera", async (c) => {
+// --- HLS streaming ---
+
+// Manifest route: triggers lazy segmentation, then serves .m3u8
+app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
   const { type, eventId, segment, camera } = c.req.param();
   if (!validateParams(type, eventId, segment, camera)) {
     return c.json({ error: "Invalid params" }, 400);
@@ -201,52 +201,53 @@ app.get("/api/video/:type/:eventId/:segment/:camera", async (c) => {
   const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera);
   if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
 
-  let fileStat;
+  // Verify source file exists
   try {
-    fileStat = await stat(videoPath);
+    await stat(videoPath);
   } catch {
     return c.json({ error: "Video not found" }, 404);
   }
 
-  const fileSize = fileStat.size;
-  const range = c.req.header("range");
-
-  if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-    if (
-      isNaN(start) ||
-      start < 0 ||
-      start >= fileSize ||
-      end >= fileSize ||
-      end < start
-    ) {
-      return new Response(null, {
-        status: 416,
-        headers: { "Content-Range": `bytes */${fileSize}` },
-      });
-    }
-    const chunkSize = end - start + 1;
-    const stream = createReadStream(videoPath, { start, end });
-    return new Response(Readable.toWeb(stream) as ReadableStream, {
-      status: 206,
-      headers: {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Accept-Ranges": "bytes",
-        "Content-Length": String(chunkSize),
-        "Content-Type": "video/mp4",
-        "Cache-Control": "public, max-age=86400",
-      },
-    });
+  // Ensure HLS segments are ready (lazy segmentation)
+  const ready = await ensureHlsSegments(videoPath, type, eventId, segment, camera);
+  if (!ready) {
+    return c.json({ error: "Failed to process video" }, 500);
   }
 
-  const stream = createReadStream(videoPath);
+  const manifestFile = hlsManifestPath(type, eventId, segment, camera);
+  const stream = createReadStream(manifestFile);
   return new Response(Readable.toWeb(stream) as ReadableStream, {
     headers: {
-      "Content-Length": String(fileSize),
-      "Content-Type": "video/mp4",
-      "Accept-Ranges": "bytes",
+      "Content-Type": "application/vnd.apple.mpegurl",
+      "Cache-Control": "public, max-age=86400",
+    },
+  });
+});
+
+// Chunk route: serves .ts segment files from cache
+app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
+  const { type, eventId, segment, camera, chunk } = c.req.param();
+  if (!validateParams(type, eventId, segment, camera) || !/^chunk_\d{3}\.ts$/.test(chunk)) {
+    return c.json({ error: "Invalid params" }, 400);
+  }
+
+  const chunkPath = path.join(
+    hlsCacheDir(type, eventId, segment, camera),
+    chunk
+  );
+
+  let fileStat;
+  try {
+    fileStat = await stat(chunkPath);
+  } catch {
+    return c.json({ error: "Chunk not found" }, 404);
+  }
+
+  const stream = createReadStream(chunkPath);
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    headers: {
+      "Content-Length": String(fileStat.size),
+      "Content-Type": "video/mp2t",
       "Cache-Control": "public, max-age=86400",
     },
   });

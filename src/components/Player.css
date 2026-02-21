@@ -302,6 +302,27 @@
   color: #fff;
   border-radius: 4px;
   font-size: 11px;
+}
+
+.player-video-retry {
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  pointer-events: auto;
+}
+.player-video-retry:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.player-video-buffering {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
   pointer-events: none;
 }
 

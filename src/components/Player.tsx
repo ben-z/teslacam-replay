@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { videoUrl, fetchTelemetry } from "../api";
+import Hls from "hls.js";
+import { hlsManifestUrl, fetchTelemetry } from "../api";
 import type { DashcamEvent, CameraAngle, TelemetryData, TelemetryFrame } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
 import { TelemetryOverlay } from "./TelemetryOverlay";
@@ -45,6 +46,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [segmentIdx, setSegmentIdx] = useState(0);
 
   const [videoErrors, setVideoErrors] = useState<Set<CameraAngle>>(new Set());
+  const [bufferingCameras, setBufferingCameras] = useState<Set<CameraAngle>>(new Set());
   const [segmentLoading, setSegmentLoading] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
@@ -56,6 +58,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
   // Refs for mutable state (avoid stale closures)
   const videoElsRef = useRef<Map<CameraAngle, HTMLVideoElement>>(new Map());
+  const hlsInstancesRef = useRef<Map<CameraAngle, Hls>>(new Map());
   const isPlayingRef = useRef(false);
   const segmentIdxRef = useRef(0);
   const playbackRateRef = useRef(1);
@@ -64,11 +67,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const segmentOffsetsRef = useRef<number[]>([0]);
   const telemetryDataRef = useRef<TelemetryData | null>(null);
+  const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
 
   // Keep refs in sync with state
   playbackRateRef.current = playbackRate;
   displayTimeRef.current = displayTime;
   telemetryDataRef.current = telemetryData;
+  bufferingCamerasRef.current = bufferingCameras;
 
   // Cumulative start offsets for each segment, plus total duration
   const segmentOffsets = useMemo(() => {
@@ -127,18 +132,119 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     []
   );
 
-  // Sync secondary videos to primary (skip sourceless elements)
-  const syncAll = useCallback(() => {
+  // --- HLS helpers ---
+
+  const handleVideoError = useCallback((cam: CameraAngle) => {
+    setVideoErrors((prev) => new Set(prev).add(cam));
+  }, []);
+
+  const attachHls = useCallback((cam: CameraAngle, url: string) => {
+    const video = videoElsRef.current.get(cam);
+    if (!video) return;
+
+    // Destroy previous instance for this camera
+    const prev = hlsInstancesRef.current.get(cam);
+    if (prev) { prev.destroy(); hlsInstancesRef.current.delete(cam); }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        maxBufferLength: 10,
+        maxMaxBufferLength: 30,
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          console.warn(`HLS fatal error [${cam}]:`, data.type, data.details);
+          handleVideoError(cam);
+        }
+      });
+      hlsInstancesRef.current.set(cam, hls);
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Safari native HLS
+      video.src = url;
+      video.load();
+    }
+  }, [handleVideoError]);
+
+  const detachHls = useCallback((cam: CameraAngle) => {
+    const hls = hlsInstancesRef.current.get(cam);
+    if (hls) { hls.destroy(); hlsInstancesRef.current.delete(cam); }
+    const video = videoElsRef.current.get(cam);
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }, []);
+
+  // --- Stall detection ---
+
+  const handleWaiting = useCallback((cam: CameraAngle) => {
+    setBufferingCameras((prev) => new Set(prev).add(cam));
+  }, []);
+
+  const handlePlaying = useCallback((cam: CameraAngle) => {
+    setBufferingCameras((prev) => {
+      const next = new Set(prev);
+      next.delete(cam);
+      return next;
+    });
+  }, []);
+
+  // --- Retry ---
+
+  const retryCamera = useCallback((cam: CameraAngle) => {
+    const seg = event.clips[segmentIdxRef.current];
+    if (!seg || !seg.cameras.includes(cam)) return;
+
+    setVideoErrors((prev) => {
+      const next = new Set(prev);
+      next.delete(cam);
+      return next;
+    });
+
+    attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
+
     const pCam = getPrimaryCamera();
     const p = videoElsRef.current.get(pCam);
-    if (!p || !p.currentSrc) return;
-    videoElsRef.current.forEach((v) => {
-      if (v === p || !v.currentSrc) return;
-      if (Math.abs(v.currentTime - p.currentTime) > SYNC_THRESHOLD) {
-        v.currentTime = p.currentTime;
+    const v = videoElsRef.current.get(cam);
+    if (p?.currentSrc && v) {
+      v.currentTime = p.currentTime;
+    }
+    if (v) {
+      v.playbackRate = playbackRateRef.current;
+      if (isPlayingRef.current) v.play().catch(() => {});
+    }
+  }, [event.clips, event.type, event.id, getPrimaryCamera, attachHls]);
+
+  // --- Resilient sync ---
+
+  const syncAll = useCallback(() => {
+    const buffering = bufferingCamerasRef.current;
+    const pCam = getPrimaryCamera();
+    let ref = videoElsRef.current.get(pCam);
+
+    // If primary is buffering, find the first healthy camera as sync reference
+    if (ref && buffering.has(pCam)) {
+      for (const cam of activeCameras) {
+        if (cam === pCam || buffering.has(cam)) continue;
+        const v = videoElsRef.current.get(cam);
+        if (v?.currentSrc) { ref = v; break; }
+      }
+    }
+
+    if (!ref || !ref.currentSrc) return;
+
+    videoElsRef.current.forEach((v, cam) => {
+      if (v === ref || !v.currentSrc) return;
+      // Don't force-sync a buffering camera — it'll catch up when it resumes
+      if (buffering.has(cam)) return;
+      if (Math.abs(v.currentTime - ref!.currentTime) > SYNC_THRESHOLD) {
+        v.currentTime = ref!.currentTime;
       }
     });
-  }, [getPrimaryCamera]);
+  }, [getPrimaryCamera, activeCameras]);
 
   // Periodic time + sync update + segment-end detection
   const advanceSegmentRef = useRef<() => void>(() => {});
@@ -174,10 +280,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     return () => clearInterval(syncIntervalRef.current);
   }, [syncAll, getPrimaryCamera]);
 
-  const handleVideoError = useCallback((cam: CameraAngle) => {
-    setVideoErrors((prev) => new Set(prev).add(cam));
-  }, []);
-
   // Load a segment into all video elements
   const loadSegment = useCallback(
     (idx: number, seekTime = 0) => {
@@ -185,6 +287,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       if (!seg) return;
 
       setVideoErrors(new Set());
+      setBufferingCameras(new Set());
       setSegmentLoading(true);
       setTelemetryData(null);
       setCurrentTelemFrame(null);
@@ -197,17 +300,14 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         setTelemetryLoading(false);
       });
 
-      videoElsRef.current.forEach((v, cam) => {
+      // Attach HLS to available cameras, detach unavailable ones
+      for (const cam of allEventCameras) {
         if (seg.cameras.includes(cam)) {
-          v.src = videoUrl(event.type, event.id, seg.timestamp, cam);
-          v.load();
+          attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
         } else {
-          // Camera not in this segment - clear it
-          v.pause();
-          v.removeAttribute("src");
-          v.load();
+          detachHls(cam);
         }
-      });
+      }
 
       // Resume on primary ready (guard against race: check readyState after attaching)
       const pCam = seg.cameras.includes("front")
@@ -233,10 +333,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           onReady();
         }
         // Safety timeout: clear loading state if canplay never fires
-        loadTimeoutRef.current = setTimeout(() => setSegmentLoading(false), 10000);
+        loadTimeoutRef.current = setTimeout(() => {
+          p.removeEventListener("canplay", onReady);
+          setSegmentLoading(false);
+        }, 10000);
       }
     },
-    [event.clips, event.type, event.id]
+    [event.clips, event.type, event.id, allEventCameras, attachHls, detachHls]
   );
 
   // Advance to next segment
@@ -357,6 +460,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     setDisplayTime(0);
     displayTimeRef.current = 0;
     setVideoErrors(new Set());
+    setBufferingCameras(new Set());
     setTelemetryData(null);
     setCurrentTelemFrame(null);
 
@@ -368,6 +472,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   useEffect(() => {
     return () => {
       clearTimeout(loadTimeoutRef.current);
+      hlsInstancesRef.current.forEach((hls) => hls.destroy());
+      hlsInstancesRef.current.clear();
       videoElsRef.current.forEach((v) => {
         v.pause();
         v.removeAttribute("src");
@@ -666,16 +772,25 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                 ref={(el) => setRef(cam, el)}
                 muted={cam === "front" ? isMuted : true}
                 playsInline
-                preload="metadata"
                 aria-label={`${CAMERA_LABELS[cam]} camera`}
                 onError={(e) => {
                   // Only report error if video has media loaded (ignore errors from clearing src)
                   if ((e.target as HTMLVideoElement).currentSrc) handleVideoError(cam);
                 }}
+                onWaiting={() => handleWaiting(cam)}
+                onPlaying={() => handlePlaying(cam)}
               />
               <span className="player-cam-label">{CAMERA_LABELS[cam]}</span>
+              {bufferingCameras.has(cam) && !videoErrors.has(cam) && (
+                <span className="player-video-buffering">Buffering...</span>
+              )}
               {videoErrors.has(cam) && (
-                <span className="player-video-error">Failed to load</span>
+                <button
+                  className="player-video-error player-video-retry"
+                  onClick={(e) => { e.stopPropagation(); retryCamera(cam); }}
+                >
+                  Failed to load &middot; Retry
+                </button>
               )}
               {showOverlay && <TelemetryOverlay frame={currentTelemFrame} />}
               {showTelemLoading && <div className="telem-loading">Loading telemetry...</div>}
