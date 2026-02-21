@@ -110,7 +110,13 @@ export function Timeline({ events }: Props) {
         dateStr,
         weekday: d.toLocaleDateString("en-US", { weekday: "short" }),
         dateLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-        sessions: sessions.sort((a, b) => a.startHour - b.startHour),
+        // Sort: RecentClips first (base layer), then Sentry/Saved on top; within same type, by time
+        sessions: sessions.sort((a, b) => {
+          const aEvent = a.event.type === "RecentClips" ? 0 : 1;
+          const bEvent = b.event.type === "RecentClips" ? 0 : 1;
+          if (aEvent !== bEvent) return aEvent - bEvent;
+          return a.startHour - b.startHour;
+        }),
       };
     });
   }, [events]);
@@ -144,15 +150,27 @@ export function Timeline({ events }: Props) {
       return;
     }
 
-    const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
+    // Prefer Sentry/Saved hits over Recent when overlapping
+    const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour && s.event.type !== "RecentClips")
+      || day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
     const timeStr = formatTimeDetailed(hour);
+    const typeLabel = session?.event.type === "SentryClips" ? " sentry"
+      : session?.event.type === "SavedClips" ? " saved" : "";
     const text = session
-      ? `${timeStr} — ${formatDurationShort(session.durationMin)} session`
+      ? `${timeStr} — ${formatDurationShort(session.durationMin)}${typeLabel} session`
       : timeStr;
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
-  const totalMinutes = Math.round(events.reduce((s, e) => s + e.totalDurationSec, 0) / 60);
+  const { recentCount, eventCount, totalMinutes } = useMemo(() => {
+    let recent = 0, ev = 0, sec = 0;
+    for (const e of events) {
+      if (e.type === "RecentClips") recent++;
+      else ev++;
+      sec += e.totalDurationSec;
+    }
+    return { recentCount: recent, eventCount: ev, totalMinutes: Math.round(sec / 60) };
+  }, [events]);
 
   if (days.length === 0) {
     return (
@@ -182,10 +200,18 @@ export function Timeline({ events }: Props) {
       <div className="timeline-overview">
         <div className="timeline-toolbar">
           <div className="timeline-summary">
-            <strong>{events.length}</strong> session{events.length !== 1 ? "s" : ""} across{" "}
-            <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
+            <strong>{recentCount}</strong> session{recentCount !== 1 ? "s" : ""}
+            {eventCount > 0 && <>, <strong>{eventCount}</strong> event{eventCount !== 1 ? "s" : ""}</>}
+            {" "}across <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
             &middot; {formatDurationShort(totalMinutes)} total
           </div>
+          {eventCount > 0 && (
+            <div className="timeline-legend">
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
+            </div>
+          )}
         </div>
 
         <div className="timeline-scroll">
@@ -205,13 +231,15 @@ export function Timeline({ events }: Props) {
                     {day.sessions.map((session, i) => {
                       const left = (session.startHour / 24) * 100;
                       const width = Math.max(((session.endHour - session.startHour) / 24) * 100, 0.3);
+                      const typeClass = session.event.type === "SentryClips" ? "sentry"
+                        : session.event.type === "SavedClips" ? "saved" : "recent";
                       return (
                         <div
                           key={i}
-                          className={`timeline-segment ${isSelected(session.event) ? "active" : ""}`}
+                          className={`timeline-segment timeline-segment--${typeClass} ${isSelected(session.event) ? "active" : ""}`}
                           style={{ left: `${left}%`, width: `${width}%` }}
                           onClick={() => handleSessionClick(session)}
-                          title={`${formatTimeDetailed(session.startHour)} — ${formatDurationShort(session.durationMin)}`}
+                          title={`${formatTimeDetailed(session.startHour)} — ${formatDurationShort(session.durationMin)}${typeClass !== "recent" ? ` (${typeClass})` : ""}`}
                         />
                       );
                     })}
