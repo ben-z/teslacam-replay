@@ -49,8 +49,7 @@ function formatTimeDetailed(h: number): string {
   const hr = Math.floor(totalMin / 60) % 24;
   const min = totalMin % 60;
   const ampm = hr < 12 ? "AM" : "PM";
-  let hr12 = hr % 12;
-  if (hr12 === 0) hr12 = 12;
+  const hr12 = hr % 12 || 12;
   return `${hr12}:${String(min).padStart(2, "0")} ${ampm}`;
 }
 
@@ -68,10 +67,10 @@ export function Timeline({ events }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
 
-  // Flat ordered list of all sessions for prev/next navigation
-  const sessionList = useMemo(() => {
-    return [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }, [events]);
+  const sessionList = useMemo(
+    () => [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    [events],
+  );
 
   const selectedIdx = useMemo(() => {
     if (!selectedEvent) return -1;
@@ -118,7 +117,6 @@ export function Timeline({ events }: Props) {
 
   const handleSessionClick = useCallback((session: SessionBlock) => {
     setSelectedEvent(session.event);
-    // Scroll to player
     requestAnimationFrame(() => {
       playerWrapperRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -139,11 +137,12 @@ export function Timeline({ events }: Props) {
   );
 
   const handleBarMouseMove = useCallback((e: React.MouseEvent, day: DayData) => {
-    const bar = e.currentTarget as HTMLElement;
-    const rect = bar.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const hour = (x / rect.width) * 24;
-    if (hour < 0 || hour > 24) return setTooltip(null);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const hour = ((e.clientX - rect.left) / rect.width) * 24;
+    if (hour < 0 || hour > 24) {
+      setTooltip(null);
+      return;
+    }
 
     const session = day.sessions.find((s) => hour >= s.startHour && hour <= s.endHour);
     const timeStr = formatTimeDetailed(hour);
@@ -168,7 +167,6 @@ export function Timeline({ events }: Props) {
 
   return (
     <div className="timeline">
-      {/* Inline Player */}
       {selectedEvent && (
         <div className="timeline-player-wrapper" ref={playerWrapperRef}>
           <Player
@@ -181,7 +179,6 @@ export function Timeline({ events }: Props) {
         </div>
       )}
 
-      {/* Aggregate Overview */}
       <div className="timeline-overview">
         <div className="timeline-toolbar">
           <div className="timeline-summary">
@@ -234,7 +231,7 @@ export function Timeline({ events }: Props) {
 
         <div className="timeline-axis">
           <div className="timeline-axis-inner">
-            {HOUR_TICKS.filter((h) => h % 3 === 0).map((h) => (
+            {HOUR_TICKS.map((h) => (
               <span
                 key={h}
                 className="timeline-axis-label"
