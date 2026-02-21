@@ -48,6 +48,7 @@ export const ALL_CAMERAS: CameraAngle[] = [
 
 export interface TelemetryFrame {
   vehicleSpeedMps: number;
+  acceleratorPedalPosition: number; // 0..1
   steeringWheelAngle: number;
   gearState: number; // 0=P, 1=D, 2=R, 3=N
   autopilotState: number; // 0=none, 1=FSD, 2=autosteer, 3=TACC

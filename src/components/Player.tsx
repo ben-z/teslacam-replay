@@ -37,7 +37,7 @@ const GRID_POS = [
 ];
 
 export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
-  const [layout, setLayout] = useState<Layout>("focus");
+  const [layout, setLayout] = useState<Layout>("grid");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
   const [displayTime, setDisplayTime] = useState(0);
@@ -674,8 +674,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
               {videoErrors.has(cam) && (
                 <span className="player-video-error">Failed to load</span>
               )}
-              {showTelemetry && currentTelemFrame && layout === "focus" && cam === effectiveFocusCamera && (
-                <TelemetryOverlay frame={currentTelemFrame} />
+              {showTelemetry && currentTelemFrame && (
+                (layout === "focus" && cam === effectiveFocusCamera) ||
+                (layout === "grid" && cam === "front")
+              ) && (
+                <TelemetryOverlay frame={currentTelemFrame} compact={layout === "grid"} />
               )}
             </div>
           );

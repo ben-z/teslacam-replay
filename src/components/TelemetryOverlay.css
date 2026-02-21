@@ -89,16 +89,6 @@
   51%, 100% { opacity: 0.15; }
 }
 
-.telem-brake {
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 2px;
-  background: rgba(244, 67, 54, 0.5);
-  color: #ef9a9a;
-  letter-spacing: 0.05em;
-}
-
 .telem-ap {
   font-size: 9px;
   font-weight: 700;
@@ -107,6 +97,61 @@
   background: rgba(33, 150, 243, 0.4);
   color: #90caf9;
   letter-spacing: 0.03em;
+}
+
+/* Pedal bars */
+.telem-pedals {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.telem-pedal {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.telem-pedal-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+  width: 24px;
+  letter-spacing: 0.05em;
+}
+
+.telem-pedal-track {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 48px;
+}
+
+.telem-pedal-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.15s ease;
+}
+
+.telem-pedal-thr {
+  background: #4caf50;
+}
+
+.telem-pedal-brk {
+  background: rgba(244, 67, 54, 0.3);
+}
+
+.telem-pedal-brk.active {
+  background: #f44336;
+}
+
+.telem-pedal-val {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.5);
+  width: 24px;
+  text-align: right;
 }
 
 /* Steering */
@@ -130,6 +175,36 @@
   font-size: 9px;
   color: rgba(255, 255, 255, 0.35);
   letter-spacing: 0.02em;
+}
+
+/* Compact mode (grid layout) */
+.telem-compact {
+  padding: 4px 8px;
+  gap: 1px;
+  min-width: 60px;
+}
+.telem-compact .telem-speed {
+  font-size: 18px;
+}
+.telem-compact .telem-gear {
+  font-size: 9px;
+  padding: 0 3px;
+}
+.telem-compact .telem-unit {
+  font-size: 9px;
+}
+.telem-compact .telem-indicators {
+  gap: 4px;
+  min-height: 12px;
+}
+.telem-compact .telem-ap,
+.telem-compact .telem-pedal-label,
+.telem-compact .telem-pedal-val {
+  font-size: 8px;
+}
+.telem-compact .telem-pedal-track {
+  min-width: 32px;
+  height: 3px;
 }
 
 /* Mobile: slightly smaller */

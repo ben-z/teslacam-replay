@@ -5,6 +5,7 @@ import protobuf from "protobufjs";
 export interface SeiFrame {
   frameSeqNo: number;
   vehicleSpeedMps: number;
+  acceleratorPedalPosition: number; // 0..1
   steeringWheelAngle: number;
   gearState: number; // 0=P, 1=D, 2=R, 3=N
   autopilotState: number; // 0=none, 1=FSD, 2=autosteer, 3=TACC
@@ -182,6 +183,7 @@ class Mp4Parser {
       return {
         frameSeqNo: Number((msg.frameSeqNo as number | bigint) || 0),
         vehicleSpeedMps: (msg.vehicleSpeedMps as number) || 0,
+        acceleratorPedalPosition: (msg.acceleratorPedalPosition as number) || 0,
         steeringWheelAngle: (msg.steeringWheelAngle as number) || 0,
         gearState: (msg.gearState as number) || 0,
         autopilotState: (msg.autopilotState as number) || 0,
