@@ -890,6 +890,21 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           )}
         </button>
 
+        {triggerTimeGlobal != null && (
+          <button
+            onClick={() => seekTo(triggerTimeGlobal)}
+            className="player-trigger-btn"
+            title="Jump to event trigger"
+            aria-label="Jump to event trigger"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L1 21h22L12 2zm0 4l7.5 13h-15L12 6z"/>
+              <rect x="11" y="10" width="2" height="4"/>
+              <rect x="11" y="16" width="2" height="2"/>
+            </svg>
+          </button>
+        )}
+
         <span className="player-time">
           {formatTime(displayTime)} / {formatTime(totalDuration)}
         </span>

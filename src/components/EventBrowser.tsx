@@ -13,7 +13,8 @@ interface Props {
   onRefresh: () => void;
 }
 
-type FilterType = "all" | "SavedClips" | "SentryClips" | "RecentClips";
+type FilterType = "all" | "SavedClips" | "SentryClips";
+type ViewType = "events" | "recent";
 type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 48;
@@ -73,6 +74,7 @@ export function EventBrowser({
   onSelectEvent,
   onRefresh,
 }: Props) {
+  const [view, setView] = useState<ViewType>("events");
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -90,11 +92,11 @@ export function EventBrowser({
   }, [searchInput]);
 
   const filtered = useMemo(() => {
-    let result = events;
-    if (filter === "all") {
-      // "All" shows only Saved + Sentry, not Recent (which has its own timeline)
-      result = result.filter((e) => e.type !== "RecentClips");
-    } else {
+    if (view === "recent") {
+      return events.filter((e) => e.type === "RecentClips");
+    }
+    let result = events.filter((e) => e.type !== "RecentClips");
+    if (filter !== "all") {
       result = result.filter((e) => e.type === filter);
     }
     if (search.trim()) {
@@ -110,10 +112,10 @@ export function EventBrowser({
       result = [...result].reverse();
     }
     return result;
-  }, [events, filter, search, sortOrder]);
+  }, [events, view, filter, search, sortOrder]);
 
-  // Reset pagination when filter/search changes
   const setFilterAndReset = useCallback((f: FilterType) => {
+    setView("events");
     setFilter(f);
     setVisibleCount(PAGE_SIZE);
     document.querySelector(".browse-content")?.scrollTo(0, 0);
@@ -177,54 +179,75 @@ export function EventBrowser({
         </div>
 
         <div className="browse-filters">
-          <div className="browse-filter-group" role="group" aria-label="Filter by type">
-            {(
-              [
-                ["all", `All (${counts.total})`],
-                ["SavedClips", `Saved (${counts.saved})`],
-                ["SentryClips", `Sentry (${counts.sentry})`],
-                ...(counts.recent > 0 ? [["RecentClips", `Recent (${counts.recent})`]] : []),
-              ] as [FilterType, string][]
-            ).map(([value, label]) => (
+          <div className="browse-view-toggle" role="group" aria-label="View">
+            <button
+              onClick={() => { setView("events"); setVisibleCount(PAGE_SIZE); }}
+              className={`browse-view-btn ${view === "events" ? "active" : ""}`}
+              aria-pressed={view === "events"}
+            >
+              Events ({counts.total})
+            </button>
+            {counts.recent > 0 && (
               <button
-                key={value}
-                onClick={() => setFilterAndReset(value)}
-                className={`browse-filter-btn ${filter === value ? "active" : ""}`}
-                aria-pressed={filter === value}
+                onClick={() => setView("recent")}
+                className={`browse-view-btn ${view === "recent" ? "active" : ""}`}
+                aria-pressed={view === "recent"}
               >
-                {label}
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => {
-              setSortOrder((s) => (s === "newest" ? "oldest" : "newest"));
-              setVisibleCount(PAGE_SIZE);
-            }}
-            className="browse-sort-btn"
-            title={`Sort by ${sortOrder === "newest" ? "oldest" : "newest"} first`}
-          >
-            {sortOrder === "newest" ? "Newest" : "Oldest"} &darr;
-          </button>
-          <div className="browse-search-wrapper">
-            <input
-              type="text"
-              placeholder="Search by city, date, reason..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="browse-search"
-              aria-label="Search events"
-            />
-            {searchInput && (
-              <button
-                onClick={() => setSearchInput("")}
-                className="browse-search-clear"
-                aria-label="Clear search"
-              >
-                &times;
+                Recent ({counts.recent})
               </button>
             )}
           </div>
+          {view === "events" && (
+            <>
+              <div className="browse-filter-group" role="group" aria-label="Filter by type">
+                {(
+                  [
+                    ["all", "All"],
+                    ["SavedClips", `Saved (${counts.saved})`],
+                    ["SentryClips", `Sentry (${counts.sentry})`],
+                  ] as [FilterType, string][]
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    onClick={() => setFilterAndReset(value)}
+                    className={`browse-filter-btn ${filter === value ? "active" : ""}`}
+                    aria-pressed={filter === value}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  setSortOrder((s) => (s === "newest" ? "oldest" : "newest"));
+                  setVisibleCount(PAGE_SIZE);
+                }}
+                className="browse-sort-btn"
+                title={`Sort by ${sortOrder === "newest" ? "oldest" : "newest"} first`}
+              >
+                {sortOrder === "newest" ? "Newest" : "Oldest"} &darr;
+              </button>
+              <div className="browse-search-wrapper">
+                <input
+                  type="text"
+                  placeholder="Search by city, date, reason..."
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  className="browse-search"
+                  aria-label="Search events"
+                />
+                {searchInput && (
+                  <button
+                    onClick={() => setSearchInput("")}
+                    className="browse-search-clear"
+                    aria-label="Clear search"
+                  >
+                    &times;
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </header>
 
@@ -239,7 +262,7 @@ export function EventBrowser({
               First load may take a few minutes if files are on a cloud drive
             </p>
           </div>
-        ) : filter === "RecentClips" ? (
+        ) : view === "recent" ? (
           <Timeline events={filtered} />
         ) : filtered.length === 0 ? (
           <div className="browse-empty">

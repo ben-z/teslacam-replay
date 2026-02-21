@@ -64,6 +64,33 @@
   flex-wrap: wrap;
 }
 
+.browse-view-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-surface);
+  border-radius: var(--radius);
+  padding: 2px;
+}
+
+.browse-view-btn {
+  padding: 5px 14px;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.browse-view-btn.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 4px var(--accent-glow);
+}
+.browse-view-btn:hover:not(.active) {
+  color: var(--text);
+}
+
 .browse-filter-group {
   display: flex;
   gap: 2px;

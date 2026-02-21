@@ -354,6 +354,25 @@
   background: var(--bg-surface);
 }
 
+.player-trigger-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--sentry-color);
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  opacity: 0.8;
+}
+.player-trigger-btn:hover {
+  opacity: 1;
+  background: var(--bg-surface);
+}
+
 .player-time {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
