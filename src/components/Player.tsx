@@ -50,6 +50,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(true);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
   const [currentTelemFrame, setCurrentTelemFrame] = useState<TelemetryFrame | null>(null);
 
@@ -187,11 +188,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       setSegmentLoading(true);
       setTelemetryData(null);
       setCurrentTelemFrame(null);
+      setTelemetryLoading(true);
       clearTimeout(loadTimeoutRef.current);
 
       // Fetch telemetry in parallel (fire-and-forget, won't block video)
       fetchTelemetry(event.type, event.id, seg.timestamp).then((data) => {
         setTelemetryData(data);
+        setTelemetryLoading(false);
       });
 
       videoElsRef.current.forEach((v, cam) => {
@@ -638,10 +641,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           const isActive = activeCameras.includes(cam);
           const activeIdx = activeCameras.indexOf(cam);
           const isFocused = cam === effectiveFocusCamera && layout === "focus";
-          const showOverlay = showTelemetry && currentTelemFrame && (
-            (layout === "focus" && cam === effectiveFocusCamera) ||
-            (layout === "grid" && cam === "front")
-          );
+          const isOverlayCam = (layout === "focus" && cam === effectiveFocusCamera) ||
+            (layout === "grid" && cam === "front");
+          const showOverlay = showTelemetry && currentTelemFrame && isOverlayCam;
+          const showTelemLoading = showTelemetry && telemetryLoading && !currentTelemFrame && isOverlayCam;
           return (
             <div
               key={cam}
@@ -675,6 +678,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                 <span className="player-video-error">Failed to load</span>
               )}
               {showOverlay && <TelemetryOverlay frame={currentTelemFrame} />}
+              {showTelemLoading && <div className="telem-loading">Loading telemetry...</div>}
             </div>
           );
         })}
