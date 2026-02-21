@@ -72,12 +72,14 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const segmentOffsetsRef = useRef<number[]>([0]);
   const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
+  const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
 
   // Keep refs in sync with state
   playbackRateRef.current = playbackRate;
   displayTimeRef.current = displayTime;
   telemetryDataRef.current = telemetryData;
   bufferingCamerasRef.current = bufferingCameras;
+  videoErrorsRef.current = videoErrors;
 
   // Cumulative start offsets for each segment, plus total duration
   const segmentOffsets = useMemo(() => {
@@ -139,6 +141,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       : [],
     [allEventCameras, segment]
   );
+  const activeCamerasRef = useRef<CameraAngle[]>([]);
+  activeCamerasRef.current = activeCameras;
 
   // Guard: if focusCamera is not in active set, fall back to front or first available
   let effectiveFocusCamera = focusCamera;
@@ -242,29 +246,33 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
     attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
 
-    const pCam = getPrimaryCamera();
-    const p = videoElsRef.current.get(pCam);
+    // Sync to any healthy camera's current time
     const v = videoElsRef.current.get(cam);
-    if (p?.currentSrc && v) {
-      v.currentTime = p.currentTime;
-    }
     if (v) {
+      for (const [otherCam, otherV] of videoElsRef.current) {
+        if (otherCam !== cam && otherV.currentSrc && isFinite(otherV.currentTime)) {
+          v.currentTime = otherV.currentTime;
+          break;
+        }
+      }
       v.playbackRate = playbackRateRef.current;
       if (isPlayingRef.current) v.play().catch(() => {});
     }
-  }, [event.clips, event.type, event.id, getPrimaryCamera, attachHls]);
+  }, [event.clips, event.type, event.id, attachHls]);
 
   // --- Resilient sync ---
 
   const syncAll = useCallback(() => {
     const buffering = bufferingCamerasRef.current;
+    const errors = videoErrorsRef.current;
     const pCam = getPrimaryCamera();
     let ref = videoElsRef.current.get(pCam);
 
-    // If primary is buffering, find the first healthy camera as sync reference
-    if (ref && buffering.has(pCam)) {
+    // If primary is unavailable, find the first healthy camera as sync reference
+    if (!ref?.currentSrc || buffering.has(pCam) || errors.has(pCam)) {
+      ref = undefined;
       for (const cam of activeCameras) {
-        if (cam === pCam || buffering.has(cam)) continue;
+        if (buffering.has(cam) || errors.has(cam)) continue;
         const v = videoElsRef.current.get(cam);
         if (v?.currentSrc) { ref = v; break; }
       }
@@ -274,8 +282,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
     videoElsRef.current.forEach((v, cam) => {
       if (v === ref || !v.currentSrc) return;
-      // Don't force-sync a buffering camera — it'll catch up when it resumes
-      if (buffering.has(cam)) return;
+      if (buffering.has(cam) || errors.has(cam)) return;
       if (Math.abs(v.currentTime - ref!.currentTime) > SYNC_THRESHOLD) {
         v.currentTime = ref!.currentTime;
       }
@@ -289,17 +296,32 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       // Skip time updates while loading a new segment (video currentTime is stale)
       if (segmentLoadingRef.current) return;
 
+      // Find reference camera: prefer primary, fall back to any healthy active camera
+      const errors = videoErrorsRef.current;
+      const active = activeCamerasRef.current;
       const pCam = getPrimaryCamera();
-      const p = videoElsRef.current.get(pCam);
-      if (p && isFinite(p.currentTime)) {
-        const t = (segmentOffsetsRef.current[segmentIdxRef.current] || 0) + p.currentTime;
+      let ref = videoElsRef.current.get(pCam);
+      if (!ref?.currentSrc || errors.has(pCam) || !isFinite(ref.currentTime)) {
+        ref = undefined;
+        for (const cam of active) {
+          if (errors.has(cam)) continue;
+          const v = videoElsRef.current.get(cam);
+          if (v?.currentSrc && isFinite(v.currentTime)) {
+            ref = v;
+            break;
+          }
+        }
+      }
+
+      if (ref && isFinite(ref.currentTime)) {
+        const t = (segmentOffsetsRef.current[segmentIdxRef.current] || 0) + ref.currentTime;
         setDisplayTime(t);
         displayTimeRef.current = t;
 
         // Find current telemetry frame via precomputed timestamps
         const td = telemetryDataRef.current;
         if (td && td.frames.length > 0) {
-          const localTimeMs = p.currentTime * 1000;
+          const localTimeMs = ref.currentTime * 1000;
           // Binary search for last frame at or before current time
           let lo = 0, hi = td.frameTimesMs.length - 1;
           while (lo < hi) {
@@ -312,8 +334,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       }
       if (isPlayingRef.current) {
         syncAll();
-        // Auto-advance if primary video ended
-        if (p?.ended) advanceSegmentRef.current();
+        // Auto-advance: only check cameras in the current segment
+        for (const cam of active) {
+          if (errors.has(cam)) continue;
+          const v = videoElsRef.current.get(cam);
+          if (v?.currentSrc && v.ended) {
+            advanceSegmentRef.current();
+            break;
+          }
+        }
       }
     }, SYNC_INTERVAL);
     return () => clearInterval(syncIntervalRef.current);
@@ -349,54 +378,64 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         setTelemetryLoading(false);
       });
 
-      // Attach HLS to available cameras, detach unavailable ones
+      // Attach HLS to available cameras; keep last frame for unavailable ones
       for (const cam of allEventCameras) {
         if (seg.cameras.includes(cam)) {
           attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
         } else {
-          detachHls(cam);
+          // Keep last frame visible — just stop loading (prevents layout shift)
+          const hls = hlsInstancesRef.current.get(cam);
+          if (hls) hls.stopLoad();
+          const video = videoElsRef.current.get(cam);
+          if (video) video.pause();
         }
       }
 
-      // Resume on primary ready (guard against race: check readyState after attaching)
-      const pCam = seg.cameras.includes("front")
-        ? "front"
-        : (seg.cameras[0] as CameraAngle);
-      const p = videoElsRef.current.get(pCam);
-      if (p) {
-        const segCameras = seg.cameras;
-        const onReady = () => {
+      // Wait for ANY camera to be ready (resilient to individual camera failures)
+      const segCameras = seg.cameras;
+      let readyFired = false;
+      const cleanups: (() => void)[] = [];
+
+      const onReady = () => {
+        if (readyFired) return;
+        readyFired = true;
+        cleanups.forEach(fn => fn());
+        canplayCleanupRef.current = null;
+        clearTimeout(loadTimeoutRef.current);
+        setSegmentLoading(false);
+        segmentLoadingRef.current = false;
+        videoElsRef.current.forEach((v, cam) => {
+          if (!segCameras.includes(cam)) return;
+          v.currentTime = seekTime;
+          v.playbackRate = playbackRateRef.current;
+          if (isPlayingRef.current) v.play().catch(() => {});
+        });
+      };
+
+      for (const camName of seg.cameras) {
+        const v = videoElsRef.current.get(camName as CameraAngle);
+        if (!v) continue;
+        if (v.readyState >= 3) { onReady(); break; }
+        const handler = () => onReady();
+        v.addEventListener("canplay", handler, { once: true });
+        cleanups.push(() => v.removeEventListener("canplay", handler));
+      }
+
+      canplayCleanupRef.current = () => cleanups.forEach(fn => fn());
+
+      // Safety timeout if no camera becomes ready
+      loadTimeoutRef.current = setTimeout(() => {
+        if (!readyFired) {
+          readyFired = true;
+          cleanups.forEach(fn => fn());
           canplayCleanupRef.current = null;
-          clearTimeout(loadTimeoutRef.current);
           setSegmentLoading(false);
           segmentLoadingRef.current = false;
-          videoElsRef.current.forEach((v, cam) => {
-            if (!segCameras.includes(cam)) return;
-            v.currentTime = seekTime;
-            v.playbackRate = playbackRateRef.current;
-            if (isPlayingRef.current) v.play().catch(() => {});
-          });
-        };
-        p.addEventListener("canplay", onReady, { once: true });
-        // Store cleanup so next loadSegment call can cancel this listener
-        canplayCleanupRef.current = () => {
-          p.removeEventListener("canplay", onReady);
-        };
-        // If already buffered enough, fire immediately
-        if (p.readyState >= 3) {
-          p.removeEventListener("canplay", onReady);
-          canplayCleanupRef.current = null;
-          onReady();
         }
-        // Safety timeout: clear loading state if canplay never fires
-        loadTimeoutRef.current = setTimeout(() => {
-          p.removeEventListener("canplay", onReady);
-          canplayCleanupRef.current = null;
-          setSegmentLoading(false);
-          segmentLoadingRef.current = false;
-        }, 10000);
-      } else {
-        // No video element available — clear loading state immediately
+      }, 10000);
+
+      // No video elements available — clear loading state immediately
+      if (cleanups.length === 0 && !readyFired) {
         setSegmentLoading(false);
         segmentLoadingRef.current = false;
       }
@@ -505,6 +544,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     isPlayingRef.current = false;
     setIsPlaying(false);
     videoElsRef.current.forEach((v) => v.pause());
+
+    // Destroy all HLS instances (fresh start for new event)
+    hlsInstancesRef.current.forEach((hls) => hls.destroy());
+    hlsInstancesRef.current.clear();
 
     segmentIdxRef.current = 0;
     setSegmentIdx(0);
@@ -875,7 +918,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       {/* Video area: stable DOM — all cameras always rendered, inactive hidden */}
       <div className={`player-videos player-videos-${layout}`} style={getContainerStyle()}>
-        {allEventCameras.map((cam, allIdx) => {
+        {ALL_CAMERAS.map((cam, allIdx) => {
           const isActive = activeCameras.includes(cam);
           const isFocused = cam === effectiveFocusCamera && layout === "focus";
           const isOverlayCam = (layout === "focus" && cam === effectiveFocusCamera) ||
@@ -928,19 +971,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
             </div>
           );
         })}
+        {segmentLoading && (
+          <div className="player-loading-overlay">Loading segment...</div>
+        )}
         {activeCameras.length > 0 && activeCameras.every((c) => videoErrors.has(c)) && (
-          <div style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.7)",
-            color: "var(--text-muted)",
-            fontSize: 14,
-            zIndex: 10,
-            pointerEvents: "none",
-          }}>
+          <div className="player-loading-overlay">
             All cameras failed to load for this segment
           </div>
         )}
