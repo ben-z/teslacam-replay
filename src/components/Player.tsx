@@ -65,6 +65,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const displayTimeRef = useRef(0);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const segmentLoadingRef = useRef(false);
+  const canplayCleanupRef = useRef<(() => void) | null>(null);
   const segmentOffsetsRef = useRef<number[]>([0]);
   const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
@@ -250,6 +252,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const advanceSegmentRef = useRef<() => void>(() => {});
   useEffect(() => {
     syncIntervalRef.current = setInterval(() => {
+      // Skip time updates while loading a new segment (video currentTime is stale)
+      if (segmentLoadingRef.current) return;
+
       const pCam = getPrimaryCamera();
       const p = videoElsRef.current.get(pCam);
       if (p && isFinite(p.currentTime)) {
@@ -286,13 +291,23 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       const seg = event.clips[idx];
       if (!seg) return;
 
+      // Cancel any pending canplay listener from a previous loadSegment call
+      canplayCleanupRef.current?.();
+      canplayCleanupRef.current = null;
+      clearTimeout(loadTimeoutRef.current);
+
       setVideoErrors(new Set());
       setBufferingCameras(new Set());
       setSegmentLoading(true);
+      segmentLoadingRef.current = true;
       setTelemetryData(null);
       setCurrentTelemFrame(null);
       setTelemetryLoading(true);
-      clearTimeout(loadTimeoutRef.current);
+
+      // Set displayTime immediately to avoid stale values during load
+      const targetGlobalTime = (segmentOffsetsRef.current[idx] || 0) + seekTime;
+      setDisplayTime(targetGlobalTime);
+      displayTimeRef.current = targetGlobalTime;
 
       // Fetch telemetry in parallel (fire-and-forget, won't block video)
       fetchTelemetry(event.type, event.id, seg.timestamp).then((data) => {
@@ -317,8 +332,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       if (p) {
         const segCameras = seg.cameras;
         const onReady = () => {
+          canplayCleanupRef.current = null;
           clearTimeout(loadTimeoutRef.current);
           setSegmentLoading(false);
+          segmentLoadingRef.current = false;
           videoElsRef.current.forEach((v, cam) => {
             if (!segCameras.includes(cam)) return;
             v.currentTime = seekTime;
@@ -327,15 +344,22 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           });
         };
         p.addEventListener("canplay", onReady, { once: true });
+        // Store cleanup so next loadSegment call can cancel this listener
+        canplayCleanupRef.current = () => {
+          p.removeEventListener("canplay", onReady);
+        };
         // If already buffered enough, fire immediately
         if (p.readyState >= 3) {
           p.removeEventListener("canplay", onReady);
+          canplayCleanupRef.current = null;
           onReady();
         }
         // Safety timeout: clear loading state if canplay never fires
         loadTimeoutRef.current = setTimeout(() => {
           p.removeEventListener("canplay", onReady);
+          canplayCleanupRef.current = null;
           setSegmentLoading(false);
+          segmentLoadingRef.current = false;
         }, 10000);
       }
     },
@@ -433,6 +457,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     });
   }, []);
 
+  // Stable ref for loadSegment so the event-change effect doesn't depend on it
+  const loadSegmentRef = useRef(loadSegment);
+  loadSegmentRef.current = loadSegment;
+
   // Reset state and load first segment when event changes
   useEffect(() => {
     // Stop existing playback
@@ -449,14 +477,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     setTelemetryData(null);
     setCurrentTelemFrame(null);
 
-    // Load the first segment (ensures canplay + loading state are properly handled)
-    loadSegment(0, 0);
-  }, [event.id, loadSegment]);
+    // Load the first segment (uses ref to avoid re-firing when loadSegment identity changes)
+    loadSegmentRef.current(0, 0);
+  }, [event.id]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       clearTimeout(loadTimeoutRef.current);
+      canplayCleanupRef.current?.();
       hlsInstancesRef.current.forEach((hls) => hls.destroy());
       hlsInstancesRef.current.clear();
       videoElsRef.current.forEach((v) => {
