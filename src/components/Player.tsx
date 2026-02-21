@@ -561,16 +561,21 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts]);
 
   // Compute cell position based on layout
+  // Uses allEventCameras index for stable grid positions (prevents layout shift on segment change)
   const getCellStyle = (
     cam: CameraAngle,
-    activeIdx: number,
+    allIdx: number,
     isActive: boolean
   ): React.CSSProperties => {
-    if (!isActive) return { display: "none" };
     if (layout === "grid") {
-      const [col, row] = GRID_POS[activeIdx] || [1, 1];
-      return { gridColumn: col, gridRow: row };
+      const [col, row] = GRID_POS[allIdx] || [1, 1];
+      return {
+        gridColumn: col,
+        gridRow: row,
+        visibility: isActive ? "visible" : "hidden",
+      };
     }
+    if (!isActive) return { display: "none" };
     if (cam === effectiveFocusCamera) {
       return { gridColumn: 1, gridRow: "1 / -1" };
     }
@@ -741,9 +746,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       {/* Video area: stable DOM — all cameras always rendered, inactive hidden */}
       <div className={`player-videos player-videos-${layout}`} style={getContainerStyle()}>
-        {allEventCameras.map((cam) => {
+        {allEventCameras.map((cam, allIdx) => {
           const isActive = activeCameras.includes(cam);
-          const activeIdx = activeCameras.indexOf(cam);
           const isFocused = cam === effectiveFocusCamera && layout === "focus";
           const isOverlayCam = (layout === "focus" && cam === effectiveFocusCamera) ||
             (layout === "grid" && cam === "front");
@@ -753,7 +757,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
             <div
               key={cam}
               className={`player-video-cell ${isFocused ? "focused" : ""}`}
-              style={getCellStyle(cam, activeIdx, isActive)}
+              style={getCellStyle(cam, allIdx, isActive)}
               onClick={() => {
                 if (layout === "grid") {
                   setFocusCamera(cam);
