@@ -95,19 +95,20 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     [allEventCameras, segment]
   );
 
-  // Guard: if focusCamera is not in active set, fall back
-  const effectiveFocusCamera = activeCameras.includes(focusCamera)
-    ? focusCamera
-    : activeCameras.includes("front")
-      ? "front"
-      : activeCameras[0] || focusCamera;
+  // Guard: if focusCamera is not in active set, fall back to front or first available
+  let effectiveFocusCamera = focusCamera;
+  if (!activeCameras.includes(focusCamera)) {
+    if (activeCameras.includes("front")) {
+      effectiveFocusCamera = "front";
+    } else {
+      effectiveFocusCamera = activeCameras[0] ?? focusCamera;
+    }
+  }
 
   // Primary camera for sync reference
   const getPrimaryCamera = useCallback(
-    (cams?: string[]): CameraAngle => {
-      const c = cams || activeCameras;
-      return c.includes("front") ? "front" : (c[0] as CameraAngle) || "front";
-    },
+    (): CameraAngle =>
+      activeCameras.includes("front") ? "front" : activeCameras[0] ?? "front",
     [activeCameras]
   );
 
@@ -186,6 +187,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       if (p) {
         const segCameras = seg.cameras;
         const onReady = () => {
+          clearTimeout(loadTimeoutRef.current);
           setSegmentLoading(false);
           videoElsRef.current.forEach((v, cam) => {
             if (!segCameras.includes(cam)) return;
@@ -202,7 +204,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         }
         // Safety timeout: clear loading state if canplay never fires
         loadTimeoutRef.current = setTimeout(() => setSegmentLoading(false), 10000);
-        p.addEventListener("canplay", () => clearTimeout(loadTimeoutRef.current), { once: true });
       }
     },
     [event.clips, event.type, event.id]
@@ -410,19 +411,16 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   // Compute cell position based on layout
   const getCellStyle = (
     cam: CameraAngle,
-    idx: number,
+    activeIdx: number,
     isActive: boolean
   ): React.CSSProperties => {
     if (!isActive) return { display: "none" };
     if (layout === "grid") {
-      const [col, row] = GRID_POS[idx] || [1, 1];
+      const [col, row] = GRID_POS[activeIdx] || [1, 1];
       return { gridColumn: col, gridRow: row };
     }
     if (cam === effectiveFocusCamera) {
-      return {
-        gridColumn: 1,
-        gridRow: "1 / -1",
-      };
+      return { gridColumn: 1, gridRow: "1 / -1" };
     }
     return { gridColumn: 2 };
   };
@@ -603,22 +601,24 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       {/* Video area: stable DOM — all cameras always rendered, inactive hidden */}
       <div className={`player-videos player-videos-${layout}`} style={getContainerStyle()}>
-        {allEventCameras.map((cam, i) => {
+        {allEventCameras.map((cam) => {
           const isActive = activeCameras.includes(cam);
-          // Grid position index counts only active cameras
           const activeIdx = activeCameras.indexOf(cam);
           return (
             <div
               key={cam}
               className={`player-video-cell ${cam === effectiveFocusCamera && layout === "focus" ? "focused" : ""}`}
-              style={getCellStyle(cam, activeIdx >= 0 ? activeIdx : i, isActive)}
-              onClick={
-                layout === "grid"
-                  ? () => { setFocusCamera(cam); setLayout("focus"); }
-                  : cam !== effectiveFocusCamera
-                    ? () => setFocusCamera(cam)
-                    : () => togglePlay()
-              }
+              style={getCellStyle(cam, activeIdx, isActive)}
+              onClick={() => {
+                if (layout === "grid") {
+                  setFocusCamera(cam);
+                  setLayout("focus");
+                } else if (cam !== effectiveFocusCamera) {
+                  setFocusCamera(cam);
+                } else {
+                  togglePlay();
+                }
+              }}
               onDoubleClick={
                 layout === "focus" && cam === effectiveFocusCamera
                   ? toggleFullscreen

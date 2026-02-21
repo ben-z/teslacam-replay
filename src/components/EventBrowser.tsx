@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { Fragment, useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { thumbnailUrl } from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
@@ -119,9 +119,11 @@ export function EventBrowser({
   }, []);
 
   const counts = useMemo(() => {
-    const saved = events.filter((e) => e.type === "SavedClips").length;
-    const sentry = events.filter((e) => e.type === "SentryClips").length;
-    return { total: events.length, saved, sentry };
+    let saved = 0;
+    for (const e of events) {
+      if (e.type === "SavedClips") saved++;
+    }
+    return { total: events.length, saved, sentry: events.length - saved };
   }, [events]);
 
   // Count events per date (from full filtered list for accurate counts)
@@ -266,7 +268,7 @@ export function EventBrowser({
                 const curDate = dateKey(event.timestamp);
                 const showHeader = curDate !== prevDate;
                 return (
-                  <React.Fragment key={`${event.type}/${event.id}`}>
+                  <Fragment key={`${event.type}/${event.id}`}>
                     {showHeader && (
                       <div className="browse-date-header">
                         {formatDateGroup(event.timestamp)}
@@ -280,7 +282,7 @@ export function EventBrowser({
                       watched={watchedIds.has(`${event.type}/${event.id}`)}
                       onClick={() => onSelectEvent(event, filtered)}
                     />
-                  </React.Fragment>
+                  </Fragment>
                 );
               })}
             </div>
