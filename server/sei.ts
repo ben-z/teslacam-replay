@@ -77,10 +77,8 @@ class Mp4Parser {
   }
 
   /** Find mdat box and return its content bounds */
-  private findMdat(): { offset: number; size: number } | null {
-    const box = this.findBox(0, this.buffer.length, "mdat");
-    if (!box) return null;
-    return { offset: box.start, size: box.size };
+  private findMdat(): { start: number; end: number } | null {
+    return this.findBox(0, this.buffer.length, "mdat");
   }
 
   /** Navigate moov > trak > mdia to get timescale and stts entries */
@@ -205,10 +203,9 @@ class Mp4Parser {
     if (!mdat) return [];
 
     const frames: SeiFrame[] = [];
-    let cursor = mdat.offset;
-    const end = mdat.offset + mdat.size;
+    let cursor = mdat.start;
 
-    while (cursor + 4 <= end) {
+    while (cursor + 4 <= mdat.end) {
       const nalSize = this.view.getUint32(cursor);
       cursor += 4;
 

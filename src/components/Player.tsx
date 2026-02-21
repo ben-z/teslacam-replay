@@ -185,7 +185,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       setVideoErrors(new Set());
       setSegmentLoading(true);
-      telemetryDataRef.current = null;
       setTelemetryData(null);
       setCurrentTelemFrame(null);
       clearTimeout(loadTimeoutRef.current);
@@ -638,10 +637,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         {allEventCameras.map((cam) => {
           const isActive = activeCameras.includes(cam);
           const activeIdx = activeCameras.indexOf(cam);
+          const isFocused = cam === effectiveFocusCamera && layout === "focus";
+          const showOverlay = showTelemetry && currentTelemFrame && (
+            (layout === "focus" && cam === effectiveFocusCamera) ||
+            (layout === "grid" && cam === "front")
+          );
           return (
             <div
               key={cam}
-              className={`player-video-cell ${cam === effectiveFocusCamera && layout === "focus" ? "focused" : ""}`}
+              className={`player-video-cell ${isFocused ? "focused" : ""}`}
               style={getCellStyle(cam, activeIdx, isActive)}
               onClick={() => {
                 if (layout === "grid") {
@@ -653,11 +657,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                   togglePlay();
                 }
               }}
-              onDoubleClick={
-                layout === "focus" && cam === effectiveFocusCamera
-                  ? toggleFullscreen
-                  : undefined
-              }
+              onDoubleClick={isFocused ? toggleFullscreen : undefined}
             >
               <video
                 ref={(el) => setRef(cam, el)}
@@ -674,12 +674,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
               {videoErrors.has(cam) && (
                 <span className="player-video-error">Failed to load</span>
               )}
-              {showTelemetry && currentTelemFrame && (
-                (layout === "focus" && cam === effectiveFocusCamera) ||
-                (layout === "grid" && cam === "front")
-              ) && (
-                <TelemetryOverlay frame={currentTelemFrame} compact={layout === "grid"} />
-              )}
+              {showOverlay && <TelemetryOverlay frame={currentTelemFrame} />}
             </div>
           );
         })}

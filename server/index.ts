@@ -151,7 +151,12 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
 
 // --- Telemetry (SEI extraction with in-memory cache) ---
 // Must be registered before the video streaming route (which has :camera wildcard)
-const telemetryCache = new Map<string, { hasSei: true; frameTimesMs: number[]; frames: TelemetryData["frames"] } | { hasSei: false }>();
+type TelemetryResult =
+  | { hasSei: true; frameTimesMs: number[]; frames: TelemetryData["frames"] }
+  | { hasSei: false };
+
+const telemetryCache = new Map<string, TelemetryResult>();
+const NO_SEI: TelemetryResult = { hasSei: false };
 
 app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const { type, eventId, segment } = c.req.param();
@@ -163,7 +168,6 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const cached = telemetryCache.get(cacheKey);
   if (cached) return c.json(cached);
 
-  // Find the front camera file (or first available)
   const events = await getEvents();
   const event = events.find((e) => e.type === type && e.id === eventId);
   if (!event) return c.json({ error: "Event not found" }, 404);
@@ -179,17 +183,13 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
 
   try {
     const data = await extractTelemetry(videoPath);
-    if (data) {
-      const result = { hasSei: true as const, frameTimesMs: data.frameTimesMs, frames: data.frames };
-      telemetryCache.set(cacheKey, result);
-      return c.json(result);
-    } else {
-      const result = { hasSei: false as const };
-      telemetryCache.set(cacheKey, result);
-      return c.json(result);
-    }
+    const result: TelemetryResult = data
+      ? { hasSei: true, frameTimesMs: data.frameTimesMs, frames: data.frames }
+      : NO_SEI;
+    telemetryCache.set(cacheKey, result);
+    return c.json(result);
   } catch {
-    return c.json({ hasSei: false });
+    return c.json(NO_SEI);
   }
 });
 

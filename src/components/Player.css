@@ -263,6 +263,7 @@
   min-height: 0;
   min-width: 0;
   cursor: pointer;
+  container-type: inline-size;
 }
 
 .player-video-cell:not(.focused):hover {

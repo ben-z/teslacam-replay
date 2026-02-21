@@ -61,7 +61,6 @@ export interface TelemetryFrame {
 }
 
 export interface TelemetryData {
-  hasSei: boolean;
   frameTimesMs: number[];
   frames: TelemetryFrame[];
 }
