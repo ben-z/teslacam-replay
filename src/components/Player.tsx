@@ -50,6 +50,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [segmentLoading, setSegmentLoading] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [viewCenter, setViewCenter] = useState(0);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(true);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
@@ -660,6 +662,97 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     );
   }
 
+  // Zoom/pan calculations for the player timeline
+  const viewDuration = totalDuration / zoomLevel;
+  const viewStart = Math.max(0, Math.min(viewCenter - viewDuration / 2, totalDuration - viewDuration));
+  const viewEnd = viewStart + viewDuration;
+  const isZoomed = zoomLevel > 1;
+
+  // Convert a time value to a percentage within the visible viewport
+  const timeToViewPct = useCallback(
+    (t: number) => ((t - viewStart) / viewDuration) * 100,
+    [viewStart, viewDuration]
+  );
+
+  // Auto-follow playhead during playback (keep it visible)
+  useEffect(() => {
+    if (!isPlaying || !isZoomed) return;
+    if (displayTime < viewStart || displayTime > viewEnd) {
+      setViewCenter(displayTime);
+    }
+  }, [isPlaying, isZoomed, displayTime, viewStart, viewEnd]);
+
+  // Reset zoom when event changes
+  useEffect(() => {
+    setZoomLevel(1);
+    setViewCenter(0);
+  }, [event.type, event.id]);
+
+  // Attach wheel listener with { passive: false } to allow preventDefault
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const totalDurationRef = useRef(totalDuration);
+  totalDurationRef.current = totalDuration;
+
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      const td = totalDurationRef.current;
+      if (td <= 0) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mouseX = (e.clientX - rect.left) / rect.width;
+      const zoomFactor = e.deltaY < 0 ? 1.3 : 1 / 1.3;
+      // Functional updates handle rapid sequential scroll events correctly
+      setZoomLevel(prevZoom => {
+        const newZoom = Math.max(1, Math.min(50, prevZoom * zoomFactor));
+        setViewCenter(prevCenter => {
+          const prevDur = td / prevZoom;
+          const vs = Math.max(0, Math.min(prevCenter - prevDur / 2, td - prevDur));
+          const mouseTime = vs + mouseX * prevDur;
+          const newDur = td / newZoom;
+          const newCenter = mouseTime - (mouseX - 0.5) * newDur;
+          return Math.max(newDur / 2, Math.min(td - newDur / 2, newCenter));
+        });
+        return newZoom;
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
+
+  const handleTimelineClick = useCallback((e: React.MouseEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const time = viewStart + pct * viewDuration;
+    seekTo(time);
+  }, [viewStart, viewDuration, seekTo]);
+
+  const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHoverTime(viewStart + pct * viewDuration);
+  }, [viewStart, viewDuration]);
+
+  // Minimap drag to pan
+  const minimapDragRef = useRef(false);
+  const handleMinimapPointerDown = useCallback((e: React.PointerEvent) => {
+    minimapDragRef.current = true;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    setViewCenter(pct * totalDuration);
+  }, [totalDuration]);
+  const handleMinimapPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!minimapDragRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setViewCenter(pct * totalDuration);
+  }, [totalDuration]);
+  const handleMinimapPointerUp = useCallback(() => {
+    minimapDragRef.current = false;
+  }, []);
+
   return (
     <div className="player-container" ref={containerRef}>
       {/* Header */}
@@ -909,55 +1002,94 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           {formatTime(displayTime)} / {formatTime(totalDuration)}
         </span>
 
-        <div
-          className="player-timeline"
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            setHoverTime(pct * totalDuration);
-          }}
-          onMouseLeave={() => setHoverTime(null)}
-        >
+        <div className="player-timeline-wrapper">
           <div
-            className="player-timeline-progress"
-            style={{ width: `${totalDuration > 0 ? (displayTime / totalDuration) * 100 : 0}%` }}
-          />
-          {/* Segment boundary markers */}
-          {event.clips.length > 1 && event.clips.slice(1).map((_, i) => (
+            ref={timelineRef}
+            className={`player-timeline ${isZoomed ? "zoomed" : ""}`}
+            onMouseMove={handleTimelineMouseMove}
+            onMouseLeave={() => setHoverTime(null)}
+            onClick={handleTimelineClick}
+          >
             <div
-              key={i}
-              className="player-timeline-marker"
-              style={{ left: `${(segmentOffsets[i + 1] / totalDuration) * 100}%` }}
+              className="player-timeline-progress"
+              style={{
+                left: `${Math.max(0, timeToViewPct(0))}%`,
+                width: `${Math.min(timeToViewPct(displayTime), 100) - Math.max(0, timeToViewPct(0))}%`,
+              }}
             />
-          ))}
-          {/* Event trigger time marker */}
-          {triggerTimeGlobal != null && totalDuration > 0 && (
+            {/* Segment boundary markers */}
+            {event.clips.length > 1 && event.clips.slice(1).map((_, i) => {
+              const pct = timeToViewPct(segmentOffsets[i + 1]);
+              if (pct < -1 || pct > 101) return null;
+              return (
+                <div
+                  key={i}
+                  className="player-timeline-marker"
+                  style={{ left: `${pct}%` }}
+                />
+              );
+            })}
+            {/* Event trigger time marker */}
+            {triggerTimeGlobal != null && totalDuration > 0 && (() => {
+              const pct = timeToViewPct(triggerTimeGlobal);
+              return pct >= -1 && pct <= 101 ? (
+                <div
+                  className="player-timeline-trigger"
+                  style={{ left: `${pct}%` }}
+                  title="Event trigger time"
+                />
+              ) : null;
+            })()}
+            {hoverTime != null && (
+              <span
+                className="player-timeline-tooltip"
+                style={{ left: `${timeToViewPct(hoverTime)}%` }}
+              >
+                {formatTime(hoverTime)}
+              </span>
+            )}
+            {segmentLoading && (
+              <span className="player-timeline-loading">Loading...</span>
+            )}
+          </div>
+          {/* Minimap: shows full timeline with viewport indicator */}
+          {isZoomed && (
             <div
-              className="player-timeline-trigger"
-              style={{ left: `${(triggerTimeGlobal / totalDuration) * 100}%` }}
-              title="Event trigger time"
-            />
-          )}
-          {hoverTime != null && (
-            <span
-              className="player-timeline-tooltip"
-              style={{ left: `${(hoverTime / totalDuration) * 100}%` }}
+              className="player-minimap"
+              onPointerDown={handleMinimapPointerDown}
+              onPointerMove={handleMinimapPointerMove}
+              onPointerUp={handleMinimapPointerUp}
             >
-              {formatTime(hoverTime)}
-            </span>
+              <div
+                className="player-minimap-progress"
+                style={{ width: `${(displayTime / totalDuration) * 100}%` }}
+              />
+              {/* Segment markers on minimap */}
+              {event.clips.length > 1 && event.clips.slice(1).map((_, i) => (
+                <div
+                  key={i}
+                  className="player-minimap-marker"
+                  style={{ left: `${(segmentOffsets[i + 1] / totalDuration) * 100}%` }}
+                />
+              ))}
+              {/* Viewport indicator */}
+              <div
+                className="player-minimap-viewport"
+                style={{
+                  left: `${(viewStart / totalDuration) * 100}%`,
+                  width: `${(viewDuration / totalDuration) * 100}%`,
+                }}
+              />
+            </div>
           )}
-          <input
-            type="range"
-            className="player-seek"
-            min={0}
-            max={totalDuration}
-            step={0.5}
-            value={displayTime}
-            onChange={(e) => seekTo(Number(e.target.value))}
-            aria-label="Seek"
-          />
-          {segmentLoading && (
-            <span className="player-timeline-loading">Loading...</span>
+          {isZoomed && (
+            <button
+              className="player-zoom-reset"
+              onClick={() => { setZoomLevel(1); setViewCenter(0); }}
+              title="Reset zoom"
+            >
+              {zoomLevel.toFixed(1)}x
+            </button>
           )}
         </div>
 
