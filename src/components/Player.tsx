@@ -170,22 +170,36 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   );
 
   // Find the best video element to use as sync reference.
-  // Prefers the primary camera, falls back to any healthy active camera.
+  // Prefers playing cameras over ended ones so display time keeps advancing
+  // even when some cameras have shorter data.
   const findRefVideo = useCallback((): HTMLVideoElement | undefined => {
     const errors = videoErrorsRef.current;
     const buffering = bufferingCamerasRef.current;
     const active = activeCamerasRef.current;
-    const pCam = getPrimaryCamera();
-    const primary = videoElsRef.current.get(pCam);
-    if (primary?.currentSrc && !errors.has(pCam) && !buffering.has(pCam) && isFinite(primary.currentTime)) {
-      return primary;
-    }
-    for (const cam of active) {
-      if (errors.has(cam) || buffering.has(cam)) continue;
+    let fallback: HTMLVideoElement | undefined;
+
+    const isValid = (cam: CameraAngle) => {
+      if (errors.has(cam) || buffering.has(cam)) return null;
       const v = videoElsRef.current.get(cam);
-      if (v?.currentSrc && isFinite(v.currentTime)) return v;
+      return v?.currentSrc && isFinite(v.currentTime) ? v : null;
+    };
+
+    // Prefer primary camera if still playing
+    const pCam = getPrimaryCamera();
+    const primary = isValid(pCam);
+    if (primary && !primary.ended) return primary;
+    if (primary) fallback = primary;
+
+    // Then any still-playing camera
+    for (const cam of active) {
+      const v = isValid(cam);
+      if (!v) continue;
+      if (!v.ended) return v;
+      if (!fallback) fallback = v;
     }
-    return undefined;
+
+    // All ended — use first valid for stable display time
+    return fallback;
   }, [getPrimaryCamera]);
 
   const setRef = useCallback(
