@@ -672,6 +672,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                 year: "numeric",
                 hour: "numeric",
                 minute: "2-digit",
+                timeZoneName: "short",
               })}
             </span>
           </span>

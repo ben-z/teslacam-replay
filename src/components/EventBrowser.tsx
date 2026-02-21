@@ -30,6 +30,7 @@ function formatTimestamp(ts: string): string {
       year: "numeric",
       hour: "numeric",
       minute: "2-digit",
+      timeZoneName: "short",
     });
   } catch {
     return ts;
