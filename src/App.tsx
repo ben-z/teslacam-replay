@@ -39,7 +39,7 @@ class ErrorBoundary extends Component<
       );
     }
     // Key change forces children to fully remount, clearing any corrupted state
-    return <div key={this.state.resetKey}>{this.props.children}</div>;
+    return <div key={this.state.resetKey} style={{ height: "100%" }}>{this.props.children}</div>;
   }
 }
 

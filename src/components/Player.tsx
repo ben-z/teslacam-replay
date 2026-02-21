@@ -73,6 +73,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
+  const loadedCamerasRef = useRef<Set<CameraAngle>>(new Set());
 
   // Keep refs in sync with state
   playbackRateRef.current = playbackRate;
@@ -312,14 +313,25 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       }
       if (isPlayingRef.current) {
         syncAll();
-        // Auto-advance: check if any active camera has ended
-        const errors = videoErrorsRef.current;
-        for (const cam of activeCamerasRef.current) {
-          if (errors.has(cam)) continue;
-          const v = videoElsRef.current.get(cam);
-          if (v?.currentSrc && v.ended) {
+        // Auto-advance: only when ALL loaded non-errored cameras have ended
+        const loaded = loadedCamerasRef.current;
+        if (loaded.size > 0) {
+          const errors = videoErrorsRef.current;
+          let anyHealthy = false;
+          let anyPlaying = false;
+          for (const cam of loaded) {
+            if (errors.has(cam)) continue;
+            const v = videoElsRef.current.get(cam);
+            if (v?.currentSrc) {
+              anyHealthy = true;
+              // Treat as ended if actually ended or stalled near end of stream
+              const atEnd = v.ended ||
+                (isFinite(v.duration) && v.currentTime >= v.duration - 0.5);
+              if (!atEnd) { anyPlaying = true; break; }
+            }
+          }
+          if (anyHealthy && !anyPlaying) {
             advanceSegmentRef.current();
-            break;
           }
         }
       }
@@ -340,6 +352,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       setVideoErrors(new Set());
       setBufferingCameras(new Set());
+      loadedCamerasRef.current = new Set();
       setSegmentLoading(true);
       segmentLoadingRef.current = true;
       setTelemetryData(null);
@@ -397,15 +410,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         if (hls) {
           // Use HLS.js event — works reliably for both fresh and reused instances
           // (canplay/readyState can be stale when HLS instance is reused)
-          const hlsHandler = () => { hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler); onReady(); };
+          const hlsHandler = () => { hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler); loadedCamerasRef.current.add(cam); onReady(); };
           hls.on(Hls.Events.FRAG_BUFFERED, hlsHandler);
           cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, hlsHandler));
         } else {
           // Safari native HLS — use canplay
           const v = videoElsRef.current.get(cam);
           if (!v) continue;
-          if (v.readyState >= 3) { onReady(); break; }
-          const handler = () => onReady();
+          if (v.readyState >= 3) { loadedCamerasRef.current.add(cam); onReady(); break; }
+          const handler = () => { loadedCamerasRef.current.add(cam); onReady(); };
           v.addEventListener("canplay", handler, { once: true });
           cleanups.push(() => v.removeEventListener("canplay", handler));
         }
@@ -648,13 +661,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const getContainerStyle = (): React.CSSProperties => {
     if (layout === "grid") {
       return {
-        gridTemplateColumns: "repeat(3, 1fr)",
-        gridTemplateRows: "repeat(2, 1fr)",
+        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+        gridTemplateRows: "repeat(2, minmax(0, 1fr))",
       };
     }
     const sidebarCount = Math.max(allEventCameras.length - 1, 1);
     return {
-      gridTemplateRows: `repeat(${sidebarCount}, 1fr)`,
+      gridTemplateRows: `repeat(${sidebarCount}, minmax(0, 1fr))`,
     };
   };
 
