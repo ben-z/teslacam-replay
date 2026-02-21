@@ -89,6 +89,35 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   segmentOffsetsRef.current = segmentOffsets;
 
   const totalDuration = segmentOffsets[segmentOffsets.length - 1];
+
+  // Compute trigger time position on the seek bar (Sentry/Saved only)
+  const triggerTimeGlobal = useMemo(() => {
+    if (event.type === "RecentClips" || !event.timestamp) return null;
+    const triggerEpoch = new Date(event.timestamp).getTime() / 1000;
+    if (isNaN(triggerEpoch)) return null;
+    // Find which segment the trigger falls in
+    for (let i = 0; i < event.clips.length; i++) {
+      const clipTs = event.clips[i].timestamp.replace(/_/g, "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2");
+      const clipEpoch = new Date(clipTs).getTime() / 1000;
+      if (isNaN(clipEpoch)) continue;
+      const offsetInClip = triggerEpoch - clipEpoch;
+      if (offsetInClip >= 0 && offsetInClip <= event.clips[i].durationSec) {
+        return segmentOffsets[i] + offsetInClip;
+      }
+    }
+    // If trigger time is exactly the folder name (common for Sentry), it might be the event start
+    // Fall back to checking if trigger matches any clip start
+    for (let i = 0; i < event.clips.length; i++) {
+      const clipTs = event.clips[i].timestamp.replace(/_/g, "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2");
+      const clipEpoch = new Date(clipTs).getTime() / 1000;
+      if (isNaN(clipEpoch)) continue;
+      if (Math.abs(triggerEpoch - clipEpoch) < 2) {
+        return segmentOffsets[i];
+      }
+    }
+    return null;
+  }, [event.type, event.timestamp, event.clips, segmentOffsets]);
+
   const segment = event.clips[segmentIdx];
 
   // Collect all cameras that appear anywhere in this event (stable across segments)
@@ -593,7 +622,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         gridTemplateRows: "repeat(2, 1fr)",
       };
     }
-    const sidebarCount = Math.max(activeCameras.length - 1, 1);
+    const sidebarCount = Math.max(allEventCameras.length - 1, 1);
     return {
       gridTemplateRows: `repeat(${sidebarCount}, 1fr)`,
     };
@@ -883,6 +912,14 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
               style={{ left: `${(segmentOffsets[i + 1] / totalDuration) * 100}%` }}
             />
           ))}
+          {/* Event trigger time marker */}
+          {triggerTimeGlobal != null && totalDuration > 0 && (
+            <div
+              className="player-timeline-trigger"
+              style={{ left: `${(triggerTimeGlobal / totalDuration) * 100}%` }}
+              title="Event trigger time"
+            />
+          )}
           {hoverTime != null && (
             <span
               className="player-timeline-tooltip"
@@ -906,31 +943,29 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           )}
         </div>
 
-        {event.clips.length > 1 && (
-          <div className="player-segment-group" role="group" aria-label="Segment navigation">
-            <button
-              className="player-segment-btn"
-              disabled={segmentIdx === 0}
-              onClick={() => seekTo(Math.max(0, (segmentOffsetsRef.current[segmentIdx] || 0) - 0.1))}
-              title="Previous segment (Shift+Left)"
-              aria-label="Previous segment"
-            >
-              &lsaquo;
-            </button>
-            <span className="player-segment" aria-label={`Segment ${segmentIdx + 1} of ${event.clips.length}`}>
-              {segmentIdx + 1}/{event.clips.length}
-            </span>
-            <button
-              className="player-segment-btn"
-              disabled={segmentIdx >= event.clips.length - 1}
-              onClick={() => seekTo(segmentOffsetsRef.current[segmentIdx + 1] || 0)}
-              title="Next segment (Shift+Right)"
-              aria-label="Next segment"
-            >
-              &rsaquo;
-            </button>
-          </div>
-        )}
+        <div className="player-segment-group" role="group" aria-label="Segment navigation">
+          <button
+            className="player-segment-btn"
+            disabled={segmentIdx === 0}
+            onClick={() => seekTo(Math.max(0, (segmentOffsetsRef.current[segmentIdx] || 0) - 0.1))}
+            title="Previous segment (Shift+Left)"
+            aria-label="Previous segment"
+          >
+            &lsaquo;
+          </button>
+          <span className="player-segment" aria-label={`Segment ${segmentIdx + 1} of ${event.clips.length}`}>
+            {segmentIdx + 1}/{event.clips.length}
+          </span>
+          <button
+            className="player-segment-btn"
+            disabled={segmentIdx >= event.clips.length - 1}
+            onClick={() => seekTo(segmentOffsetsRef.current[segmentIdx + 1] || 0)}
+            title="Next segment (Shift+Right)"
+            aria-label="Next segment"
+          >
+            &rsaquo;
+          </button>
+        </div>
 
         <div className="player-speed-group" role="group" aria-label="Playback speed">
           {SPEED_OPTIONS.map((rate) => (
