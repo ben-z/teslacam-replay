@@ -44,7 +44,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
     const raw = await readFile(CACHE_FILE, "utf-8");
     const data = JSON.parse(raw);
-    if (!data || data.version !== 3 || !Array.isArray(data.events)) {
+    if (!data || data.version !== 4 || !Array.isArray(data.events)) {
       console.log("Disk cache outdated (version mismatch), re-scanning");
       return null;
     }
@@ -58,7 +58,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify({ version: 3, events }));
+    await writeFile(CACHE_FILE, JSON.stringify({ version: 4, events }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);

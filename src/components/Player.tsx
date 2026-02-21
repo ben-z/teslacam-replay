@@ -361,6 +361,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
           setSegmentLoading(false);
           segmentLoadingRef.current = false;
         }, 10000);
+      } else {
+        // No video element available — clear loading state immediately
+        setSegmentLoading(false);
+        segmentLoadingRef.current = false;
       }
     },
     [event.clips, event.type, event.id, allEventCameras, attachHls, detachHls]

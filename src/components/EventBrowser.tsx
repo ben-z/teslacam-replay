@@ -95,7 +95,10 @@ export function EventBrowser({
 
   const filtered = useMemo(() => {
     let result = events;
-    if (filter !== "all") {
+    if (filter === "all") {
+      // "All" shows only Saved + Sentry, not Recent (which has its own timeline)
+      result = result.filter((e) => e.type !== "RecentClips");
+    } else {
       result = result.filter((e) => e.type === filter);
     }
     if (search.trim()) {
@@ -127,7 +130,7 @@ export function EventBrowser({
       else if (e.type === "SentryClips") sentry++;
       else if (e.type === "RecentClips") recent++;
     }
-    return { total: events.length, saved, sentry, recent };
+    return { total: saved + sentry, saved, sentry, recent };
   }, [events]);
 
   // Count events per date (from full filtered list for accurate counts)

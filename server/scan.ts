@@ -124,8 +124,7 @@ async function scanEventFolder(
       const next = segmentTimestampToEpoch(sorted[i + 1][0]);
       if (cur > 0 && next > 0) {
         const diff = next - cur;
-        // Sanity: use computed duration only if between 10s and 120s
-        if (diff >= 10 && diff <= 120) durationSec = diff;
+        if (diff >= 1 && diff <= 120) durationSec = diff;
       }
     }
     return {
@@ -250,7 +249,7 @@ async function scanRecentClips(rootPath: string): Promise<DashcamEvent[]> {
         const next = segmentTimestampToEpoch(session[i + 1][0]);
         if (cur > 0 && next > 0) {
           const diff = next - cur;
-          if (diff >= 10 && diff <= 120) durationSec = diff;
+          if (diff >= 1 && diff <= 120) durationSec = diff;
         }
       }
       return {
