@@ -74,7 +74,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const syncIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const segmentLoadingRef = useRef(false);
-  const segmentLoadedAtRef = useRef(0);
   const canplayCleanupRef = useRef<(() => void) | null>(null);
   const segmentOffsetsRef = useRef<number[]>([0]);
   const telemetryDataRef = useRef<TelemetryData | null>(null);
@@ -319,13 +318,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       }
       if (isPlayingRef.current) {
         syncAll();
-        // Auto-advance: when the reference video has ended
-        // Wait 1.5s after segment load so all cameras settle (stale video state from
-        // HLS instance reuse can cause false near-end detection)
-        if (ref && performance.now() - segmentLoadedAtRef.current > 1500) {
-          const atEnd = ref.ended ||
-            (isFinite(ref.duration) && ref.duration > 0 && ref.currentTime >= ref.duration - 0.5);
-          if (atEnd) advanceSegmentRef.current();
+        // Auto-advance: when display time reaches the next segment boundary
+        const segEnd = segmentOffsetsRef.current[segmentIdxRef.current + 1];
+        if (segEnd !== undefined && displayTimeRef.current >= segEnd - 0.5) {
+          advanceSegmentRef.current();
         }
       }
     }, SYNC_INTERVAL);
@@ -392,7 +388,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         clearTimeout(loadTimeoutRef.current);
         setSegmentLoading(false);
         segmentLoadingRef.current = false;
-        segmentLoadedAtRef.current = performance.now();
         videoElsRef.current.forEach((v, cam) => {
           if (!segCameras.includes(cam)) return;
           v.currentTime = seekTime;
