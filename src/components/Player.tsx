@@ -37,6 +37,12 @@ const GRID_POS = [
   [3, 2],
 ];
 
+const BADGE_MAP = {
+  SentryClips: { label: "Sentry", color: "var(--sentry-color)" },
+  RecentClips: { label: "Recent", color: "var(--recent-color)" },
+  SavedClips: { label: "Saved", color: "var(--saved-color)" },
+} as const;
+
 export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [layout, setLayout] = useState<Layout>("grid");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
@@ -68,6 +74,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const syncIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const segmentLoadingRef = useRef(false);
+  const segmentLoadedAtRef = useRef(0);
   const canplayCleanupRef = useRef<(() => void) | null>(null);
   const segmentOffsetsRef = useRef<number[]>([0]);
   const telemetryDataRef = useRef<TelemetryData | null>(null);
@@ -313,7 +320,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       if (isPlayingRef.current) {
         syncAll();
         // Auto-advance: when the reference video has ended
-        if (ref) {
+        // Wait 1.5s after segment load so all cameras settle (stale video state from
+        // HLS instance reuse can cause false near-end detection)
+        if (ref && performance.now() - segmentLoadedAtRef.current > 1500) {
           const atEnd = ref.ended ||
             (isFinite(ref.duration) && ref.duration > 0 && ref.currentTime >= ref.duration - 0.5);
           if (atEnd) advanceSegmentRef.current();
@@ -348,7 +357,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       displayTimeRef.current = targetGlobalTime;
 
       // Fetch telemetry in parallel (fire-and-forget, won't block video)
-      fetchTelemetry(event.type, event.id, seg.timestamp).then((data) => {
+      const segTimestamp = seg.timestamp;
+      fetchTelemetry(event.type, event.id, segTimestamp).then((data) => {
+        // Guard against stale response from a previous segment's fetch
+        const currentSeg = event.clips[segmentIdxRef.current];
+        if (currentSeg?.timestamp !== segTimestamp) return;
         setTelemetryData(data);
         setTelemetryLoading(false);
       });
@@ -379,6 +392,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         clearTimeout(loadTimeoutRef.current);
         setSegmentLoading(false);
         segmentLoadingRef.current = false;
+        segmentLoadedAtRef.current = performance.now();
         videoElsRef.current.forEach((v, cam) => {
           if (!segCameras.includes(cam)) return;
           v.currentTime = seekTime;
@@ -512,10 +526,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     });
   }, []);
 
-  // Stable ref for loadSegment so the event-change effect doesn't depend on it
-  const loadSegmentRef = useRef(loadSegment);
-  loadSegmentRef.current = loadSegment;
-
   // Reset state and load first segment when event changes
   useEffect(() => {
     // Stop existing playback
@@ -536,9 +546,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     setTelemetryData(null);
     setCurrentTelemFrame(null);
 
-    // Load the first segment (uses ref to avoid re-firing when loadSegment identity changes)
-    loadSegmentRef.current(0, 0);
-  }, [event.id]);
+    loadSegment(0, 0);
+  }, [event.id, loadSegment]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -654,10 +663,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     };
   };
 
-  const badgeLabel = event.type === "SentryClips" ? "Sentry"
-    : event.type === "RecentClips" ? "Recent" : "Saved";
-  const badgeColor = event.type === "SentryClips" ? "var(--sentry-color)"
-    : event.type === "RecentClips" ? "var(--recent-color)" : "var(--saved-color)";
+  const { label: badgeLabel, color: badgeColor } = BADGE_MAP[event.type];
 
   if (allEventCameras.length === 0) {
     return (
@@ -690,10 +696,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const isZoomed = zoomLevel > 1;
 
   // Convert a time value to a percentage within the visible viewport
-  const timeToViewPct = useCallback(
-    (t: number) => ((t - viewStart) / viewDuration) * 100,
-    [viewStart, viewDuration]
-  );
+  const timeToViewPct = (t: number): number => ((t - viewStart) / viewDuration) * 100;
+
+  // Pre-compute trigger marker position (null if out of viewport)
+  const triggerPct = triggerTimeGlobal != null && totalDuration > 0
+    ? timeToViewPct(triggerTimeGlobal)
+    : null;
+  const showTriggerMarker = triggerPct != null && triggerPct >= -1 && triggerPct <= 101;
 
   // Auto-follow playhead during playback (keep it visible)
   useEffect(() => {
@@ -1043,16 +1052,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
               );
             })}
             {/* Event trigger time marker */}
-            {triggerTimeGlobal != null && totalDuration > 0 && (() => {
-              const pct = timeToViewPct(triggerTimeGlobal);
-              return pct >= -1 && pct <= 101 ? (
-                <div
-                  className="player-timeline-trigger"
-                  style={{ left: `${pct}%` }}
-                  title="Event trigger time"
-                />
-              ) : null;
-            })()}
+            {showTriggerMarker && (
+              <div
+                className="player-timeline-trigger"
+                style={{ left: `${triggerPct}%` }}
+                title="Event trigger time"
+              />
+            )}
             {hoverTime != null && (
               <span
                 className="player-timeline-tooltip"
