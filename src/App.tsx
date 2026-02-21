@@ -49,20 +49,6 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
-const WATCHED_KEY = "dashreplay-watched";
-function loadWatched(): Set<string> {
-  try {
-    const raw = localStorage.getItem(WATCHED_KEY);
-    return raw ? new Set(JSON.parse(raw)) : new Set();
-  } catch {
-    return new Set();
-  }
-}
-function saveWatched(ids: Set<string>) {
-  try {
-    localStorage.setItem(WATCHED_KEY, JSON.stringify([...ids]));
-  } catch { /* storage full or unavailable */ }
-}
 
 export function App() {
   const [events, setEvents] = useState<DashcamEvent[]>([]);
@@ -74,7 +60,6 @@ export function App() {
   const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
   // The filtered list of events the user was browsing when they selected an event
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
-  const [watchedIds, setWatchedIds] = useState<Set<string>>(loadWatched);
   const pushedHashRef = useRef(false);
 
   const loadEvents = useCallback(async () => {
@@ -147,26 +132,10 @@ export function App() {
     }
   };
 
-  const clearWatched = useCallback(() => {
-    setWatchedIds(new Set());
-    saveWatched(new Set());
-  }, []);
-
-  const markWatched = useCallback((event: DashcamEvent) => {
-    const key = `${event.type}/${event.id}`;
-    setWatchedIds((prev) => {
-      if (prev.has(key)) return prev;
-      const next = new Set(prev).add(key);
-      saveWatched(next);
-      return next;
-    });
-  }, []);
-
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
     setSelectedEvent(event);
     setView("player");
     if (filteredList) setBrowseList(filteredList);
-    markWatched(event);
     pushedHashRef.current = true;
     location.hash = `/event/${event.type}/${event.id}`;
   };
@@ -200,12 +169,11 @@ export function App() {
       if (nextIdx >= 0 && nextIdx < navList.length) {
         const next = navList[nextIdx];
         setSelectedEvent(next);
-        markWatched(next);
         // Replace hash (don't push, so back goes to browse not previous event)
         history.replaceState(null, "", `#/event/${next.type}/${next.id}`);
       }
     },
-    [navList, selectedIdx, markWatched]
+    [navList, selectedIdx]
   );
 
   return (
@@ -216,10 +184,8 @@ export function App() {
             events={events}
             loading={loading}
             error={error}
-            watchedIds={watchedIds}
             onSelectEvent={handleSelectEvent}
             onRefresh={handleRefresh}
-            onClearWatched={clearWatched}
           />
         ) : selectedEvent ? (
           <Player

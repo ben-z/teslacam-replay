@@ -222,12 +222,6 @@
   }
 }
 
-.browse-card.watched {
-  opacity: 0.5;
-}
-.browse-card.watched:hover {
-  opacity: 0.85;
-}
 .browse-card:active {
   transform: translateY(0);
 }

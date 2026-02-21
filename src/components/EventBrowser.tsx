@@ -9,10 +9,8 @@ interface Props {
   events: DashcamEvent[];
   loading: boolean;
   error: string | null;
-  watchedIds: Set<string>;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
-  onClearWatched?: () => void;
 }
 
 type FilterType = "all" | "SavedClips" | "SentryClips" | "RecentClips";
@@ -72,10 +70,8 @@ export function EventBrowser({
   events,
   loading,
   error,
-  watchedIds,
   onSelectEvent,
   onRefresh,
-  onClearWatched,
 }: Props) {
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchInput, setSearchInput] = useState("");
@@ -169,15 +165,6 @@ export function EventBrowser({
         <div className="browse-header-top">
           <h1 className="browse-title">DashReplay</h1>
           <div className="browse-header-actions">
-            {onClearWatched && watchedIds.size > 0 && (
-              <button
-                onClick={onClearWatched}
-                className="browse-refresh-btn"
-                title="Mark all as unwatched"
-              >
-                Clear watched
-              </button>
-            )}
             <button
               onClick={onRefresh}
               disabled={loading}
@@ -289,7 +276,6 @@ export function EventBrowser({
                     )}
                     <EventCard
                       event={event}
-                      watched={watchedIds.has(`${event.type}/${event.id}`)}
                       onClick={() => onSelectEvent(event, filtered)}
                     />
                   </Fragment>
@@ -312,11 +298,9 @@ export function EventBrowser({
 
 function EventCard({
   event,
-  watched,
   onClick,
 }: {
   event: DashcamEvent;
-  watched: boolean;
   onClick: () => void;
 }) {
   const badgeLabel = event.type === "SentryClips" ? "Sentry"
@@ -328,7 +312,7 @@ function EventCard({
   );
 
   return (
-    <button onClick={onClick} className={`browse-card ${watched ? "watched" : ""}`}>
+    <button onClick={onClick} className="browse-card">
       <div className="browse-card-thumb">
         {event.hasThumbnail && thumbState !== "error" ? (
           <>
