@@ -273,8 +273,8 @@ app.post("/api/refresh", async (c) => {
   }
 });
 
-// Serve static files in production
-if (process.env.NODE_ENV === "production") {
+// Serve static files when SERVE_FRONTEND is enabled
+if (process.env.SERVE_FRONTEND === "true") {
   app.use("/*", serveStatic({ root: "./dist" }));
   // SPA fallback - only for non-API routes
   app.get("*", (c, next) => {

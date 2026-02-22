@@ -10,7 +10,7 @@
     "dev:server": "node --env-file=.env --import tsx/esm --watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
-    "start": "NODE_ENV=production node --env-file=.env --import tsx/esm server/index.ts",
+    "start": "SERVE_FRONTEND=true node --env-file=.env --import tsx/esm server/index.ts",
     "test": "vitest run"
   },
   "dependencies": {

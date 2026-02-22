@@ -66,14 +66,13 @@ This builds the frontend to `dist/` and starts the server (which also serves the
 
 The Docker image includes both the API server and the frontend. It's automatically built and pushed to `ghcr.io/ben-z/teslacam-replay` on every push to `main`.
 
-**All-in-one** (serves frontend + API on a single port):
+**All-in-one** (serves frontend + API on a single port — the default):
 
 ```bash
 docker run -d \
   -p 3001:3001 \
   -v /path/to/TeslaCam:/data:ro \
   -e TESLACAM_PATH=/data \
-  -e NODE_ENV=production \
   ghcr.io/ben-z/teslacam-replay
 ```
 
@@ -84,6 +83,7 @@ docker run -d \
   -p 3001:3001 \
   -v /path/to/TeslaCam:/data:ro \
   -e TESLACAM_PATH=/data \
+  -e SERVE_FRONTEND=false \
   ghcr.io/ben-z/teslacam-replay
 ```
 
@@ -111,7 +111,7 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 |---|---|---|
 | `TESLACAM_PATH` | Yes | Path to Tesla dashcam folder (e.g., `/mnt/usb/TeslaCam`) |
 | `PORT` | No | Server port (default: `3001`) |
-| `NODE_ENV` | No | Set to `production` to serve static files from `dist/` |
+| `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
 
 ## Dashcam Folder Structure
 
