@@ -37,8 +37,20 @@ const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const SESSION_GAP_THRESHOLD = 120;
 
 export async function scanTeslacamFolder(
-  storage: StorageBackend
+  storage: StorageBackend,
+  existingEvents?: DashcamEvent[]
 ): Promise<DashcamEvent[]> {
+  // Compute cutoffs for incremental scanning (only scan folders newer than latest known)
+  const cutoffs = new Map<string, string>();
+  if (existingEvents) {
+    for (const type of ["SavedClips", "SentryClips"] as const) {
+      const latest = existingEvents
+        .filter(e => e.type === type)
+        .reduce((max, e) => e.id > max ? e.id : max, "");
+      if (latest) cutoffs.set(type, latest);
+    }
+  }
+
   const events: DashcamEvent[] = [];
 
   for (const type of ["SavedClips", "SentryClips"] as const) {
@@ -50,7 +62,13 @@ export async function scanTeslacamFolder(
     }
 
     // Filter to only timestamp-patterned folders (skip .DS_Store, etc.)
-    const folders = entries.filter((f) => FOLDER_PATTERN.test(f));
+    let folders = entries.filter((f) => FOLDER_PATTERN.test(f));
+
+    // Incremental: only scan folders newer than latest existing event
+    const cutoff = cutoffs.get(type);
+    if (cutoff) {
+      folders = folders.filter(f => f > cutoff);
+    }
 
     // Process in parallel batches
     const batchSize = 50;
@@ -65,9 +83,20 @@ export async function scanTeslacamFolder(
     }
   }
 
-  // Scan RecentClips (flat files + date subfolders)
+  // RecentClips: always full scan (session grouping makes incremental complex)
   const recentEvents = await scanRecentClips(storage);
   events.push(...recentEvents);
+
+  // Merge with existing events when doing incremental scan
+  if (existingEvents) {
+    const newIds = new Set(events.map(e => `${e.type}:${e.id}`));
+    for (const existing of existingEvents) {
+      if (existing.type === "RecentClips") continue; // replaced by fresh scan
+      if (!newIds.has(`${existing.type}:${existing.id}`)) {
+        events.push(existing);
+      }
+    }
+  }
 
   events.sort((a, b) => b.id.localeCompare(a.id));
   return events;
@@ -116,24 +145,13 @@ async function scanEventFolder(
   const sorted = Array.from(segmentMap.entries())
     .sort(([a], [b]) => a.localeCompare(b));
 
-  const clips: EventClip[] = sorted.map(([timestamp, cameras], i) => {
-    let durationSec = 60; // default
-    if (i + 1 < sorted.length) {
-      const cur = segmentTimestampToEpoch(timestamp);
-      const next = segmentTimestampToEpoch(sorted[i + 1][0]);
-      if (cur > 0 && next > 0) {
-        const diff = next - cur;
-        if (diff >= 1 && diff <= 120) durationSec = diff;
-      }
-    }
-    return {
-      timestamp,
-      cameras: Array.from(cameras).sort((a, b) =>
-        CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
-      ),
-      durationSec,
-    };
-  });
+  const clips: EventClip[] = sorted.map(([timestamp, cameras], i) => ({
+    timestamp,
+    cameras: Array.from(cameras).sort((a, b) =>
+      CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
+    ),
+    durationSec: estimateDuration(timestamp, sorted[i + 1]?.[0]),
+  }));
 
   const hasThumbnail = files.includes("thumb.png");
 
@@ -154,6 +172,17 @@ async function scanEventFolder(
     clips,
     totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
   };
+}
+
+function estimateDuration(timestamp: string, nextTimestamp?: string): number {
+  if (!nextTimestamp) return 60;
+  const cur = segmentTimestampToEpoch(timestamp);
+  const next = segmentTimestampToEpoch(nextTimestamp);
+  if (cur > 0 && next > 0) {
+    const diff = next - cur;
+    if (diff >= 1 && diff <= 120) return diff;
+  }
+  return 60;
 }
 
 function segmentTimestampToEpoch(ts: string): number {
@@ -240,25 +269,14 @@ async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]>
 
   // Convert sessions to events
   return sessions.map((session) => {
-    const clips: EventClip[] = session.map(([timestamp, { cameras, subfolder }], i) => {
-      let durationSec = 60;
-      if (i + 1 < session.length) {
-        const cur = segmentTimestampToEpoch(timestamp);
-        const next = segmentTimestampToEpoch(session[i + 1][0]);
-        if (cur > 0 && next > 0) {
-          const diff = next - cur;
-          if (diff >= 1 && diff <= 120) durationSec = diff;
-        }
-      }
-      return {
-        timestamp,
-        cameras: Array.from(cameras).sort((a, b) =>
-          CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
-        ),
-        durationSec,
-        subfolder,
-      };
-    });
+    const clips: EventClip[] = session.map(([timestamp, { cameras, subfolder }], i) => ({
+      timestamp,
+      cameras: Array.from(cameras).sort((a, b) =>
+        CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
+      ),
+      durationSec: estimateDuration(timestamp, session[i + 1]?.[0]),
+      subfolder,
+    }));
 
     const firstTimestamp = session[0][0];
     return {

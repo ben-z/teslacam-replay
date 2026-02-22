@@ -26,6 +26,8 @@ export class GoogleDriveStorage implements StorageBackend {
   private dirCache = new Map<string, Map<string, { id: string; mimeType: string }>>();
   // Deduplicate in-flight listFolder requests (avoids redundant API calls from parallel batches)
   private pendingListFolder = new Map<string, Promise<Map<string, { id: string; mimeType: string }>>>();
+  // Deduplicate in-flight file downloads (avoids redundant downloads from parallel requests)
+  private pendingDownloads = new Map<string, Promise<string>>();
 
   private constructor(drive: drive_v3.Drive, rootFolderId: string) {
     this.drive = drive;
@@ -212,7 +214,7 @@ export class GoogleDriveStorage implements StorageBackend {
   async getLocalPath(filePath: string): Promise<string> {
     const localPath = this.safeCachePath(filePath);
 
-    // Check if already cached
+    // Check if already cached on disk
     try {
       await stat(localPath);
       return localPath;
@@ -220,20 +222,31 @@ export class GoogleDriveStorage implements StorageBackend {
       // Not cached, download it
     }
 
-    const resolved = await this.resolve(filePath);
-    if (!resolved) throw new Error(`File not found: ${filePath}`);
+    // Deduplicate: if a download for the same file is already in-flight, wait for it
+    const pending = this.pendingDownloads.get(filePath);
+    if (pending) return pending;
 
-    // Ensure parent directory exists
-    await mkdir(path.dirname(localPath), { recursive: true });
+    const promise = (async () => {
+      try {
+        const resolved = await this.resolve(filePath);
+        if (!resolved) throw new Error(`File not found: ${filePath}`);
 
-    // Download the file
-    const res = await this.drive.files.get(
-      { fileId: resolved.id, alt: "media" },
-      { responseType: "arraybuffer" }
-    );
-    await writeFile(localPath, Buffer.from(res.data as ArrayBuffer));
+        await mkdir(path.dirname(localPath), { recursive: true });
 
-    return localPath;
+        const res = await this.drive.files.get(
+          { fileId: resolved.id, alt: "media" },
+          { responseType: "arraybuffer" }
+        );
+        await writeFile(localPath, Buffer.from(res.data as ArrayBuffer));
+
+        return localPath;
+      } finally {
+        this.pendingDownloads.delete(filePath);
+      }
+    })();
+
+    this.pendingDownloads.set(filePath, promise);
+    return promise;
   }
 
   async createReadStream(filePath: string): Promise<NodeJS.ReadableStream> {

@@ -420,4 +420,64 @@ describe("In-memory mock StorageBackend", () => {
     const events = await scanTeslacamFolder(mock);
     expect(events).toEqual([]);
   });
+
+  it("incremental scan only picks up new folders", async () => {
+    const mockFiles: Record<string, string | null> = {
+      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
+      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-back.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
+    };
+
+    const mock = createMockStorage(mockFiles);
+
+    // Full scan first
+    const fullEvents = await scanTeslacamFolder(mock);
+    expect(fullEvents).toHaveLength(2);
+
+    // Incremental: pass existing events — no new folders, so only existing are returned
+    const incEvents = await scanTeslacamFolder(mock, fullEvents);
+    expect(incEvents).toHaveLength(2);
+    expect(incEvents.map(e => e.id).sort()).toEqual(fullEvents.map(e => e.id).sort());
+  });
+
+  it("incremental scan merges new events with existing", async () => {
+    // Start with 1 event
+    const mock1 = createMockStorage({
+      "SentryClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
+    });
+    const existing = await scanTeslacamFolder(mock1);
+    expect(existing).toHaveLength(1);
+
+    // Now storage has 2 events (old one + new one)
+    const mock2 = createMockStorage({
+      "SentryClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
+      "SentryClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
+    });
+
+    const merged = await scanTeslacamFolder(mock2, existing);
+    expect(merged).toHaveLength(2);
+    expect(merged.map(e => e.id)).toContain("2025-03-15_10-00-00");
+    expect(merged.map(e => e.id)).toContain("2025-06-01_12-00-00");
+  });
+
+  it("incremental scan always re-scans RecentClips", async () => {
+    const mock1 = createMockStorage({
+      "RecentClips/2026-01-01_12-00-00-front.mp4": "",
+    });
+    const existing = await scanTeslacamFolder(mock1);
+    expect(existing).toHaveLength(1);
+    expect(existing[0].clips).toHaveLength(1);
+
+    // Add a new RecentClips file
+    const mock2 = createMockStorage({
+      "RecentClips/2026-01-01_12-00-00-front.mp4": "",
+      "RecentClips/2026-01-01_12-01-00-front.mp4": "",
+    });
+
+    const merged = await scanTeslacamFolder(mock2, existing);
+    const recent = merged.filter(e => e.type === "RecentClips");
+    expect(recent).toHaveLength(1);
+    expect(recent[0].clips).toHaveLength(2); // fresh scan picked up both
+  });
 });

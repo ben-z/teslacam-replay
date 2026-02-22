@@ -82,12 +82,15 @@ app.use("/api/*", cors());
 // --- Event cache (memory + disk, with deduplication) ---
 let cachedEvents: DashcamEvent[] | null = null;
 let scanPromise: Promise<DashcamEvent[]> | null = null;
+let scanIsRefresh = false;
+
+const CACHE_VERSION = 5;
 
 async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
     const raw = await readFile(CACHE_FILE, "utf-8");
     const data = JSON.parse(raw);
-    if (!data || data.version !== 4 || !Array.isArray(data.events)) {
+    if (!data || data.version !== CACHE_VERSION || !Array.isArray(data.events)) {
       console.log("Disk cache outdated (version mismatch), re-scanning");
       return null;
     }
@@ -101,7 +104,7 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify({ version: 4, events }));
+    await writeFile(CACHE_FILE, JSON.stringify({ version: CACHE_VERSION, events }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);
@@ -111,9 +114,18 @@ async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
 async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
   if (cachedEvents && !forceRefresh) return cachedEvents;
 
-  // Deduplicate: if a scan is already in-flight, wait for it
-  if (scanPromise) return scanPromise;
+  // If a scan is already in-flight...
+  if (scanPromise) {
+    // If we want a refresh but the in-flight scan is NOT a refresh,
+    // wait for it to finish, then start a fresh refresh scan
+    if (forceRefresh && !scanIsRefresh) {
+      await scanPromise;
+      return getEvents(true);
+    }
+    return scanPromise;
+  }
 
+  scanIsRefresh = forceRefresh;
   scanPromise = (async () => {
     try {
       // Try disk cache first (skip for refresh)
@@ -125,19 +137,29 @@ async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
         }
       }
 
+      const isIncremental = forceRefresh && cachedEvents !== null;
       console.log(
-        "Scanning teslacam folder (this may take a few minutes on cloud drives)..."
+        isIncremental
+          ? "Refreshing events (incremental scan)..."
+          : "Scanning teslacam folder (this may take a few minutes on cloud drives)..."
       );
       const start = performance.now();
-      cachedEvents = await scanTeslacamFolder(storage);
+      // Incremental: pass existing events so only new folders are scanned
+      const newEvents = await scanTeslacamFolder(
+        storage,
+        isIncremental ? cachedEvents! : undefined
+      );
       const elapsed = (performance.now() - start) / 1000;
       console.log(
-        `Found ${cachedEvents.length} events in ${elapsed.toFixed(1)}s`
+        `Found ${newEvents.length} events in ${elapsed.toFixed(1)}s`
       );
+      // Only update cache after successful scan (errors propagate, keeping old cache intact)
+      cachedEvents = newEvents;
       await saveDiskCache(cachedEvents);
       return cachedEvents;
     } finally {
       scanPromise = null;
+      scanIsRefresh = false;
     }
   })();
 
@@ -199,8 +221,18 @@ type TelemetryResult =
   | { hasSei: true; frameTimesMs: number[]; frames: TelemetryData["frames"] }
   | { hasSei: false };
 
+const TELEMETRY_CACHE_MAX = 200;
 const telemetryCache = new Map<string, TelemetryResult>();
 const NO_SEI: TelemetryResult = { hasSei: false };
+
+function telemetryCacheSet(key: string, value: TelemetryResult): void {
+  // LRU eviction: Map preserves insertion order, delete oldest if at capacity
+  if (telemetryCache.size >= TELEMETRY_CACHE_MAX) {
+    const oldest = telemetryCache.keys().next().value!;
+    telemetryCache.delete(oldest);
+  }
+  telemetryCache.set(key, value);
+}
 
 app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const { type, eventId, segment } = c.req.param();
@@ -230,7 +262,7 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
     const result: TelemetryResult = data
       ? { hasSei: true, frameTimesMs: data.frameTimesMs, frames: data.frames }
       : NO_SEI;
-    telemetryCache.set(cacheKey, result);
+    telemetryCacheSet(cacheKey, result);
     return c.json(result);
   } catch {
     return c.json(NO_SEI);
@@ -398,8 +430,8 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
 });
 
 app.post("/api/refresh", async (c) => {
-  storage.clearCache();
-  // Don't clear cachedEvents until new scan succeeds
+  // Don't clear storage dir cache here — incremental scan benefits from it.
+  // Users can clear it explicitly from the debug panel if needed.
   try {
     const events = await getEvents(true);
     return c.json(events);

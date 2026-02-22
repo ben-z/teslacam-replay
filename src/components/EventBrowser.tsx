@@ -483,9 +483,7 @@ function DebugPanel({ onClose }: { onClose: () => void }) {
     if (!caches) return;
     setClearing("all");
     try {
-      for (const c of caches) {
-        await clearCache(c.id);
-      }
+      await Promise.all(caches.map(c => clearCache(c.id)));
       load();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Clear failed");
