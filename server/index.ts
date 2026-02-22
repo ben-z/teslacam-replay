@@ -3,7 +3,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createReadStream } from "fs";
-import { readFile, writeFile, stat, mkdir } from "fs/promises";
+import { readFile, writeFile, stat, mkdir, readdir, rm, unlink } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
@@ -13,14 +13,58 @@ import {
   type DashcamEvent,
 } from "./scan.js";
 import { extractTelemetry, type TelemetryData } from "./sei.js";
-import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
+import { ensureHlsSegments, hlsManifestPath, hlsCacheDir, HLS_CACHE_DIR } from "./hls.js";
+import { LocalStorage, type StorageBackend } from "./storage.js";
+import { GoogleDriveStorage, DOWNLOAD_CACHE_DIR } from "./google-drive.js";
 
-const TESLACAM_PATH: string = process.env.TESLACAM_PATH ?? "";
-if (!TESLACAM_PATH) {
-  console.error("Error: TESLACAM_PATH environment variable is required.");
-  console.error("Usage: TESLACAM_PATH=/path/to/teslacam npm run dev:server");
-  process.exit(1);
+// --- Storage backend selection ---
+const STORAGE_BACKEND = process.env.STORAGE_BACKEND || "local";
+
+let storage: StorageBackend;
+
+async function initStorage(): Promise<StorageBackend> {
+  let backend: StorageBackend;
+
+  if (STORAGE_BACKEND === "googledrive") {
+    const credentialsFile = process.env.GOOGLE_DRIVE_CREDENTIALS_FILE;
+    if (!credentialsFile) {
+      console.error("Error: GOOGLE_DRIVE_CREDENTIALS_FILE is required when STORAGE_BACKEND=googledrive");
+      console.error("This should point to a JSON file with OAuth or service account credentials.");
+      process.exit(1);
+    }
+    backend = await GoogleDriveStorage.fromCredentialsFile(credentialsFile);
+    console.log(`Using Google Drive storage (credentials: ${credentialsFile})`);
+  } else {
+    const teslacamPath = process.env.TESLACAM_PATH ?? "";
+    if (!teslacamPath) {
+      console.error("Error: TESLACAM_PATH environment variable is required.");
+      console.error("Usage: TESLACAM_PATH=/path/to/teslacam npm run dev:server");
+      process.exit(1);
+    }
+    backend = new LocalStorage(teslacamPath);
+    console.log(`Using local storage (${teslacamPath})`);
+  }
+
+  // Startup sanity check: verify we can list the root and find TeslaCam folders
+  try {
+    const rootEntries = await backend.readdir("");
+    const expected = ["SavedClips", "SentryClips", "RecentClips"];
+    const found = expected.filter((e) => rootEntries.includes(e));
+    if (found.length === 0) {
+      console.warn("Warning: No TeslaCam folders (SavedClips, SentryClips, RecentClips) found.");
+      console.warn("Check that your storage path/folder contains TeslaCam data.");
+    } else {
+      console.log(`Found TeslaCam folders: ${found.join(", ")}`);
+    }
+  } catch (err) {
+    console.error("Error: Failed to access storage:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+
+  return backend;
 }
+
+storage = await initStorage();
 
 const CACHE_DIR = path.join(
   process.env.HOME || "/tmp",
@@ -85,7 +129,7 @@ async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
         "Scanning teslacam folder (this may take a few minutes on cloud drives)..."
       );
       const start = performance.now();
-      cachedEvents = await scanTeslacamFolder(TESLACAM_PATH);
+      cachedEvents = await scanTeslacamFolder(storage);
       const elapsed = (performance.now() - start) / 1000;
       console.log(
         `Found ${cachedEvents.length} events in ${elapsed.toFixed(1)}s`
@@ -106,12 +150,18 @@ function validateParams(...params: string[]): boolean {
   return params.every((p) => SAFE_PARAM.test(p));
 }
 
-function isWithinRoot(filePath: string): boolean {
-  const resolved = path.resolve(filePath);
-  return resolved.startsWith(path.resolve(TESLACAM_PATH) + path.sep);
-}
-
 // --- API Routes ---
+
+app.get("/api/status", (c) => {
+  return c.json({
+    storageBackend: STORAGE_BACKEND === "googledrive" ? "Google Drive" : "Local",
+    storagePath: STORAGE_BACKEND === "googledrive"
+      ? `Drive folder ${process.env.GOOGLE_DRIVE_FOLDER_ID || "(from credentials)"}`
+      : process.env.TESLACAM_PATH,
+    eventCount: cachedEvents?.length ?? null,
+    scanning: scanPromise !== null,
+  });
+});
 
 app.get("/api/events", async (c) => {
   const events = await getEvents();
@@ -130,14 +180,12 @@ app.get("/api/events/:type/:id", async (c) => {
 app.get("/api/events/:type/:id/thumbnail", async (c) => {
   const { type, id } = c.req.param();
   if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
-  const thumbPath = getThumbnailPath(TESLACAM_PATH, type, id);
-  if (!isWithinRoot(thumbPath)) return c.json({ error: "Invalid path" }, 400);
+  const thumbRelPath = getThumbnailPath(type, id);
   try {
-    await stat(thumbPath);
-    const stream = createReadStream(thumbPath);
+    const stream = await storage.createReadStream(thumbRelPath);
     c.header("Content-Type", "image/png");
     c.header("Cache-Control", "public, max-age=86400");
-    return new Response(Readable.toWeb(stream) as ReadableStream, {
+    return new Response(Readable.toWeb(stream as Readable) as ReadableStream, {
       headers: c.res.headers,
     });
   } catch {
@@ -174,11 +222,11 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const camera = clip.cameras.includes("front") ? "front" : clip.cameras[0];
   if (!camera) return c.json({ error: "No camera available" }, 404);
 
-  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera, clip.subfolder);
-  if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
+  const videoRelPath = getVideoPath(type, eventId, segment, camera, clip.subfolder);
 
   try {
-    const data = await extractTelemetry(videoPath);
+    const localPath = await storage.getLocalPath(videoRelPath);
+    const data = await extractTelemetry(localPath);
     const result: TelemetryResult = data
       ? { hasSei: true, frameTimesMs: data.frameTimesMs, frames: data.frames }
       : NO_SEI;
@@ -207,18 +255,35 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
     subfolder = clip?.subfolder;
   }
 
-  const videoPath = getVideoPath(TESLACAM_PATH, type, eventId, segment, camera, subfolder);
-  if (!isWithinRoot(videoPath)) return c.json({ error: "Invalid path" }, 400);
+  const videoRelPath = getVideoPath(type, eventId, segment, camera, subfolder);
 
-  // Verify source file exists
+  // Try streaming directly from remote storage (avoids downloading entire file)
+  const streamUrl = await storage.getStreamUrl?.(videoRelPath) ?? null;
+
+  // Get local file path as fallback (or primary for local storage)
+  let localPath: string;
   try {
-    await stat(videoPath);
+    localPath = streamUrl
+      ? videoRelPath // placeholder — won't be used by ffmpeg when streamUrl is set
+      : await storage.getLocalPath(videoRelPath);
   } catch {
     return c.json({ error: "Video not found" }, 404);
   }
 
+  // Verify source file exists locally (skip for streaming)
+  if (!streamUrl) {
+    try {
+      await stat(localPath);
+    } catch {
+      return c.json({ error: "Video not found" }, 404);
+    }
+  }
+
   // Ensure HLS segments are ready (lazy segmentation)
-  const ready = await ensureHlsSegments(videoPath, type, eventId, segment, camera);
+  const ready = await ensureHlsSegments(
+    { localPath, streamUrl: streamUrl ?? undefined },
+    type, eventId, segment, camera,
+  );
   if (!ready) {
     return c.json({ error: "Failed to process video" }, 500);
   }
@@ -262,7 +327,78 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
   });
 });
 
+// --- Debug: cache management ---
+
+async function dirSizeBytes(dirPath: string): Promise<number> {
+  try {
+    const entries = await readdir(dirPath, { withFileTypes: true });
+    let total = 0;
+    for (const entry of entries) {
+      const full = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        total += await dirSizeBytes(full);
+      } else {
+        try {
+          const s = await stat(full);
+          total += s.size;
+        } catch {}
+      }
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+app.get("/api/debug/caches", async (c) => {
+  const [diskStat, hlsSize, gdriveSize] = await Promise.all([
+    stat(CACHE_FILE).then((s) => ({ path: CACHE_FILE, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
+    dirSizeBytes(HLS_CACHE_DIR),
+    dirSizeBytes(DOWNLOAD_CACHE_DIR),
+  ]);
+
+  return c.json({
+    caches: [
+      { id: "events-disk", label: "Event scan cache", path: diskStat.path, sizeBytes: diskStat.sizeBytes },
+      { id: "events-memory", label: "Event scan (memory)", path: null, entryCount: cachedEvents?.length ?? 0 },
+      { id: "hls", label: "HLS segments", path: HLS_CACHE_DIR, sizeBytes: hlsSize },
+      { id: "gdrive-downloads", label: "Drive file downloads", path: DOWNLOAD_CACHE_DIR, sizeBytes: gdriveSize },
+      { id: "gdrive-dirs", label: "Drive directory listings (memory)", path: null, entryCount: storage.cacheEntryCount() },
+      { id: "telemetry", label: "Telemetry (memory)", path: null, entryCount: telemetryCache.size },
+    ],
+  });
+});
+
+app.post("/api/debug/caches/:id/clear", async (c) => {
+  const { id } = c.req.param();
+  switch (id) {
+    case "events-disk":
+      try { await unlink(CACHE_FILE); } catch {}
+      cachedEvents = null;
+      break;
+    case "events-memory":
+      cachedEvents = null;
+      break;
+    case "hls":
+      try { await rm(HLS_CACHE_DIR, { recursive: true, force: true }); } catch {}
+      break;
+    case "gdrive-downloads":
+      try { await rm(DOWNLOAD_CACHE_DIR, { recursive: true, force: true }); } catch {}
+      break;
+    case "gdrive-dirs":
+      storage.clearCache();
+      break;
+    case "telemetry":
+      telemetryCache.clear();
+      break;
+    default:
+      return c.json({ error: "Unknown cache id" }, 400);
+  }
+  return c.json({ ok: true });
+});
+
 app.post("/api/refresh", async (c) => {
+  storage.clearCache();
   // Don't clear cachedEvents until new scan succeeds
   try {
     const events = await getEvents(true);
@@ -285,7 +421,6 @@ if (process.env.SERVE_FRONTEND === "true") {
 
 const port = parseInt(process.env.PORT || "3001");
 console.log(`TeslaCam Replay server starting on http://localhost:${port}`);
-console.log(`Teslacam path: ${TESLACAM_PATH}`);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Server running on http://localhost:${info.port}`);

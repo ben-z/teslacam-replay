@@ -1,5 +1,5 @@
-import { readdir, readFile } from "fs/promises";
 import path from "path";
+import type { StorageBackend } from "./storage.js";
 
 export interface EventClip {
   timestamp: string; // e.g. "2025-06-01_18-07-09"
@@ -37,15 +37,14 @@ const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const SESSION_GAP_THRESHOLD = 120;
 
 export async function scanTeslacamFolder(
-  rootPath: string
+  storage: StorageBackend
 ): Promise<DashcamEvent[]> {
   const events: DashcamEvent[] = [];
 
   for (const type of ["SavedClips", "SentryClips"] as const) {
-    const typeDir = path.join(rootPath, type);
     let entries: string[];
     try {
-      entries = await readdir(typeDir);
+      entries = await storage.readdir(type);
     } catch {
       continue;
     }
@@ -58,7 +57,7 @@ export async function scanTeslacamFolder(
     for (let i = 0; i < folders.length; i += batchSize) {
       const batch = folders.slice(i, i + batchSize);
       const results = await Promise.all(
-        batch.map((folder) => scanEventFolder(rootPath, type, folder))
+        batch.map((folder) => scanEventFolder(storage, type, folder))
       );
       for (const event of results) {
         if (event) events.push(event);
@@ -67,7 +66,7 @@ export async function scanTeslacamFolder(
   }
 
   // Scan RecentClips (flat files + date subfolders)
-  const recentEvents = await scanRecentClips(rootPath);
+  const recentEvents = await scanRecentClips(storage);
   events.push(...recentEvents);
 
   events.sort((a, b) => b.id.localeCompare(a.id));
@@ -75,15 +74,15 @@ export async function scanTeslacamFolder(
 }
 
 async function scanEventFolder(
-  rootPath: string,
+  storage: StorageBackend,
   type: "SavedClips" | "SentryClips",
   folder: string
 ): Promise<DashcamEvent | null> {
-  const folderPath = path.join(rootPath, type, folder);
+  const folderPath = `${type}/${folder}`;
 
   let files: string[];
   try {
-    files = await readdir(folderPath);
+    files = await storage.readdir(folderPath);
   } catch {
     return null;
   }
@@ -92,7 +91,7 @@ async function scanEventFolder(
   let eventMeta: Record<string, string> = {};
   if (files.includes("event.json")) {
     try {
-      const raw = await readFile(path.join(folderPath, "event.json"), "utf-8");
+      const raw = await storage.readFileUtf8(`${folderPath}/event.json`);
       eventMeta = JSON.parse(raw);
     } catch {
       // ignore malformed event.json
@@ -176,11 +175,10 @@ function folderNameToISO(name: string): string {
 /**
  * Scan RecentClips: flat MP4 files + date subfolders, grouped into driving sessions.
  */
-async function scanRecentClips(rootPath: string): Promise<DashcamEvent[]> {
-  const recentDir = path.join(rootPath, "RecentClips");
+async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]> {
   let entries: string[];
   try {
-    entries = await readdir(recentDir);
+    entries = await storage.readdir("RecentClips");
   } catch {
     return [];
   }
@@ -204,7 +202,7 @@ async function scanRecentClips(rootPath: string): Promise<DashcamEvent[]> {
   for (const folder of dateFolders) {
     let files: string[];
     try {
-      files = await readdir(path.join(recentDir, folder));
+      files = await storage.readdir(`RecentClips/${folder}`);
     } catch {
       continue;
     }
@@ -275,7 +273,6 @@ async function scanRecentClips(rootPath: string): Promise<DashcamEvent[]> {
 }
 
 export function getVideoPath(
-  rootPath: string,
   type: string,
   eventId: string,
   segment: string,
@@ -285,17 +282,16 @@ export function getVideoPath(
   if (type === "RecentClips") {
     // RecentClips: files are either in a date subfolder or flat in RecentClips/
     if (subfolder) {
-      return path.join(rootPath, type, subfolder, `${segment}-${camera}.mp4`);
+      return `${type}/${subfolder}/${segment}-${camera}.mp4`;
     }
-    return path.join(rootPath, type, `${segment}-${camera}.mp4`);
+    return `${type}/${segment}-${camera}.mp4`;
   }
-  return path.join(rootPath, type, eventId, `${segment}-${camera}.mp4`);
+  return `${type}/${eventId}/${segment}-${camera}.mp4`;
 }
 
 export function getThumbnailPath(
-  rootPath: string,
   type: string,
   eventId: string
 ): string {
-  return path.join(rootPath, type, eventId, "thumb.png");
+  return `${type}/${eventId}/thumb.png`;
 }

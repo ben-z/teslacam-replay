@@ -22,10 +22,11 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 │                  │         │                    │
 │  GitHub Pages /  │         │  Reads dashcam     │
 │  any static host │         │  files from disk   │
+│                  │         │  or Google Drive   │
 └──────────────────┘         └──────────────────┘
 ```
 
-The frontend is a static SPA that can be hosted anywhere. The backend serves the API and streams video via HLS. They can run on the same machine or separately — the frontend can point to any backend URL.
+The frontend is a static SPA that can be hosted anywhere. The backend serves the API and streams video via HLS. Storage is pluggable — local disk (default) or Google Drive. They can run on the same machine or separately — the frontend can point to any backend URL.
 
 ## Quick Start
 
@@ -109,13 +110,16 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 
 | Variable | Required | Description |
 |---|---|---|
-| `TESLACAM_PATH` | Yes | Path to Tesla dashcam folder (e.g., `/mnt/usb/TeslaCam`) |
+| `STORAGE_BACKEND` | No | `local` (default) or `googledrive` |
+| `TESLACAM_PATH` | Yes (local) | Path to Tesla dashcam folder (e.g., `/mnt/usb/TeslaCam`) |
+| `GOOGLE_DRIVE_CREDENTIALS_FILE` | Yes (googledrive) | Path to OAuth or service account credentials JSON |
+| `GOOGLE_DRIVE_FOLDER_ID` | No | Override root folder ID (defaults to `root_folder_id` in credentials file) |
 | `PORT` | No | Server port (default: `3001`) |
 | `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
 
 ## Dashcam Folder Structure
 
-DashReplay expects the standard Tesla dashcam folder layout:
+TeslaCam Replay expects the standard Tesla dashcam folder layout:
 
 ```
 TeslaCam/

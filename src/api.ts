@@ -57,6 +57,39 @@ export async function fetchTelemetry(
   }
 }
 
+export interface ServerStatus {
+  storageBackend: string;
+  storagePath: string;
+  eventCount: number | null;
+  scanning: boolean;
+}
+
+export async function fetchStatus(): Promise<ServerStatus> {
+  const res = await fetch(`${API_BASE}/status`);
+  if (!res.ok) throw new Error(`Failed to fetch status: ${res.status}`);
+  return res.json();
+}
+
+export interface CacheInfo {
+  id: string;
+  label: string;
+  path: string | null;
+  sizeBytes?: number;
+  entryCount?: number;
+}
+
+export async function fetchCaches(): Promise<CacheInfo[]> {
+  const res = await fetch(`${API_BASE}/debug/caches`);
+  if (!res.ok) throw new Error(`Failed to fetch caches: ${res.status}`);
+  const data = await res.json();
+  return data.caches;
+}
+
+export async function clearCache(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/debug/caches/${id}/clear`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to clear cache: ${res.status}`);
+}
+
 export function hlsManifestUrl(
   type: string,
   eventId: string,

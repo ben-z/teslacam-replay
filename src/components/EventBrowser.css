@@ -456,3 +456,202 @@
     grid-template-columns: 1fr;
   }
 }
+
+.browse-status-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 24px;
+  font-size: 11px;
+  color: #666;
+  background: #111;
+  border-top: 1px solid #222;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.browse-status-sep {
+  color: #444;
+}
+
+.browse-status-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+/* Debug panel */
+.debug-toggle-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+.debug-toggle-btn:hover {
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+}
+
+.debug-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: debugFadeIn 0.15s ease;
+}
+
+@keyframes debugFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.debug-panel {
+  background: #141418;
+  border: 1px solid #2a2a2e;
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  width: 100%;
+  max-width: 560px;
+  max-height: 60vh;
+  overflow-y: auto;
+  animation: debugSlideUp 0.2s ease;
+}
+
+@keyframes debugSlideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.debug-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid #222;
+}
+
+.debug-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.debug-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.debug-panel-close:hover {
+  color: var(--text);
+}
+
+.debug-panel-error {
+  padding: 8px 16px;
+  color: #f87171;
+  font-size: 12px;
+}
+
+.debug-panel-loading {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.debug-cache-list {
+  padding: 8px 0;
+}
+
+.debug-cache-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  gap: 12px;
+}
+.debug-cache-row:hover {
+  background: rgba(255,255,255,0.02);
+}
+
+.debug-cache-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.debug-cache-label {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.debug-cache-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.debug-cache-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 250px;
+  opacity: 0.6;
+}
+
+.debug-cache-clear-btn {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.debug-cache-clear-btn:hover:not(:disabled) {
+  color: #f87171;
+  border-color: #5a2020;
+}
+.debug-cache-clear-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.debug-clear-all-btn {
+  display: block;
+  width: calc(100% - 32px);
+  margin: 4px 16px 14px;
+  padding: 8px;
+  background: #1a1215;
+  color: #f87171;
+  border: 1px solid #3a1818;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.debug-clear-all-btn:hover:not(:disabled) {
+  background: #2a1515;
+  border-color: #5a2020;
+}
+.debug-clear-all-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

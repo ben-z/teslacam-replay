@@ -5,7 +5,7 @@ import path from "path";
 
 const execFileAsync = promisify(execFile);
 
-const HLS_CACHE_DIR = "/tmp/teslacam-replay-hls";
+export const HLS_CACHE_DIR = "/tmp/teslacam-replay-hls";
 const HLS_SEGMENT_DURATION = 4; // seconds per chunk
 
 /**
@@ -36,14 +36,22 @@ export function hlsManifestPath(
 // Track in-flight segmentation to deduplicate concurrent requests
 const segmentingPromises = new Map<string, Promise<boolean>>();
 
+export interface HlsSource {
+  localPath: string;
+  streamUrl?: { url: string; headers: Record<string, string> };
+}
+
 /**
  * Ensure HLS segments exist for a given camera stream.
  * If already cached, returns immediately. If not, runs ffmpeg to segment.
+ * When streamUrl is provided, ffmpeg streams directly from the URL with Range
+ * requests instead of reading from a local file — dramatically reducing latency
+ * for remote storage backends like Google Drive.
  * Deduplicates concurrent requests for the same stream.
  * Returns true if segments are ready, false if segmentation failed.
  */
 export async function ensureHlsSegments(
-  sourcePath: string,
+  source: HlsSource,
   type: string,
   eventId: string,
   segment: string,
@@ -69,9 +77,26 @@ export async function ensureHlsSegments(
     try {
       await mkdir(cacheDir, { recursive: true });
 
-      // Segment with ffmpeg: copy codec, no transcoding
-      await execFileAsync("ffmpeg", [
-        "-i", sourcePath,
+      const args: string[] = [];
+
+      if (source.streamUrl) {
+        // Stream from remote URL — ffmpeg uses Range requests for seeking
+        const headerStr = Object.entries(source.streamUrl.headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\r\n") + "\r\n";
+        args.push(
+          "-headers", headerStr,
+          "-seekable", "1",
+          "-reconnect", "1",
+          "-reconnect_on_network_error", "1",
+          "-reconnect_delay_max", "5",
+          "-i", source.streamUrl.url,
+        );
+      } else {
+        args.push("-i", source.localPath);
+      }
+
+      args.push(
         "-c", "copy",
         "-hls_time", String(HLS_SEGMENT_DURATION),
         "-hls_segment_filename", path.join(cacheDir, "chunk_%03d.ts"),
@@ -79,7 +104,11 @@ export async function ensureHlsSegments(
         "-f", "hls",
         "-v", "error",
         manifestFile,
-      ], { timeout: 30000 });
+      );
+
+      // Longer timeout for remote streaming (network latency)
+      const timeout = source.streamUrl ? 120000 : 30000;
+      await execFileAsync("ffmpeg", args, { timeout });
 
       return true;
     } catch (err) {

@@ -3,6 +3,7 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .env
+google-drive-secrets.json
 .worktrees/
 *.png
 .playwright-mcp/
