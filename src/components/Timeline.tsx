@@ -1,10 +1,14 @@
-import { useMemo, useState, useCallback, useRef } from "react";
-import { Player } from "./Player";
+import { useMemo, useState, useCallback } from "react";
 import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
 interface Props {
   events: DashcamEvent[];
+  onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[]) => void;
+  selectedEvent?: DashcamEvent | null;
+  displayTime?: number;
+  isPlaying?: boolean;
+  compact?: boolean;
 }
 
 interface DayData {
@@ -68,22 +72,13 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events }: Props) {
-  const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
+export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
-  const playerWrapperRef = useRef<HTMLDivElement>(null);
 
   const sessionList = useMemo(
     () => [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
     [events],
   );
-
-  const selectedIdx = useMemo(() => {
-    if (!selectedEvent) return -1;
-    return sessionList.findIndex(
-      (e) => e.type === selectedEvent.type && e.id === selectedEvent.id
-    );
-  }, [sessionList, selectedEvent]);
 
   const days: DayData[] = useMemo(() => {
     const dayMap = new Map<string, SessionBlock[]>();
@@ -116,7 +111,6 @@ export function Timeline({ events }: Props) {
         dateStr,
         weekday: d.toLocaleDateString("en-US", { weekday: "short" }),
         dateLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-        // Sort: RecentClips first (base layer), then Sentry/Saved on top; within same type, by time
         sessions: sessions.sort((a, b) => {
           const aOrder = a.event.type === "RecentClips" ? 0 : 1;
           const bOrder = b.event.type === "RecentClips" ? 0 : 1;
@@ -128,25 +122,8 @@ export function Timeline({ events }: Props) {
   }, [events]);
 
   const handleSessionClick = useCallback((session: SessionBlock) => {
-    setSelectedEvent(session.event);
-    requestAnimationFrame(() => {
-      playerWrapperRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }, []);
-
-  const handleBack = useCallback(() => {
-    setSelectedEvent(null);
-  }, []);
-
-  const handleNavigate = useCallback(
-    (direction: -1 | 1) => {
-      const nextIdx = selectedIdx + direction;
-      if (nextIdx >= 0 && nextIdx < sessionList.length) {
-        setSelectedEvent(sessionList[nextIdx]);
-      }
-    },
-    [sessionList, selectedIdx]
-  );
+    onSelectEvent?.(session.event, sessionList);
+  }, [onSelectEvent, sessionList]);
 
   const handleBarMouseMove = useCallback((e: React.MouseEvent, day: DayData) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -156,7 +133,6 @@ export function Timeline({ events }: Props) {
       return;
     }
 
-    // Prefer Sentry/Saved hits over Recent when overlapping
     const hitTest = (s: SessionBlock) => hour >= s.startHour && hour <= s.endHour;
     const session = day.sessions.find((s) => hitTest(s) && s.event.type !== "RecentClips")
       || day.sessions.find(hitTest);
@@ -181,9 +157,27 @@ export function Timeline({ events }: Props) {
     return { recentCount: recent, eventCount: ev, totalMinutes: Math.round(sec / 60) };
   }, [events]);
 
+  // Compute playhead position on the timeline
+  const playheadInfo = useMemo(() => {
+    if (!selectedEvent || displayTime == null || !selectedEvent.clips[0]) return null;
+    const startDate = parseTimestamp(selectedEvent.clips[0].timestamp);
+    const startEpoch = startDate.getTime();
+    const currentEpoch = startEpoch + displayTime * 1000;
+    const currentDate = new Date(currentEpoch);
+
+    const y = startDate.getFullYear();
+    const mo = String(startDate.getMonth() + 1).padStart(2, "0");
+    const da = String(startDate.getDate()).padStart(2, "0");
+    const dateStr = `${y}-${mo}-${da}`;
+
+    const fractionalHour = toFractionalHour(currentDate);
+    const leftPct = (fractionalHour / 24) * 100;
+    return { dateStr, leftPct };
+  }, [selectedEvent, displayTime]);
+
   if (days.length === 0) {
     return (
-      <div className="timeline">
+      <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
         <div className="timeline-empty">No recent clips</div>
       </div>
     );
@@ -193,35 +187,25 @@ export function Timeline({ events }: Props) {
     selectedEvent?.type === event.type && selectedEvent?.id === event.id;
 
   return (
-    <div className="timeline">
-      {selectedEvent && (
-        <div className="timeline-player-wrapper" ref={playerWrapperRef}>
-          <Player
-            event={selectedEvent}
-            onBack={handleBack}
-            onNavigate={handleNavigate}
-            hasPrev={selectedIdx > 0}
-            hasNext={selectedIdx < sessionList.length - 1}
-          />
-        </div>
-      )}
-
+    <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
       <div className="timeline-overview">
-        <div className="timeline-toolbar">
-          <div className="timeline-summary">
-            <strong>{recentCount}</strong> session{recentCount !== 1 ? "s" : ""}
-            {eventCount > 0 && <>, <strong>{eventCount}</strong> event{eventCount !== 1 ? "s" : ""}</>}
-            {" "}across <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
-            &middot; {formatDurationShort(totalMinutes)} total
-          </div>
-          {eventCount > 0 && (
-            <div className="timeline-legend">
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
+        {!compact && (
+          <div className="timeline-toolbar">
+            <div className="timeline-summary">
+              <strong>{recentCount}</strong> session{recentCount !== 1 ? "s" : ""}
+              {eventCount > 0 && <>, <strong>{eventCount}</strong> event{eventCount !== 1 ? "s" : ""}</>}
+              {" "}across <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}{" "}
+              &middot; {formatDurationShort(totalMinutes)} total
             </div>
-          )}
-        </div>
+            {eventCount > 0 && (
+              <div className="timeline-legend">
+                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
+                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
+                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="timeline-scroll">
           {days.map((day) => (
@@ -251,6 +235,13 @@ export function Timeline({ events }: Props) {
                         />
                       );
                     })}
+                    {/* Playhead indicator */}
+                    {playheadInfo && playheadInfo.dateStr === day.dateStr && (
+                      <div
+                        className={`timeline-playhead ${isPlaying ? "timeline-playhead--playing" : ""}`}
+                        style={{ left: `${playheadInfo.leftPct}%` }}
+                      />
+                    )}
                   </div>
                   {HOUR_TICKS.map((h) => (
                     <div
@@ -265,19 +256,21 @@ export function Timeline({ events }: Props) {
           ))}
         </div>
 
-        <div className="timeline-axis">
-          <div className="timeline-axis-inner">
-            {HOUR_TICKS.map((h) => (
-              <span
-                key={h}
-                className="timeline-axis-label"
-                style={{ left: `${(h / 24) * 100}%` }}
-              >
-                {formatHour(h)}
-              </span>
-            ))}
+        {!compact && (
+          <div className="timeline-axis">
+            <div className="timeline-axis-inner">
+              {HOUR_TICKS.map((h) => (
+                <span
+                  key={h}
+                  className="timeline-axis-label"
+                  style={{ left: `${(h / 24) * 100}%` }}
+                >
+                  {formatHour(h)}
+                </span>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {tooltip && (

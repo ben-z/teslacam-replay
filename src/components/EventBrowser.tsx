@@ -263,7 +263,7 @@ export function EventBrowser({
             </p>
           </div>
         ) : view === "recent" ? (
-          <Timeline events={events} />
+          <Timeline events={events} onSelectEvent={onSelectEvent} />
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (

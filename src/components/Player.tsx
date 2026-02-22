@@ -13,6 +13,7 @@ interface Props {
   onNavigate?: (direction: -1 | 1) => void;
   hasPrev?: boolean;
   hasNext?: boolean;
+  onTimeUpdate?: (time: number, isPlaying: boolean) => void;
 }
 
 type Layout = "grid" | "focus";
@@ -44,7 +45,7 @@ const BADGE_MAP = {
   SavedClips: { label: "Saved", color: "var(--saved-color)" },
 } as const;
 
-export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
+export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpdate }: Props) {
   const [layout, setLayout] = useState<Layout>("grid");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -78,6 +79,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
   const endedCamerasRef = useRef<Set<CameraAngle>>(new Set());
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  onTimeUpdateRef.current = onTimeUpdate;
 
   // Keep refs in sync with state (displayTimeRef is omitted — it's the
   // source of truth, written by the sync interval and seekTo/loadSegment)
@@ -288,6 +291,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         const totalDur = segmentOffsetsRef.current[segmentOffsetsRef.current.length - 1];
         displayTimeRef.current = Math.min(displayTimeRef.current + elapsed, totalDur);
         setDisplayTime(displayTimeRef.current);
+        onTimeUpdateRef.current?.(displayTimeRef.current, true);
       }
 
       // 2. Sync each video independently to displayTime
@@ -434,6 +438,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((v) => v.pause());
+      onTimeUpdateRef.current?.(displayTimeRef.current, false);
     } else {
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -442,6 +447,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         v.playbackRate = playbackRateRef.current;
         v.play().catch(() => {});
       });
+      onTimeUpdateRef.current?.(displayTimeRef.current, true);
     }
   }, []);
 
@@ -485,6 +491,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       }
       setDisplayTime(clamped);
       displayTimeRef.current = clamped;
+      onTimeUpdateRef.current?.(clamped, isPlayingRef.current);
     },
     [event.clips, event.type, event.id, loadSegment, totalDuration, attachHls]
   );
@@ -655,6 +662,25 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       gridTemplateRows: `repeat(${sidebarCount}, minmax(0, 1fr))`,
     };
   };
+
+  // Wall-clock time: compute from first clip timestamp + displayTime
+  const wallClockStr = useMemo(() => {
+    if (!event.clips[0]?.timestamp) return null;
+    const ts = event.clips[0].timestamp;
+    const iso = ts.replace(/_/g, "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2");
+    const epoch = new Date(iso).getTime();
+    if (isNaN(epoch)) return null;
+    return epoch;
+  }, [event.clips]);
+
+  const wallClockDisplay = wallClockStr != null
+    ? new Date(wallClockStr + displayTime * 1000).toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZoneName: "short",
+      })
+    : null;
 
   const { label: badgeLabel, color: badgeColor } = BADGE_MAP[event.type];
 
@@ -1019,6 +1045,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
         <span className="player-time">
           {formatTime(displayTime)} / {formatTime(totalDuration)}
+          {wallClockDisplay && (
+            <span className="player-wall-clock">{wallClockDisplay}</span>
+          )}
         </span>
 
         <div className="player-timeline-wrapper">

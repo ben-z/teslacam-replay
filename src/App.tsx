@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { fetchEvents, refreshEvents } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
+import { Timeline } from "./components/Timeline";
 import type { DashcamEvent, ViewMode } from "./types";
 
 class ErrorBoundary extends Component<
@@ -60,6 +61,8 @@ export function App() {
   const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
   // The filtered list of events the user was browsing when they selected an event
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
+  const [playerDisplayTime, setPlayerDisplayTime] = useState(0);
+  const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
   const pushedHashRef = useRef(false);
 
   const loadEvents = useCallback(async () => {
@@ -176,6 +179,11 @@ export function App() {
     [navList, selectedIdx]
   );
 
+  const handleTimeUpdate = useCallback((time: number, playing: boolean) => {
+    setPlayerDisplayTime(time);
+    setPlayerIsPlaying(playing);
+  }, []);
+
   return (
     <ErrorBoundary>
       <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -188,13 +196,26 @@ export function App() {
             onRefresh={handleRefresh}
           />
         ) : selectedEvent ? (
-          <Player
-            event={selectedEvent}
-            onBack={handleBack}
-            onNavigate={handleNavigate}
-            hasPrev={selectedIdx > 0}
-            hasNext={selectedIdx < navList.length - 1}
-          />
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+            <Player
+              event={selectedEvent}
+              onBack={handleBack}
+              onNavigate={handleNavigate}
+              hasPrev={selectedIdx > 0}
+              hasNext={selectedIdx < navList.length - 1}
+              onTimeUpdate={handleTimeUpdate}
+            />
+            {selectedEvent.type === "RecentClips" && (
+              <Timeline
+                events={events}
+                selectedEvent={selectedEvent}
+                displayTime={playerDisplayTime}
+                isPlaying={playerIsPlaying}
+                onSelectEvent={handleSelectEvent}
+                compact
+              />
+            )}
+          </div>
         ) : null}
       </div>
     </ErrorBoundary>

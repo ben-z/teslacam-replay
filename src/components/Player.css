@@ -1,5 +1,6 @@
 .player-container {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: #000;
@@ -405,6 +406,12 @@
   color: var(--text-muted);
   white-space: nowrap;
   min-width: 80px;
+}
+
+.player-wall-clock {
+  margin-left: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .player-timeline-wrapper {

@@ -5,15 +5,6 @@
   overflow: hidden;
 }
 
-.timeline-player-wrapper {
-  flex-shrink: 0;
-  height: 55vh;
-  min-height: 300px;
-  max-height: 600px;
-  border-bottom: 2px solid var(--accent);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-}
-
 .timeline-overview {
   flex: 1;
   display: flex;
@@ -206,3 +197,71 @@
 .timeline-legend-dot--recent { background: var(--recent-color); }
 .timeline-legend-dot--sentry { background: var(--sentry-color); }
 .timeline-legend-dot--saved { background: var(--saved-color); }
+
+/* === Playhead indicator === */
+.timeline-playhead {
+  position: absolute;
+  inset-block: -2px;
+  width: 2px;
+  background: var(--accent);
+  z-index: 3;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  box-shadow: 0 0 6px var(--accent-glow);
+  pointer-events: none;
+}
+
+.timeline-playhead--playing {
+  animation: timeline-playhead-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes timeline-playhead-pulse {
+  0%, 100% { box-shadow: 0 0 6px var(--accent-glow); }
+  50% { box-shadow: 0 0 12px var(--accent-glow), 0 0 4px var(--accent); }
+}
+
+/* === Compact mode === */
+.timeline--compact {
+  height: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.timeline--compact .timeline-overview {
+  flex: none;
+}
+
+.timeline--compact .timeline-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.timeline--compact .timeline-day {
+  min-height: 28px;
+}
+
+.timeline--compact .timeline-day-label {
+  width: 72px;
+  padding: 4px 8px 4px 0;
+}
+
+.timeline--compact .timeline-day-label-weekday {
+  font-size: 10px;
+}
+
+.timeline--compact .timeline-day-label-date {
+  font-size: 10px;
+}
+
+.timeline--compact .timeline-bar-container {
+  min-height: 24px;
+}
+
+.timeline--compact .timeline-track {
+  inset: 4px 0;
+}
+
+.timeline--compact .timeline-empty {
+  height: 48px;
+  font-size: 11px;
+}
