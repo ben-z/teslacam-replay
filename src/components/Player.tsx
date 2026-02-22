@@ -53,6 +53,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
   const [videoErrors, setVideoErrors] = useState<Set<CameraAngle>>(new Set());
   const [bufferingCameras, setBufferingCameras] = useState<Set<CameraAngle>>(new Set());
+  const [endedCameras, setEndedCameras] = useState<Set<CameraAngle>>(new Set());
   const [segmentLoading, setSegmentLoading] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
@@ -79,13 +80,15 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
+  const endedCamerasRef = useRef<Set<CameraAngle>>(new Set());
 
-  // Keep refs in sync with state
+  // Keep refs in sync with state (displayTimeRef is omitted — it's the
+  // source of truth, written by the sync interval and seekTo/loadSegment)
   playbackRateRef.current = playbackRate;
-  displayTimeRef.current = displayTime;
   telemetryDataRef.current = telemetryData;
   bufferingCamerasRef.current = bufferingCameras;
   videoErrorsRef.current = videoErrors;
+  endedCamerasRef.current = endedCameras;
 
   // Cumulative start offsets for each segment, plus total duration
   const segmentOffsets = useMemo(() => {
@@ -162,46 +165,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     }
   }
 
-  // Primary camera for sync reference
-  const getPrimaryCamera = useCallback(
-    (): CameraAngle =>
-      activeCameras.includes("front") ? "front" : activeCameras[0] ?? "front",
-    [activeCameras]
-  );
-
-  // Find the best video element to use as sync reference.
-  // Prefers playing cameras over ended ones so display time keeps advancing
-  // even when some cameras have shorter data.
-  const findRefVideo = useCallback((): HTMLVideoElement | undefined => {
-    const errors = videoErrorsRef.current;
-    const buffering = bufferingCamerasRef.current;
-    const active = activeCamerasRef.current;
-    let fallback: HTMLVideoElement | undefined;
-
-    const isValid = (cam: CameraAngle) => {
-      if (errors.has(cam) || buffering.has(cam)) return null;
-      const v = videoElsRef.current.get(cam);
-      return v?.currentSrc && isFinite(v.currentTime) ? v : null;
-    };
-
-    // Prefer primary camera if still playing
-    const pCam = getPrimaryCamera();
-    const primary = isValid(pCam);
-    if (primary && !primary.ended) return primary;
-    if (primary) fallback = primary;
-
-    // Then any still-playing camera
-    for (const cam of active) {
-      const v = isValid(cam);
-      if (!v) continue;
-      if (!v.ended) return v;
-      if (!fallback) fallback = v;
-    }
-
-    // All ended — use first valid for stable display time
-    return fallback;
-  }, [getPrimaryCamera]);
-
   const setRef = useCallback(
     (camera: CameraAngle, el: HTMLVideoElement | null) => {
       if (el) videoElsRef.current.set(camera, el);
@@ -214,6 +177,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
   const handleVideoError = useCallback((cam: CameraAngle) => {
     setVideoErrors((prev) => new Set(prev).add(cam));
+    // Destroy HLS instance on fatal error — HLS.js can't recover in-place.
+    // attachHls will create a fresh instance when the camera is retried.
+    const hls = hlsInstancesRef.current.get(cam);
+    if (hls) { hls.destroy(); hlsInstancesRef.current.delete(cam); }
   }, []);
 
   const attachHls = useCallback((cam: CameraAngle, url: string) => {
@@ -250,12 +217,24 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
   // --- Stall detection ---
 
+  const handleEnded = useCallback((cam: CameraAngle) => {
+    // Ignore ended events during segment loading (stale events from previous segment)
+    if (segmentLoadingRef.current) return;
+    setEndedCameras((prev) => new Set(prev).add(cam));
+  }, []);
+
   const handleWaiting = useCallback((cam: CameraAngle) => {
     setBufferingCameras((prev) => new Set(prev).add(cam));
   }, []);
 
   const handlePlaying = useCallback((cam: CameraAngle) => {
     setBufferingCameras((prev) => {
+      const next = new Set(prev);
+      next.delete(cam);
+      return next;
+    });
+    setEndedCameras((prev) => {
+      if (!prev.has(cam)) return prev;
       const next = new Set(prev);
       next.delete(cam);
       return next;
@@ -276,71 +255,85 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
     attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
 
-    // Sync to a healthy camera's current time
+    // Sync to current displayTime
     const v = videoElsRef.current.get(cam);
     if (v) {
-      const ref = findRefVideo();
-      if (ref && ref !== v) v.currentTime = ref.currentTime;
+      v.currentTime = displayTimeRef.current - (segmentOffsetsRef.current[segmentIdxRef.current] || 0);
       v.playbackRate = playbackRateRef.current;
       if (isPlayingRef.current) v.play().catch(() => {});
     }
-  }, [event.clips, event.type, event.id, attachHls, findRefVideo]);
+  }, [event.clips, event.type, event.id, attachHls]);
 
-  // --- Resilient sync ---
-
-  const syncAll = useCallback(() => {
-    const ref = findRefVideo();
-    if (!ref) return;
-
-    const buffering = bufferingCamerasRef.current;
-    const errors = videoErrorsRef.current;
-    videoElsRef.current.forEach((v, cam) => {
-      if (v === ref || !v.currentSrc) return;
-      if (buffering.has(cam) || errors.has(cam)) return;
-      if (Math.abs(v.currentTime - ref.currentTime) > SYNC_THRESHOLD) {
-        v.currentTime = ref.currentTime;
-      }
-    });
-  }, [findRefVideo]);
-
-  // Periodic time + sync update + segment-end detection
+  // Periodic sync + time advancement + segment-end detection
+  //
+  // Time model: wall clock owns displayTime during playback. Videos sync TO it.
+  // This eliminates ref-camera selection, syncAll loops, and short-camera clamping.
+  // seekTo/loadSegment set displayTime to the target; the interval advances from there.
   const advanceSegmentRef = useRef<() => void>(() => {});
+  const lastTickRef = useRef(0);
   useEffect(() => {
     syncIntervalRef.current = setInterval(() => {
-      // Skip time updates while loading a new segment (video currentTime is stale)
+      const now = performance.now();
+      const elapsed = lastTickRef.current > 0
+        ? (now - lastTickRef.current) / 1000 * playbackRateRef.current
+        : 0;
+      lastTickRef.current = now;
+
       if (segmentLoadingRef.current) return;
 
-      const ref = findRefVideo();
+      const segOff = segmentOffsetsRef.current[segmentIdxRef.current] || 0;
 
-      if (ref) {
-        const t = (segmentOffsetsRef.current[segmentIdxRef.current] || 0) + ref.currentTime;
-        setDisplayTime(t);
-        displayTimeRef.current = t;
+      // 1. Advance displayTime via wall clock when playing
+      if (isPlayingRef.current) {
+        const totalDur = segmentOffsetsRef.current[segmentOffsetsRef.current.length - 1];
+        displayTimeRef.current = Math.min(displayTimeRef.current + elapsed, totalDur);
+        setDisplayTime(displayTimeRef.current);
+      }
 
-        // Find current telemetry frame via binary search on precomputed timestamps
-        const td = telemetryDataRef.current;
-        if (td && td.frames.length > 0) {
-          const localTimeMs = ref.currentTime * 1000;
-          let lo = 0, hi = td.frameTimesMs.length - 1;
-          while (lo < hi) {
-            const mid = (lo + hi + 1) >> 1;
-            if (td.frameTimesMs[mid] <= localTimeMs) lo = mid;
-            else hi = mid - 1;
-          }
-          setCurrentTelemFrame(td.frames[lo]);
+      // 2. Sync each video independently to displayTime
+      const expectedLocal = displayTimeRef.current - segOff;
+      const active = activeCamerasRef.current;
+      const errors = videoErrorsRef.current;
+      const buffering = bufferingCamerasRef.current;
+
+      for (const cam of active) {
+        const v = videoElsRef.current.get(cam);
+        if (!v?.currentSrc || errors.has(cam)) continue;
+        // Skip videos past their data range (short cameras)
+        if (v.ended || (isFinite(v.duration) && expectedLocal > v.duration + 0.5)) continue;
+        // Resume videos that should be playing but got paused (e.g., ended then seeked)
+        if (isPlayingRef.current && v.paused && !buffering.has(cam)) {
+          v.play().catch(() => {});
+        }
+        // Correct drift — only when video has data ready
+        if (!buffering.has(cam) && Math.abs(v.currentTime - expectedLocal) > SYNC_THRESHOLD) {
+          v.currentTime = expectedLocal;
         }
       }
+
+      // 3. Telemetry
+      const td = telemetryDataRef.current;
+      if (td && td.frames.length > 0) {
+        const localTimeMs = (displayTimeRef.current - segOff) * 1000;
+        let lo = 0, hi = td.frameTimesMs.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if (td.frameTimesMs[mid] <= localTimeMs) lo = mid;
+          else hi = mid - 1;
+        }
+        setCurrentTelemFrame(td.frames[lo]);
+      }
+
+      // 4. Auto-advance at segment boundary
       if (isPlayingRef.current) {
-        syncAll();
-        // Auto-advance: when display time reaches the next segment boundary
         const segEnd = segmentOffsetsRef.current[segmentIdxRef.current + 1];
-        if (segEnd !== undefined && displayTimeRef.current >= segEnd - 0.5) {
+        if (segEnd !== undefined && displayTimeRef.current >= segEnd - 0.1) {
           advanceSegmentRef.current();
         }
       }
     }, SYNC_INTERVAL);
     return () => clearInterval(syncIntervalRef.current);
-  }, [syncAll, findRefVideo]);
+  }, []);
 
   // Load a segment into all video elements
   const loadSegment = useCallback(
@@ -355,6 +348,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
 
       setVideoErrors(new Set());
       setBufferingCameras(new Set());
+      setEndedCameras(new Set());
       setSegmentLoading(true);
       segmentLoadingRef.current = true;
       setTelemetryData(null);
@@ -402,9 +396,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         clearTimeout(loadTimeoutRef.current);
         setSegmentLoading(false);
         segmentLoadingRef.current = false;
+        // Use displayTimeRef for the latest position (user may have seeked during load)
+        const localT = displayTimeRef.current - (segmentOffsetsRef.current[idx] || 0);
         videoElsRef.current.forEach((v, cam) => {
           if (!segCameras.includes(cam)) return;
-          v.currentTime = seekTime;
+          v.currentTime = Math.max(0, localT);
           v.playbackRate = playbackRateRef.current;
           if (isPlayingRef.current) v.play().catch(() => {});
         });
@@ -465,7 +461,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       setIsPlaying(false);
       videoElsRef.current.forEach((v) => v.pause());
     } else {
-      syncAll();
       isPlayingRef.current = true;
       setIsPlaying(true);
       videoElsRef.current.forEach((v) => {
@@ -474,7 +469,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         v.play().catch(() => {});
       });
     }
-  }, [syncAll]);
+  }, []);
 
   // Seek to global time
   const seekTo = useCallback(
@@ -493,15 +488,31 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         setSegmentIdx(newSegIdx);
         loadSegment(newSegIdx, localTime);
       } else {
+        // Clear ended/error state — seeking may reach a valid data range
+        setEndedCameras(new Set());
+        const prevErrors = videoErrorsRef.current;
+        if (prevErrors.size > 0) {
+          setVideoErrors(new Set());
+          // Re-attach HLS for errored cameras (instances were destroyed on fatal error)
+          const seg = event.clips[segmentIdxRef.current];
+          if (seg) {
+            for (const cam of prevErrors) {
+              if (seg.cameras.includes(cam)) {
+                attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam));
+              }
+            }
+          }
+        }
         videoElsRef.current.forEach((v) => {
           if (!v.currentSrc) return;
           v.currentTime = localTime;
+          if (isPlayingRef.current) v.play().catch(() => {});
         });
       }
       setDisplayTime(clamped);
       displayTimeRef.current = clamped;
     },
-    [event.clips.length, loadSegment, totalDuration]
+    [event.clips, event.type, event.id, loadSegment, totalDuration, attachHls]
   );
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -552,6 +563,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     displayTimeRef.current = 0;
     setVideoErrors(new Set());
     setBufferingCameras(new Set());
+    setEndedCameras(new Set());
     setTelemetryData(null);
     setCurrentTelemFrame(null);
 
@@ -947,12 +959,16 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
                   // Only report error if video has media loaded (ignore errors from clearing src)
                   if ((e.target as HTMLVideoElement).currentSrc) handleVideoError(cam);
                 }}
+                onEnded={() => handleEnded(cam)}
                 onWaiting={() => handleWaiting(cam)}
                 onPlaying={() => handlePlaying(cam)}
               />
               <span className="player-cam-label">{CAMERA_LABELS[cam]}</span>
               {bufferingCameras.has(cam) && !videoErrors.has(cam) && (
                 <span className="player-video-buffering">Buffering...</span>
+              )}
+              {endedCameras.has(cam) && !videoErrors.has(cam) && (
+                <span className="player-video-ended">No data</span>
               )}
               {videoErrors.has(cam) && (
                 <button
