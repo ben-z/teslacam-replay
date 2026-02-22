@@ -25,7 +25,7 @@ if (!TESLACAM_PATH) {
 const CACHE_DIR = path.join(
   process.env.HOME || "/tmp",
   ".cache",
-  "dash-replay"
+  "teslacam-replay"
 );
 const CACHE_FILE = path.join(CACHE_DIR, "events.json");
 
@@ -284,7 +284,7 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const port = parseInt(process.env.PORT || "3001");
-console.log(`DashReplay server starting on http://localhost:${port}`);
+console.log(`TeslaCam Replay server starting on http://localhost:${port}`);
 console.log(`Teslacam path: ${TESLACAM_PATH}`);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

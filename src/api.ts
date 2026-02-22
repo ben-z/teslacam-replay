@@ -1,6 +1,6 @@
 import type { DashcamEvent, TelemetryData } from "./types";
 
-const STORAGE_KEY = "dashreplay:api-url";
+const STORAGE_KEY = "teslacam-replay:api-url";
 
 function initApiBase(): string {
   const params = new URLSearchParams(window.location.search);

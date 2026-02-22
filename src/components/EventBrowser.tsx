@@ -165,7 +165,7 @@ export function EventBrowser({
     <div className="browse-container">
       <header className="browse-header">
         <div className="browse-header-top">
-          <h1 className="browse-title">DashReplay</h1>
+          <h1 className="browse-title">TeslaCam Replay</h1>
           <div className="browse-header-actions">
             <button
               onClick={onRefresh}

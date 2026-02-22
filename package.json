@@ -1,7 +1,7 @@
 {
-  "name": "dash-replay",
+  "name": "teslacam-replay",
   "version": "1.0.0",
-  "description": "Web app for browsing and replaying Tesla dashcam footage with synchronized multi-camera playback",
+  "description": "Browse and replay Tesla dashcam footage with synchronized multi-camera playback",
   "license": "MIT",
   "private": true,
   "type": "module",

@@ -1,4 +1,4 @@
-# DashReplay
+# TeslaCam Replay
 
 Web app for browsing and replaying Tesla dashcam footage with synchronized multi-camera playback.
 
@@ -39,8 +39,8 @@ The frontend is a static SPA that can be hosted anywhere. The backend serves the
 
 ```bash
 # Clone and install
-git clone https://github.com/ben-z/dash-replay.git
-cd dash-replay
+git clone https://github.com/ben-z/teslacam-replay.git
+cd teslacam-replay
 npm install
 
 # Configure
@@ -73,7 +73,7 @@ The frontend is automatically deployed to GitHub Pages on push to `main`. To con
 
 2. Open the GitHub Pages URL with a `?server=` parameter:
    ```
-   https://your-username.github.io/dash-replay/?server=http://your-server:3001
+   https://your-username.github.io/teslacam-replay/?server=http://your-server:3001
    ```
 
 The server URL is saved to localStorage, so you only need the `?server=` parameter once. To change it later, add the parameter again with a new URL.
