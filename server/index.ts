@@ -31,10 +31,9 @@ const CACHE_FILE = path.join(CACHE_DIR, "events.json");
 
 const app = new Hono();
 
-// CORS for dev (not needed in production since we serve the SPA)
-if (process.env.NODE_ENV !== "production") {
-  app.use("/api/*", cors());
-}
+// CORS: allow cross-origin requests so the frontend can be hosted separately
+// (e.g., GitHub Pages pointing at a self-hosted backend)
+app.use("/api/*", cors());
 
 // --- Event cache (memory + disk, with deduplication) ---
 let cachedEvents: DashcamEvent[] | null = null;
