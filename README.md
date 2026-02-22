@@ -62,6 +62,33 @@ npm start
 
 This builds the frontend to `dist/` and starts the server (which also serves the static files).
 
+### Docker
+
+The Docker image includes both the API server and the frontend. It's automatically built and pushed to `ghcr.io/ben-z/teslacam-replay` on every push to `main`.
+
+**All-in-one** (serves frontend + API on a single port):
+
+```bash
+docker run -d \
+  -p 3001:3001 \
+  -v /path/to/TeslaCam:/data:ro \
+  -e TESLACAM_PATH=/data \
+  -e NODE_ENV=production \
+  ghcr.io/ben-z/teslacam-replay
+```
+
+**API-only** (use with GitHub Pages or another frontend host):
+
+```bash
+docker run -d \
+  -p 3001:3001 \
+  -v /path/to/TeslaCam:/data:ro \
+  -e TESLACAM_PATH=/data \
+  ghcr.io/ben-z/teslacam-replay
+```
+
+Tags available: `latest` and full commit SHA (e.g., `sha-a1b2c3d4e5f6...`).
+
 ### GitHub Pages + Remote Backend
 
 The frontend is automatically deployed to GitHub Pages on push to `main`. To connect it to your backend:

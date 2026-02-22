@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.git
+.github
+.DS_Store
+.worktrees
+*.png
+*.tsbuildinfo
+.playwright-mcp
