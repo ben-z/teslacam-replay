@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Hls from "hls.js";
-import { hlsManifestUrl, fetchTelemetry } from "../api";
-import type { DashcamEvent, CameraAngle, TelemetryData, TelemetryFrame } from "../types";
+import { hlsManifestUrl } from "../api";
+import type { DashcamEvent, CameraAngle } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
+import { useTelemetry } from "../useTelemetry";
 import { TelemetryOverlay } from "./TelemetryOverlay";
 import "./Player.css";
 
@@ -61,9 +62,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const [viewCenter, setViewCenter] = useState(0);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(true);
-  const [telemetryLoading, setTelemetryLoading] = useState(false);
-  const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
-  const [currentTelemFrame, setCurrentTelemFrame] = useState<TelemetryFrame | null>(null);
 
   // Refs for mutable state (avoid stale closures)
   const videoElsRef = useRef<Map<CameraAngle, HTMLVideoElement>>(new Map());
@@ -77,7 +75,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   const segmentLoadingRef = useRef(false);
   const canplayCleanupRef = useRef<(() => void) | null>(null);
   const segmentOffsetsRef = useRef<number[]>([0]);
-  const telemetryDataRef = useRef<TelemetryData | null>(null);
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
   const endedCamerasRef = useRef<Set<CameraAngle>>(new Set());
@@ -85,7 +82,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   // Keep refs in sync with state (displayTimeRef is omitted — it's the
   // source of truth, written by the sync interval and seekTo/loadSegment)
   playbackRateRef.current = playbackRate;
-  telemetryDataRef.current = telemetryData;
   bufferingCamerasRef.current = bufferingCameras;
   videoErrorsRef.current = videoErrors;
   endedCamerasRef.current = endedCameras;
@@ -102,6 +98,10 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
   segmentOffsetsRef.current = segmentOffsets;
 
   const totalDuration = segmentOffsets[segmentOffsets.length - 1];
+
+  // Telemetry: fetches per-segment, syncs frame to displayTime
+  const { frame: currentTelemFrame, loading: telemetryLoading } =
+    useTelemetry(event, segmentIdx, displayTime, segmentOffsets);
 
   // Compute trigger time position on the seek bar (Sentry/Saved only)
   const triggerTimeGlobal = useMemo(() => {
@@ -311,20 +311,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
         }
       }
 
-      // 3. Telemetry
-      const td = telemetryDataRef.current;
-      if (td && td.frames.length > 0) {
-        const localTimeMs = (displayTimeRef.current - segOff) * 1000;
-        let lo = 0, hi = td.frameTimesMs.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi + 1) >> 1;
-          if (td.frameTimesMs[mid] <= localTimeMs) lo = mid;
-          else hi = mid - 1;
-        }
-        setCurrentTelemFrame(td.frames[lo]);
-      }
-
-      // 4. Auto-advance at segment boundary
+      // 3. Auto-advance at segment boundary
       if (isPlayingRef.current) {
         const segEnd = segmentOffsetsRef.current[segmentIdxRef.current + 1];
         if (segEnd !== undefined && displayTimeRef.current >= segEnd - 0.1) {
@@ -351,24 +338,11 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
       setEndedCameras(new Set());
       setSegmentLoading(true);
       segmentLoadingRef.current = true;
-      setTelemetryData(null);
-      setCurrentTelemFrame(null);
-      setTelemetryLoading(true);
 
       // Set displayTime immediately to avoid stale values during load
       const targetGlobalTime = (segmentOffsetsRef.current[idx] || 0) + seekTime;
       setDisplayTime(targetGlobalTime);
       displayTimeRef.current = targetGlobalTime;
-
-      // Fetch telemetry in parallel (fire-and-forget, won't block video)
-      const segTimestamp = seg.timestamp;
-      fetchTelemetry(event.type, event.id, segTimestamp).then((data) => {
-        // Guard against stale response from a previous segment's fetch
-        const currentSeg = event.clips[segmentIdxRef.current];
-        if (currentSeg?.timestamp !== segTimestamp) return;
-        setTelemetryData(data);
-        setTelemetryLoading(false);
-      });
 
       // Attach HLS to available cameras; keep last frame for unavailable ones
       for (const cam of allEventCameras) {
@@ -564,8 +538,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext }: Props) {
     setVideoErrors(new Set());
     setBufferingCameras(new Set());
     setEndedCameras(new Set());
-    setTelemetryData(null);
-    setCurrentTelemFrame(null);
 
     loadSegment(0, 0);
   }, [event.id, loadSegment]);
