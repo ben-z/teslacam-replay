@@ -1,17 +1,10 @@
 import { google, type drive_v3 } from "googleapis";
-import { mkdir, stat, writeFile, readFile } from "fs/promises";
+import { mkdir, stat, writeFile } from "fs/promises";
 import { createReadStream } from "fs";
 import path from "path";
 import type { StorageBackend } from "./storage.js";
 
 export const DOWNLOAD_CACHE_DIR = "/tmp/teslacam-replay-gdrive";
-
-interface OAuthCredentials {
-  client_id: string;
-  client_secret: string;
-  root_folder_id: string;
-  token: string; // JSON string containing access_token, refresh_token, expiry
-}
 
 /**
  * Google Drive storage backend.
@@ -35,59 +28,7 @@ export class GoogleDriveStorage implements StorageBackend {
   }
 
   /**
-   * Create a GoogleDriveStorage from a credentials JSON file.
-   * Supports two formats:
-   * - OAuth credentials (with client_id, client_secret, token containing refresh_token)
-   * - Service account key file (with type: "service_account")
-   */
-  static async fromCredentialsFile(credentialsFile: string): Promise<GoogleDriveStorage> {
-    const raw = await readFile(credentialsFile, "utf-8");
-    const creds = JSON.parse(raw);
-
-    if (creds.type === "service_account") {
-      // Service account JSON key
-      const auth = new google.auth.GoogleAuth({
-        keyFile: credentialsFile,
-        scopes: ["https://www.googleapis.com/auth/drive.readonly"],
-      });
-      const drive = google.drive({ version: "v3", auth });
-      const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || creds.root_folder_id;
-      if (!folderId) {
-        throw new Error("GOOGLE_DRIVE_FOLDER_ID is required for service account auth");
-      }
-      return new GoogleDriveStorage(drive, folderId);
-    }
-
-    if (creds.type === "drive" || (creds.client_id && creds.token)) {
-      // OAuth credentials (e.g. rclone-style)
-      const oauthCreds = creds as OAuthCredentials;
-      const tokenData = JSON.parse(oauthCreds.token);
-
-      const oauth2Client = new google.auth.OAuth2(
-        oauthCreds.client_id,
-        oauthCreds.client_secret
-      );
-      oauth2Client.setCredentials({
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        token_type: tokenData.token_type || "Bearer",
-      });
-
-      const drive = google.drive({ version: "v3", auth: oauth2Client });
-      const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || oauthCreds.root_folder_id;
-      if (!folderId) {
-        throw new Error("GOOGLE_DRIVE_FOLDER_ID or root_folder_id in credentials is required");
-      }
-      return new GoogleDriveStorage(drive, folderId);
-    }
-
-    throw new Error(
-      "Unrecognized credentials format. Expected service account key or OAuth credentials."
-    );
-  }
-
-  /**
-   * Create from an existing Drive client (used for testing).
+   * Create from an existing authenticated Drive client and folder ID.
    */
   static fromDriveClient(drive: drive_v3.Drive, rootFolderId: string): GoogleDriveStorage {
     return new GoogleDriveStorage(drive, rootFolderId);

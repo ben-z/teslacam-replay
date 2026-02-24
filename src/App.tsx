@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
 import type { ReactNode } from "react";
-import { fetchEvents, refreshEvents } from "./api";
+import { fetchEvents, refreshEvents, fetchStatus, type ServerStatus } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
 import { Timeline } from "./components/Timeline";
+import { SetupScreen } from "./components/SetupScreen";
 import type { DashcamEvent, ViewMode } from "./types";
 
 class ErrorBoundary extends Component<
@@ -50,8 +51,8 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
-
 export function App() {
+  const [status, setStatus] = useState<ServerStatus | null>(null);
   const [events, setEvents] = useState<DashcamEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -89,9 +90,17 @@ export function App() {
     }
   }, []);
 
-  useEffect(() => {
-    loadEvents();
+  const checkStatus = useCallback(() => {
+    setLoading(true);
+    fetchStatus().then((s) => {
+      setStatus(s);
+      if (s.connected) loadEvents();
+      else setLoading(false);
+    }).catch(() => setLoading(false));
   }, [loadEvents]);
+
+  // Check server status on mount to determine if setup is needed
+  useEffect(() => { checkStatus(); }, [checkStatus]);
 
   // Sync URL hash with browser back/forward
   useEffect(() => {
@@ -183,6 +192,20 @@ export function App() {
     setPlayerDisplayTime(time);
     setPlayerIsPlaying(playing);
   }, []);
+
+  const handleSetupComplete = () => {
+    setStatus(null);
+    checkStatus();
+  };
+
+  // Show setup screen when server reports not connected
+  if (status && !status.connected) {
+    return (
+      <ErrorBoundary>
+        <SetupScreen setupStep={status.setupStep} onComplete={handleSetupComplete} />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <ErrorBoundary>

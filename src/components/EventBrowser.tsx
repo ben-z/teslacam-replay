@@ -321,7 +321,7 @@ export function EventBrowser({
         )}
       </div>
 
-      {status && (
+      {status?.connected && (
         <div className="browse-status-bar">
           <span>Server: {getApiBase()}</span>
           <span className="browse-status-sep">&middot;</span>

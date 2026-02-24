@@ -57,17 +57,39 @@ export async function fetchTelemetry(
   }
 }
 
-export interface ServerStatus {
-  storageBackend: string;
-  storagePath: string;
-  eventCount: number | null;
-  scanning: boolean;
-}
+export type ServerStatus =
+  | { connected: false; setupStep: "oauth" | "folder" }
+  | {
+      connected: true;
+      storageBackend: string;
+      storagePath: string;
+      eventCount: number | null;
+      scanning: boolean;
+    };
 
 export async function fetchStatus(): Promise<ServerStatus> {
   const res = await fetch(`${API_BASE}/status`);
   if (!res.ok) throw new Error(`Failed to fetch status: ${res.status}`);
   return res.json();
+}
+
+export async function fetchOAuthStartUrl(): Promise<string> {
+  const res = await fetch(`${API_BASE}/oauth/start`);
+  if (!res.ok) throw new Error(`Failed to start OAuth: ${res.status}`);
+  const data = await res.json();
+  return data.url;
+}
+
+export async function submitFolderUrl(folderUrl: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/oauth/select-folder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folderUrl }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({ error: "Failed" }));
+    throw new Error(data.error || `Failed to select folder: ${res.status}`);
+  }
 }
 
 export interface CacheInfo {
