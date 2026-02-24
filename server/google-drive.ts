@@ -1,10 +1,11 @@
 import { google, type drive_v3 } from "googleapis";
-import { mkdir, stat, writeFile } from "fs/promises";
+import { mkdir, readFile, stat, writeFile } from "fs/promises";
 import { createReadStream } from "fs";
 import path from "path";
 import type { StorageBackend } from "./storage.js";
 
 export const DOWNLOAD_CACHE_DIR = "/tmp/teslacam-replay-gdrive";
+const DIR_CACHE_PATH = "./data/google-drive-dircache.json";
 
 /**
  * Google Drive storage backend.
@@ -22,6 +23,9 @@ export class GoogleDriveStorage implements StorageBackend {
   // Deduplicate in-flight file downloads (avoids redundant downloads from parallel requests)
   private pendingDownloads = new Map<string, Promise<string>>();
 
+  private dirCacheDirty = false;
+  private savePending = false;
+
   private constructor(drive: drive_v3.Drive, rootFolderId: string) {
     this.drive = drive;
     this.rootFolderId = rootFolderId;
@@ -29,9 +33,46 @@ export class GoogleDriveStorage implements StorageBackend {
 
   /**
    * Create from an existing authenticated Drive client and folder ID.
+   * Loads persisted directory cache from disk if available.
    */
-  static fromDriveClient(drive: drive_v3.Drive, rootFolderId: string): GoogleDriveStorage {
-    return new GoogleDriveStorage(drive, rootFolderId);
+  static async fromDriveClient(drive: drive_v3.Drive, rootFolderId: string): Promise<GoogleDriveStorage> {
+    const instance = new GoogleDriveStorage(drive, rootFolderId);
+    await instance.loadDirCache();
+    return instance;
+  }
+
+  private async loadDirCache(): Promise<void> {
+    try {
+      const raw = await readFile(DIR_CACHE_PATH, "utf-8");
+      const entries: [string, [string, { id: string; mimeType: string }][]][] = JSON.parse(raw);
+      for (const [path, items] of entries) {
+        this.dirCache.set(path, new Map(items));
+      }
+      console.log(`Loaded ${this.dirCache.size} dir cache entries from disk`);
+    } catch {
+      // No cache file or invalid — start fresh
+    }
+  }
+
+  private scheduleSaveDirCache(): void {
+    this.dirCacheDirty = true;
+    if (this.savePending) return;
+    this.savePending = true;
+    // Debounce: save once after current batch of API calls settles
+    setTimeout(async () => {
+      this.savePending = false;
+      if (!this.dirCacheDirty) return;
+      this.dirCacheDirty = false;
+      try {
+        const data = Array.from(this.dirCache.entries()).map(
+          ([p, m]) => [p, Array.from(m.entries())] as const
+        );
+        await mkdir(path.dirname(DIR_CACHE_PATH), { recursive: true });
+        await writeFile(DIR_CACHE_PATH, JSON.stringify(data));
+      } catch (err) {
+        console.error("Failed to save dir cache:", err);
+      }
+    }, 2000);
   }
 
   /**
@@ -68,6 +109,7 @@ export class GoogleDriveStorage implements StorageBackend {
         } while (pageToken);
 
         this.dirCache.set(cachePath, entries);
+        this.scheduleSaveDirCache();
         return entries;
       } finally {
         this.pendingListFolder.delete(cachePath);
@@ -222,10 +264,28 @@ export class GoogleDriveStorage implements StorageBackend {
     };
   }
 
-  /** Clear the directory listing cache. Called on refresh. */
+  /** Clear top-level dir listings so new folders are discovered on refresh.
+   *  Keeps per-event subfolder caches to avoid re-fetching hundreds of listings.
+   *  Also clears the most recent RecentClips date folder (may have new clips). */
   clearCache(): void {
+    let latestRecent = "";
+    for (const key of this.dirCache.keys()) {
+      if (!key.includes("/")) {
+        this.dirCache.delete(key);
+      } else if (key.startsWith("RecentClips/") && key > latestRecent) {
+        latestRecent = key;
+      }
+    }
+    if (latestRecent) this.dirCache.delete(latestRecent);
+    this.pendingListFolder.clear();
+    this.scheduleSaveDirCache();
+  }
+
+  /** Clear all cached directory listings. Used by debug panel. */
+  clearAllCaches(): void {
     this.dirCache.clear();
     this.pendingListFolder.clear();
+    this.scheduleSaveDirCache();
   }
 
   cacheEntryCount(): number {

@@ -54,7 +54,7 @@ async function activateStorage(
     }
   });
   const drive = google.drive({ version: "v3", auth: oauth2Client });
-  storage = GoogleDriveStorage.fromDriveClient(drive, folderId);
+  storage = await GoogleDriveStorage.fromDriveClient(drive, folderId);
   console.log(`Google Drive storage activated (folder: ${folderId})`);
 }
 
@@ -480,7 +480,7 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
       try { await rm(DOWNLOAD_CACHE_DIR, { recursive: true, force: true }); } catch {}
       break;
     case "gdrive-dirs":
-      storage?.clearCache();
+      if (storage instanceof GoogleDriveStorage) storage.clearAllCaches();
       break;
     case "telemetry":
       telemetryCache.clear();

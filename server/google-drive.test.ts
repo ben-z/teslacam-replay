@@ -1,5 +1,16 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach } from "vitest";
 import { GoogleDriveStorage } from "./google-drive";
+
+// Prevent disk I/O from dir cache persistence during tests
+vi.mock("fs/promises", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("fs/promises")>();
+  return {
+    ...mod,
+    readFile: vi.fn().mockRejectedValue(new Error("no file")),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+    mkdir: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 /**
  * Create a mock Drive client for testing.
@@ -59,9 +70,9 @@ describe("GoogleDriveStorage", () => {
   let storage: GoogleDriveStorage;
   let mock: ReturnType<typeof createMockDrive>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mock = createMockDrive();
-    storage = GoogleDriveStorage.fromDriveClient(mock.drive, "root-folder-id");
+    storage = await GoogleDriveStorage.fromDriveClient(mock.drive, "root-folder-id");
   });
 
   describe("readdir", () => {
