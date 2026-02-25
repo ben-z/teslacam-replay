@@ -545,7 +545,7 @@ app.get("/api/oauth/callback", async (c) => {
     }
 
     console.log("OAuth tokens saved successfully");
-    return c.redirect("/");
+    return c.html("<h1>Authorized</h1><p>You can close this tab and return to the app.</p>");
   } catch (err) {
     console.error("OAuth token exchange failed:", err);
     return c.json({ error: "Token exchange failed" }, 500);

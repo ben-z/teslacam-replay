@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { fetchOAuthStartUrl, submitFolderUrl } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { fetchOAuthStartUrl, fetchStatus, submitFolderUrl } from "../api";
 import "./SetupScreen.css";
 
 interface Props {
@@ -43,14 +43,32 @@ function DriveIcon() {
 
 function OAuthStep() {
   const [loading, setLoading] = useState(false);
+  const [waiting, setWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval>>(null);
+
+  useEffect(() => {
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, []);
 
   const handleConnect = async () => {
     setLoading(true);
     setError(null);
     try {
       const url = await fetchOAuthStartUrl();
-      window.location.href = url;
+      window.open(url, "_blank");
+      setLoading(false);
+      setWaiting(true);
+      // Poll for status change after user completes OAuth in the other tab
+      intervalRef.current = setInterval(async () => {
+        try {
+          const s = await fetchStatus();
+          if (s.setupStep === "folder" || s.connected) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            window.location.reload();
+          }
+        } catch { /* ignore polling errors */ }
+      }, 2000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start OAuth");
       setLoading(false);
@@ -62,8 +80,8 @@ function OAuthStep() {
       <p className="setup-desc">
         Sign in with Google to allow read-only access to your TeslaCam files on Drive.
       </p>
-      <button className="setup-btn" onClick={handleConnect} disabled={loading}>
-        {loading ? "Redirecting..." : <><DriveIcon /> Connect Google Drive</>}
+      <button className="setup-btn" onClick={handleConnect} disabled={loading || waiting}>
+        {loading ? "Opening..." : waiting ? "Waiting for authorization..." : <><DriveIcon /> Connect Google Drive</>}
       </button>
       {error && <p className="setup-error">{error}</p>}
     </div>
