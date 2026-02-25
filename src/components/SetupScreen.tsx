@@ -63,7 +63,7 @@ function OAuthStep() {
       intervalRef.current = setInterval(async () => {
         try {
           const s = await fetchStatus();
-          if (s.setupStep === "folder" || s.connected) {
+          if (s.connected || s.setupStep === "folder") {
             if (intervalRef.current) clearInterval(intervalRef.current);
             window.location.reload();
           }
