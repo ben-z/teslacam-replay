@@ -176,7 +176,18 @@ async function runSegmentation(
     const elapsed = ((performance.now() - start) / 1000).toFixed(1);
 
     if (exitCode === 0) {
-      console.log(`HLS: done ${cacheKey} in ${elapsed}s`);
+      // Count chunks and total duration from the manifest
+      let info = "";
+      try {
+        const manifest = await readFile(manifestFile, "utf-8");
+        const durations = manifest.match(/#EXTINF:([\d.]+)/g);
+        if (durations) {
+          const chunks = durations.length;
+          const totalSec = durations.reduce((sum, d) => sum + parseFloat(d.split(":")[1]), 0);
+          info = ` (${totalSec.toFixed(0)}s source, ${chunks} chunks)`;
+        }
+      } catch {}
+      console.log(`HLS: done ${cacheKey} in ${elapsed}s${info}`);
       return true;
     }
 
