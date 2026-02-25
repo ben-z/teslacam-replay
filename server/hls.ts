@@ -7,9 +7,13 @@ import { HLS_CACHE_DIR } from "./paths.js";
 const execFileAsync = promisify(execFile);
 const HLS_SEGMENT_DURATION = 4; // seconds per chunk
 
+// Re-encode video at this bitrate (e.g. "800k", "2M"). Empty = remux only (copy mode).
+const HLS_BITRATE = process.env.HLS_BITRATE || "";
+const HLS_ENCODING_LABEL = HLS_BITRATE || "copy";
+
 /**
  * Get the cache directory for a specific camera stream.
- * Structure: {HLS_CACHE_DIR}/{type}/{eventId}/{segment}/{camera}/
+ * Includes encoding profile so different bitrates don't serve stale segments.
  */
 export function hlsCacheDir(
   type: string,
@@ -17,7 +21,7 @@ export function hlsCacheDir(
   segment: string,
   camera: string
 ): string {
-  return path.join(HLS_CACHE_DIR, type, eventId, segment, camera);
+  return path.join(HLS_CACHE_DIR, HLS_ENCODING_LABEL, type, eventId, segment, camera);
 }
 
 /**
@@ -30,6 +34,17 @@ export function hlsManifestPath(
   camera: string
 ): string {
   return path.join(hlsCacheDir(type, eventId, segment, camera), "stream.m3u8");
+}
+
+/**
+ * Return ffmpeg codec flags: re-encode with libx264 when HLS_BITRATE is set,
+ * otherwise pass streams through unchanged.
+ */
+function codecArgs(): string[] {
+  if (HLS_BITRATE) {
+    return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
+  }
+  return ["-c", "copy"];
 }
 
 // Track in-flight segmentation to deduplicate concurrent requests
@@ -95,8 +110,8 @@ export async function ensureHlsSegments(
         args.push("-i", source.localPath);
       }
 
+      args.push(...codecArgs());
       args.push(
-        "-c", "copy",
         "-hls_time", String(HLS_SEGMENT_DURATION),
         "-hls_segment_filename", path.join(cacheDir, "chunk_%03d.ts"),
         "-hls_playlist_type", "vod",
@@ -105,8 +120,8 @@ export async function ensureHlsSegments(
         manifestFile,
       );
 
-      // Longer timeout for remote streaming (network latency)
-      const timeout = source.streamUrl ? 120000 : 30000;
+      // Longer timeout for remote streaming or re-encoding
+      const timeout = (source.streamUrl || HLS_BITRATE) ? 120000 : 30000;
       await execFileAsync("ffmpeg", args, { timeout });
 
       return true;
