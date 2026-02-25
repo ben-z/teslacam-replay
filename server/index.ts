@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { compress } from "hono/compress";
 import { google } from "googleapis";
 import { createReadStream } from "fs";
 import { readFile, writeFile, stat, mkdir, readdir, rm, unlink } from "fs/promises";
@@ -123,6 +124,7 @@ const app = new Hono();
 // CORS: allow cross-origin requests so the frontend can be hosted separately
 // (e.g., GitHub Pages pointing at a self-hosted backend)
 app.use("/api/*", cors());
+app.use("/api/*", compress());
 
 // Guard: return 503 when storage is not yet configured (skip status + oauth routes)
 app.use("/api/*", async (c, next) => {
