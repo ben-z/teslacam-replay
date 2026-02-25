@@ -10,6 +10,10 @@ const HLS_SEGMENT_DURATION = 4; // seconds per chunk
 // Re-encode video at this bitrate (e.g. "800k", "2M"). Empty = remux only (copy mode).
 const HLS_BITRATE = process.env.HLS_BITRATE || "";
 
+// Downscale video width before encoding (e.g. "960", "640"). Height scales proportionally.
+// Only applies when HLS_BITRATE is set (transcoding mode). Empty = keep original resolution.
+const HLS_WIDTH = process.env.HLS_WIDTH || "";
+
 // Detect available H.264 encoder at startup
 async function detectEncoder(): Promise<string> {
   if (!HLS_BITRATE) {
@@ -26,13 +30,16 @@ async function detectEncoder(): Promise<string> {
     // ffmpeg not found or failed — will error later when actually needed
   }
   const label = encoder === "h264_videotoolbox" ? "VideoToolbox (hardware)" : "software";
-  console.log(`HLS: transcoding at ${HLS_BITRATE} using ${label} encoder`);
+  const scaleLabel = HLS_WIDTH ? `, scale to ${HLS_WIDTH}w` : "";
+  console.log(`HLS: transcoding at ${HLS_BITRATE} using ${label} encoder${scaleLabel}`);
   return encoder;
 }
 
 const hlsEncoder = await detectEncoder();
 
-const HLS_ENCODING_LABEL = HLS_BITRATE || "copy";
+const HLS_ENCODING_LABEL = HLS_BITRATE
+  ? `${HLS_BITRATE}${HLS_WIDTH ? `_${HLS_WIDTH}` : ""}`
+  : "copy";
 
 /**
  * Get the cache directory for a specific camera stream.
@@ -64,10 +71,11 @@ export function hlsManifestPath(
  */
 function codecArgs(): string[] {
   if (!HLS_BITRATE) return ["-c", "copy"];
+  const scale = HLS_WIDTH ? ["-vf", `scale=${HLS_WIDTH}:-2`] : [];
   if (hlsEncoder === "h264_videotoolbox") {
-    return ["-c:v", "h264_videotoolbox", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
+    return [...scale, "-c:v", "h264_videotoolbox", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
   }
-  return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
+  return [...scale, "-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
 }
 
 // --- Job tracking ---
