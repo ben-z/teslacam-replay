@@ -382,11 +382,13 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
   }
 
   const manifestFile = hlsManifestPath(type, eventId, segment, camera);
-  const stream = createReadStream(manifestFile);
-  return new Response(Readable.toWeb(stream) as ReadableStream, {
+  const manifestContent = await readFile(manifestFile, "utf-8");
+  const isComplete = manifestContent.includes("#EXT-X-ENDLIST");
+  return new Response(manifestContent, {
     headers: {
       "Content-Type": "application/vnd.apple.mpegurl",
-      "Cache-Control": "public, max-age=86400",
+      // In-progress manifests must not be cached so hls.js can poll for new segments
+      "Cache-Control": isComplete ? "public, max-age=86400" : "no-cache",
     },
   });
 });

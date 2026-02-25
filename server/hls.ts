@@ -1,5 +1,5 @@
-import { execFile } from "child_process";
-import { stat, mkdir } from "fs/promises";
+import { execFile, spawn } from "child_process";
+import { stat, mkdir, readFile, writeFile, rm } from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { HLS_CACHE_DIR } from "./paths.js";
@@ -70,8 +70,10 @@ function codecArgs(): string[] {
   return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
 }
 
-// Track in-flight segmentation to deduplicate concurrent requests
-const segmentingPromises = new Map<string, Promise<boolean>>();
+// --- Job tracking and concurrency ---
+
+/** Tracks an in-flight ffmpeg job. Callers await `manifestReady`. */
+const activeJobs = new Map<string, Promise<boolean>>();
 
 // Limit concurrent ffmpeg processes to prevent I/O exhaustion.
 // Hardware encoding uses minimal CPU, so we can run more concurrently.
@@ -90,8 +92,32 @@ async function acquireSlot(): Promise<void> {
 
 function releaseSlot(): void {
   const next = waitQueue.shift();
-  if (next) next(); // hand slot directly to next waiter
+  if (next) next();
   else activeCount--;
+}
+
+/** Check if a manifest is complete (has #EXT-X-ENDLIST). */
+async function isCompleteManifest(manifestPath: string): Promise<boolean> {
+  try {
+    const content = await readFile(manifestPath, "utf-8");
+    return content.includes("#EXT-X-ENDLIST");
+  } catch {
+    return false;
+  }
+}
+
+/** Poll for manifest file to appear on disk. */
+async function waitForManifest(manifestPath: string, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      await stat(manifestPath);
+      return true;
+    } catch {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+  return false;
 }
 
 export interface HlsSource {
@@ -100,13 +126,101 @@ export interface HlsSource {
 }
 
 /**
- * Ensure HLS segments exist for a given camera stream.
- * If already cached, returns immediately. If not, runs ffmpeg to segment.
- * When streamUrl is provided, ffmpeg streams directly from the URL with Range
- * requests instead of reading from a local file — dramatically reducing latency
- * for remote storage backends like Google Drive.
- * Deduplicates concurrent requests for the same stream.
- * Returns true if segments are ready, false if segmentation failed.
+ * Run ffmpeg to produce HLS segments. Resolves true once the manifest
+ * file appears on disk (progressive serving), even though ffmpeg may
+ * still be writing additional segments.
+ */
+async function runSegmentation(
+  source: HlsSource,
+  cacheDir: string,
+  manifestFile: string,
+  cacheKey: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  await acquireSlot();
+  const queued = waitQueue.length;
+  console.log(`HLS: segmenting ${cacheKey} [${activeCount}/${MAX_CONCURRENT} active${queued > 0 ? `, ${queued} queued` : ""}]`);
+  const start = performance.now();
+
+  try {
+    await mkdir(cacheDir, { recursive: true });
+
+    const args: string[] = [];
+
+    if (source.streamUrl) {
+      const headerStr = Object.entries(source.streamUrl.headers)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\r\n") + "\r\n";
+      args.push(
+        "-headers", headerStr,
+        "-seekable", "1",
+        "-reconnect", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_delay_max", "5",
+        "-i", source.streamUrl.url,
+      );
+    } else {
+      args.push("-i", source.localPath);
+    }
+
+    args.push(...codecArgs());
+    args.push(
+      "-hls_time", String(HLS_SEGMENT_DURATION),
+      "-hls_segment_filename", path.join(cacheDir, "chunk_%03d.ts"),
+      "-hls_playlist_type", "event",
+      "-hls_list_size", "0",
+      "-hls_flags", "temp_file",
+      "-f", "hls",
+      "-v", "error",
+      manifestFile,
+    );
+
+    const ffmpeg = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+
+    let stderrOutput = "";
+    ffmpeg.stderr!.on("data", (chunk: Buffer) => { stderrOutput += chunk.toString(); });
+
+    const killTimer = setTimeout(() => ffmpeg.kill("SIGKILL"), timeoutMs);
+
+    // Wait for ffmpeg to exit
+    const exitCode = await new Promise<number | null>(resolve => {
+      ffmpeg.on("close", resolve);
+    });
+    clearTimeout(killTimer);
+
+    const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+
+    if (exitCode === 0) {
+      console.log(`HLS: done ${cacheKey} in ${elapsed}s`);
+      return true;
+    }
+
+    const msg = stderrOutput.split("\n").filter(Boolean)[0] || `exit ${exitCode}`;
+    console.error(`HLS: failed ${cacheKey} after ${elapsed}s: ${msg}`);
+    // Append ENDLIST so hls.js stops polling and plays what we have
+    try {
+      const content = await readFile(manifestFile, "utf-8");
+      if (!content.includes("#EXT-X-ENDLIST")) {
+        await writeFile(manifestFile, content + "#EXT-X-ENDLIST\n");
+      }
+    } catch {
+      // Manifest may not exist if ffmpeg failed before writing any segment
+    }
+    return false;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    console.error(`HLS: error ${cacheKey}: ${msg}`);
+    return false;
+  } finally {
+    releaseSlot();
+    activeJobs.delete(cacheKey);
+  }
+}
+
+/**
+ * Ensure HLS segments are available for a given camera stream.
+ * Returns true as soon as the first segment is ready (progressive serving).
+ * ffmpeg continues producing segments in the background.
  */
 export async function ensureHlsSegments(
   source: HlsSource,
@@ -117,75 +231,36 @@ export async function ensureHlsSegments(
 ): Promise<boolean> {
   const cacheDir = hlsCacheDir(type, eventId, segment, camera);
   const manifestFile = path.join(cacheDir, "stream.m3u8");
-
-  // Check if already segmented
-  try {
-    await stat(manifestFile);
-    return true;
-  } catch {
-    // Not cached yet — need to segment
-  }
-
-  // Deduplicate: if already segmenting this stream, wait for it
   const cacheKey = `${type}/${eventId}/${segment}/${camera}`;
-  const existing = segmentingPromises.get(cacheKey);
+
+  // Complete manifest on disk = fully cached
+  if (await isCompleteManifest(manifestFile)) return true;
+
+  // ffmpeg already running for this stream -- wait for its manifest
+  const existing = activeJobs.get(cacheKey);
   if (existing) return existing;
 
-  const promise = (async () => {
-    await acquireSlot();
-    const queued = waitQueue.length;
-    console.log(`HLS: segmenting ${cacheKey} [${activeCount}/${MAX_CONCURRENT} active${queued > 0 ? `, ${queued} queued` : ""}]`);
-    const start = performance.now();
-    try {
-      await mkdir(cacheDir, { recursive: true });
+  // Stale incomplete manifest from a crashed ffmpeg -- clean up
+  try {
+    await stat(manifestFile);
+    await rm(cacheDir, { recursive: true, force: true });
+  } catch {
+    // No manifest -- fresh start
+  }
 
-      const args: string[] = [];
+  // Start ffmpeg in the background. The returned promise resolves true once
+  // the manifest appears (for progressive serving) or false on failure.
+  // We race manifest appearance against process completion so callers don't
+  // have to wait for the entire encode.
+  const timeoutMs = (source.streamUrl || HLS_BITRATE) ? 120000 : 30000;
+  const processComplete = runSegmentation(source, cacheDir, manifestFile, cacheKey, timeoutMs);
 
-      if (source.streamUrl) {
-        // Stream from remote URL — ffmpeg uses Range requests for seeking
-        const headerStr = Object.entries(source.streamUrl.headers)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join("\r\n") + "\r\n";
-        args.push(
-          "-headers", headerStr,
-          "-seekable", "1",
-          "-reconnect", "1",
-          "-reconnect_on_network_error", "1",
-          "-reconnect_delay_max", "5",
-          "-i", source.streamUrl.url,
-        );
-      } else {
-        args.push("-i", source.localPath);
-      }
+  const manifestReady = Promise.race([
+    waitForManifest(manifestFile, timeoutMs),
+    processComplete,
+  ]);
 
-      args.push(...codecArgs());
-      args.push(
-        "-hls_time", String(HLS_SEGMENT_DURATION),
-        "-hls_segment_filename", path.join(cacheDir, "chunk_%03d.ts"),
-        "-hls_playlist_type", "vod",
-        "-f", "hls",
-        "-v", "error",
-        manifestFile,
-      );
+  activeJobs.set(cacheKey, manifestReady);
 
-      // Longer timeout for remote streaming or re-encoding
-      const timeout = (source.streamUrl || HLS_BITRATE) ? 120000 : 30000;
-      await execFileAsync("ffmpeg", args, { timeout });
-
-      const elapsed = ((performance.now() - start) / 1000).toFixed(1);
-      console.log(`HLS: done ${cacheKey} in ${elapsed}s`);
-      return true;
-    } catch (err) {
-      const elapsed = ((performance.now() - start) / 1000).toFixed(1);
-      const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
-      console.error(`HLS: failed ${cacheKey} after ${elapsed}s: ${msg}`);
-      return false;
-    } finally {
-      releaseSlot();
-      segmentingPromises.delete(cacheKey);
-    }
-  })();
-
-  segmentingPromises.set(cacheKey, promise);
-  return promise;
+  return manifestReady;
 }
