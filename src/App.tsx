@@ -102,6 +102,24 @@ export function App() {
   // Check server status on mount to determine if setup is needed
   useEffect(() => { checkStatus(); }, [checkStatus]);
 
+  // Auto-refresh: poll for new events every 30s while browsing
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+
+  useEffect(() => {
+    if (view !== "browse" || !status?.connected) return;
+    const interval = setInterval(async () => {
+      if (loadingRef.current) return;
+      try {
+        const data = await fetchEvents();
+        setEvents((prev) => (data.length !== prev.length ? data : prev));
+      } catch {
+        // silent -- manual refresh still available
+      }
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [view, status?.connected]);
+
   // Sync URL hash with browser back/forward
   useEffect(() => {
     const onHashChange = () => {

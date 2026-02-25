@@ -372,7 +372,6 @@ describe("In-memory mock StorageBackend", () => {
       async fileSize(): Promise<number> {
         throw new Error("Not implemented in mock");
       },
-      clearCache(): void {},
       cacheEntryCount(): number { return 0; },
     };
   }

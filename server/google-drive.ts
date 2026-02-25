@@ -18,6 +18,10 @@ export class GoogleDriveStorage implements StorageBackend {
 
   // Cache: folder path -> Map<entry name, { id, mimeType }>
   private dirCache = new Map<string, Map<string, { id: string; mimeType: string }>>();
+  // folder path -> Drive folder ID (needed for incremental queries)
+  private dirCacheFolderIds = new Map<string, string>();
+  // folder path -> latest createdTime seen from Drive API (high water mark for incremental refresh)
+  private dirCacheHighWater = new Map<string, string>();
   // Deduplicate in-flight listFolder requests (avoids redundant API calls from parallel batches)
   private pendingListFolder = new Map<string, Promise<Map<string, { id: string; mimeType: string }>>>();
   // Deduplicate in-flight file downloads (avoids redundant downloads from parallel requests)
@@ -44,9 +48,16 @@ export class GoogleDriveStorage implements StorageBackend {
   private async loadDirCache(): Promise<void> {
     try {
       const raw = await readFile(DIR_CACHE_PATH, "utf-8");
-      const entries: [string, [string, { id: string; mimeType: string }][]][] = JSON.parse(raw);
-      for (const [path, items] of entries) {
-        this.dirCache.set(path, new Map(items));
+      const data = JSON.parse(raw);
+      // Support both old format (array of entries) and new format (object with folderIds/highWater)
+      const entries: [string, [string, { id: string; mimeType: string }][]][] =
+        Array.isArray(data) ? data : data.entries ?? [];
+      for (const [p, items] of entries) {
+        this.dirCache.set(p, new Map(items));
+      }
+      if (!Array.isArray(data)) {
+        for (const [p, id] of data.folderIds ?? []) this.dirCacheFolderIds.set(p, id);
+        for (const [p, ts] of data.highWater ?? []) this.dirCacheHighWater.set(p, ts);
       }
       console.log(`Loaded ${this.dirCache.size} dir cache entries from disk`);
     } catch {
@@ -64,9 +75,13 @@ export class GoogleDriveStorage implements StorageBackend {
       if (!this.dirCacheDirty) return;
       this.dirCacheDirty = false;
       try {
-        const data = Array.from(this.dirCache.entries()).map(
-          ([p, m]) => [p, Array.from(m.entries())] as const
-        );
+        const data = {
+          entries: Array.from(this.dirCache.entries()).map(
+            ([p, m]) => [p, Array.from(m.entries())] as const
+          ),
+          folderIds: Array.from(this.dirCacheFolderIds.entries()),
+          highWater: Array.from(this.dirCacheHighWater.entries()),
+        };
         await mkdir(path.dirname(DIR_CACHE_PATH), { recursive: true });
         await writeFile(DIR_CACHE_PATH, JSON.stringify(data));
       } catch (err) {
@@ -91,11 +106,12 @@ export class GoogleDriveStorage implements StorageBackend {
       try {
         const entries = new Map<string, { id: string; mimeType: string }>();
         let pageToken: string | undefined;
+        let maxCreatedTime = "";
 
         do {
           const res = await this.drive.files.list({
             q: `'${folderId}' in parents and trashed = false`,
-            fields: "nextPageToken, files(id, name, mimeType)",
+            fields: "nextPageToken, files(id, name, mimeType, createdTime)",
             pageSize: 1000,
             pageToken,
           });
@@ -103,12 +119,17 @@ export class GoogleDriveStorage implements StorageBackend {
           for (const file of res.data.files || []) {
             if (file.name && file.id && file.mimeType) {
               entries.set(file.name, { id: file.id, mimeType: file.mimeType });
+              if (file.createdTime && file.createdTime > maxCreatedTime) {
+                maxCreatedTime = file.createdTime;
+              }
             }
           }
           pageToken = res.data.nextPageToken ?? undefined;
         } while (pageToken);
 
         this.dirCache.set(cachePath, entries);
+        this.dirCacheFolderIds.set(cachePath, folderId);
+        if (maxCreatedTime) this.dirCacheHighWater.set(cachePath, maxCreatedTime);
         this.scheduleSaveDirCache();
         return entries;
       } finally {
@@ -264,26 +285,56 @@ export class GoogleDriveStorage implements StorageBackend {
     };
   }
 
-  /** Clear top-level dir listings so new folders are discovered on refresh.
-   *  Keeps per-event subfolder caches to avoid re-fetching hundreds of listings.
-   *  Also clears the most recent RecentClips date folder (may have new clips). */
-  clearCache(): void {
-    let latestRecent = "";
-    for (const key of this.dirCache.keys()) {
-      if (!key.includes("/")) {
-        this.dirCache.delete(key);
-      } else if (key.startsWith("RecentClips/") && key > latestRecent) {
-        latestRecent = key;
+  /** Incrementally refresh top-level dir listings by querying only for entries
+   *  created after the last known createdTime. Typically 3 fast API calls
+   *  (SavedClips, SentryClips, RecentClips -- root is skipped since it never changes). */
+  async refreshCache(): Promise<void> {
+    let found = 0;
+    for (const [cachePath, folderId] of this.dirCacheFolderIds) {
+      // Only refresh category-level listings (SavedClips, SentryClips, RecentClips).
+      // Skip root ("") since it only contains the 3 static category folders,
+      // and skip deeper paths (contain "/") since they're per-event and immutable.
+      if (cachePath === "" || cachePath.includes("/")) continue;
+      const since = this.dirCacheHighWater.get(cachePath);
+      if (!since) continue; // no high water mark — needs a full listing first
+      const existing = this.dirCache.get(cachePath);
+      if (!existing) continue;
+
+      let pageToken: string | undefined;
+      let maxCreatedTime = since;
+
+      do {
+        const res = await this.drive.files.list({
+          q: `'${folderId}' in parents and trashed = false and createdTime > '${since}'`,
+          fields: "nextPageToken, files(id, name, mimeType, createdTime)",
+          pageSize: 1000,
+          pageToken,
+        });
+
+        for (const file of res.data.files || []) {
+          if (file.name && file.id && file.mimeType) {
+            existing.set(file.name, { id: file.id, mimeType: file.mimeType });
+            found++;
+            if (file.createdTime && file.createdTime > maxCreatedTime) {
+              maxCreatedTime = file.createdTime;
+            }
+          }
+        }
+        pageToken = res.data.nextPageToken ?? undefined;
+      } while (pageToken);
+
+      if (maxCreatedTime > since) {
+        this.dirCacheHighWater.set(cachePath, maxCreatedTime);
       }
     }
-    if (latestRecent) this.dirCache.delete(latestRecent);
-    this.pendingListFolder.clear();
-    this.scheduleSaveDirCache();
+    if (found > 0) this.scheduleSaveDirCache();
   }
 
   /** Clear all cached directory listings. Used by debug panel. */
   clearAllCaches(): void {
     this.dirCache.clear();
+    this.dirCacheFolderIds.clear();
+    this.dirCacheHighWater.clear();
     this.pendingListFolder.clear();
     this.scheduleSaveDirCache();
   }

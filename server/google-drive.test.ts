@@ -244,26 +244,6 @@ describe("GoogleDriveStorage", () => {
     });
   });
 
-  describe("clearCache", () => {
-    it("clears directory cache", async () => {
-      mock.list.setDefault({
-        data: {
-          files: [
-            { id: "id1", name: "SavedClips", mimeType: "application/vnd.google-apps.folder" },
-          ],
-          nextPageToken: null,
-        },
-      });
-
-      await storage.readdir("");
-      storage.clearCache();
-      await storage.readdir("");
-
-      // Should have made 2 API calls (cache was cleared)
-      expect(mock.list.callCount).toBe(2);
-    });
-  });
-
   describe("readFileUtf8", () => {
     it("returns string content", async () => {
       mock.list.enqueue({

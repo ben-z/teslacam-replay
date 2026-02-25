@@ -105,7 +105,10 @@ async function initStorage(): Promise<void> {
   }
 }
 
-await initStorage();
+// --- Event cache (memory + disk, with deduplication) ---
+let cachedEvents: DashcamEvent[] | null = null;
+let scanPromise: Promise<DashcamEvent[]> | null = null;
+let scanIsRefresh = false;
 
 const CACHE_DIR = path.join(
   process.env.HOME || "/tmp",
@@ -113,6 +116,13 @@ const CACHE_DIR = path.join(
   "teslacam-replay"
 );
 const CACHE_FILE = path.join(CACHE_DIR, "events.json");
+
+// --- Background auto-refresh ---
+const AUTO_REFRESH_INTERVAL = Math.max(0, parseInt(process.env.AUTO_REFRESH_INTERVAL || "300") || 0);
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let autoRefreshStarted = false;
+
+await initStorage();
 
 const app = new Hono();
 
@@ -131,11 +141,6 @@ app.use("/api/*", async (c, next) => {
   }
   return next();
 });
-
-// --- Event cache (memory + disk, with deduplication) ---
-let cachedEvents: DashcamEvent[] | null = null;
-let scanPromise: Promise<DashcamEvent[]> | null = null;
-let scanIsRefresh = false;
 
 const CACHE_VERSION = 5;
 
@@ -570,14 +575,13 @@ app.post("/api/oauth/select-folder", async (c) => {
 
   await saveAuth({ ...saved, folderId });
   await activateStorage(gdClientId!, gdClientSecret!, saved.refreshToken, folderId, saved.accessToken, saved.expiryDate);
+  startAutoRefresh();
 
   return c.json({ ok: true });
 });
 
 app.post("/api/refresh", async (c) => {
-  // Clear dir listing cache so new folders are discovered.
-  // Incremental scan already skips old folders via timestamp cutoffs.
-  storage?.clearCache();
+  await storage?.refreshCache?.();
   try {
     const events = await getEvents(true);
     return c.json(events);
@@ -597,6 +601,40 @@ if (process.env.SERVE_FRONTEND === "true") {
   });
 }
 
+function startAutoRefresh(): void {
+  if (autoRefreshStarted) return;
+  autoRefreshStarted = true;
+
+  // Load from disk cache immediately, then kick off a background refresh
+  getEvents()
+    .then(() => getEvents(true))
+    .catch((err) =>
+      console.error("Initial scan failed:", err instanceof Error ? err.message : err)
+    );
+
+  if (AUTO_REFRESH_INTERVAL <= 0) return;
+  autoRefreshTimer = setInterval(async () => {
+    if (!storage || scanPromise) return;
+    try {
+      const before = cachedEvents?.length ?? 0;
+      // Incrementally refresh dir cache (cheap: only queries for new entries since last check).
+      await storage.refreshCache?.();
+      const events = await getEvents(true);
+      const added = events.length - before;
+      if (added > 0) {
+        console.log(`Auto-refresh: found ${added} new event${added !== 1 ? "s" : ""} (${events.length} total)`);
+      } else {
+        console.log(`Auto-refresh: no new events (${events.length} total)`);
+      }
+    } catch (err) {
+      console.error("Auto-refresh failed:", err instanceof Error ? err.message : err);
+    }
+  }, AUTO_REFRESH_INTERVAL * 1000);
+  console.log(`Auto-refresh enabled (every ${AUTO_REFRESH_INTERVAL}s)`);
+}
+
+if (storage) startAutoRefresh();
+
 const port = parseInt(process.env.PORT || "3001");
 console.log(`TeslaCam Replay server starting on http://localhost:${port}`);
 
@@ -605,6 +643,8 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 });
 
 function shutdown() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshStarted = false;
   server.close();
   process.exit(0);
 }

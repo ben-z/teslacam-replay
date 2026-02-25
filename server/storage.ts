@@ -40,8 +40,8 @@ export interface StorageBackend {
    */
   getStreamUrl?(filePath: string): Promise<{ url: string; headers: Record<string, string> } | null>;
 
-  /** Clear any internal caches. No-op for backends without caching. */
-  clearCache(): void;
+  /** Incrementally refresh caches by querying only for new entries. No-op for backends without caching. */
+  refreshCache?(): Promise<void>;
 
   /** Return number of entries in any in-memory caches. 0 if none. */
   cacheEntryCount(): number;
@@ -100,10 +100,6 @@ export class LocalStorage implements StorageBackend {
   async fileSize(filePath: string): Promise<number> {
     const s = await stat(this.safePath(filePath));
     return s.size;
-  }
-
-  clearCache(): void {
-    // No caching in local storage
   }
 
   cacheEntryCount(): number {
