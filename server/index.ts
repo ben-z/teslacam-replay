@@ -5,7 +5,7 @@ import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { google } from "googleapis";
 import { createReadStream } from "fs";
-import { readFile, writeFile, stat, mkdir, readdir, rm, unlink } from "fs/promises";
+import { readFile, writeFile, stat, mkdir, readdir, rename, rm, unlink } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
@@ -474,12 +474,17 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
     case "events-memory":
       cachedEvents = null;
       break;
-    case "hls":
-      try { await rm(HLS_CACHE_DIR, { recursive: true, force: true }); } catch {}
+    case "hls": {
+      // Rename first (atomic), then delete in background to avoid race with new ffmpeg writes
+      const tmp = `${HLS_CACHE_DIR}_del_${Date.now()}`;
+      try { await rename(HLS_CACHE_DIR, tmp); rm(tmp, { recursive: true, force: true }).catch(() => {}); } catch {}
       break;
-    case "gdrive-downloads":
-      try { await rm(DOWNLOAD_CACHE_DIR, { recursive: true, force: true }); } catch {}
+    }
+    case "gdrive-downloads": {
+      const tmp = `${DOWNLOAD_CACHE_DIR}_del_${Date.now()}`;
+      try { await rename(DOWNLOAD_CACHE_DIR, tmp); rm(tmp, { recursive: true, force: true }).catch(() => {}); } catch {}
       break;
+    }
     case "gdrive-dirs":
       if (storage instanceof GoogleDriveStorage) storage.clearAllCaches();
       break;
