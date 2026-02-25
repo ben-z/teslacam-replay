@@ -9,6 +9,29 @@ const HLS_SEGMENT_DURATION = 4; // seconds per chunk
 
 // Re-encode video at this bitrate (e.g. "800k", "2M"). Empty = remux only (copy mode).
 const HLS_BITRATE = process.env.HLS_BITRATE || "";
+
+// Detect available H.264 encoder at startup
+async function detectEncoder(): Promise<string> {
+  if (!HLS_BITRATE) {
+    console.log("HLS: copy mode (no transcoding)");
+    return "libx264";
+  }
+  let encoder = "libx264";
+  try {
+    const { stdout } = await execFileAsync("ffmpeg", ["-encoders"], { timeout: 5000 });
+    if (stdout.includes("h264_videotoolbox")) {
+      encoder = "h264_videotoolbox";
+    }
+  } catch {
+    // ffmpeg not found or failed — will error later when actually needed
+  }
+  const label = encoder === "h264_videotoolbox" ? "VideoToolbox (hardware)" : "software";
+  console.log(`HLS: transcoding at ${HLS_BITRATE} using ${label} encoder`);
+  return encoder;
+}
+
+const hlsEncoder = await detectEncoder();
+
 const HLS_ENCODING_LABEL = HLS_BITRATE || "copy";
 
 /**
@@ -37,26 +60,31 @@ export function hlsManifestPath(
 }
 
 /**
- * Return ffmpeg codec flags: re-encode with libx264 when HLS_BITRATE is set,
- * otherwise pass streams through unchanged.
+ * Return ffmpeg codec flags based on detected encoder.
  */
 function codecArgs(): string[] {
-  if (HLS_BITRATE) {
-    return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
+  if (!HLS_BITRATE) return ["-c", "copy"];
+  if (hlsEncoder === "h264_videotoolbox") {
+    return ["-c:v", "h264_videotoolbox", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
   }
-  return ["-c", "copy"];
+  return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
 }
 
 // Track in-flight segmentation to deduplicate concurrent requests
 const segmentingPromises = new Map<string, Promise<boolean>>();
 
-// Limit concurrent ffmpeg processes (transcoding + Google Drive downloads overwhelm I/O)
-const MAX_CONCURRENT = parseInt(process.env.HLS_MAX_CONCURRENT || "2") || 2;
+// Limit concurrent ffmpeg processes to prevent I/O exhaustion.
+// Hardware encoding uses minimal CPU, so we can run more concurrently.
+const DEFAULT_CONCURRENT = hlsEncoder === "h264_videotoolbox" ? 4 : 2;
+const MAX_CONCURRENT = parseInt(process.env.HLS_MAX_CONCURRENT ?? "") || DEFAULT_CONCURRENT;
 let activeCount = 0;
 const waitQueue: Array<() => void> = [];
 
 async function acquireSlot(): Promise<void> {
-  if (activeCount < MAX_CONCURRENT) { activeCount++; return; }
+  if (activeCount < MAX_CONCURRENT) {
+    activeCount++;
+    return;
+  }
   await new Promise<void>(resolve => waitQueue.push(resolve));
 }
 
@@ -105,6 +133,9 @@ export async function ensureHlsSegments(
 
   const promise = (async () => {
     await acquireSlot();
+    const queued = waitQueue.length;
+    console.log(`HLS: segmenting ${cacheKey} [${activeCount}/${MAX_CONCURRENT} active${queued > 0 ? `, ${queued} queued` : ""}]`);
+    const start = performance.now();
     try {
       await mkdir(cacheDir, { recursive: true });
 
@@ -141,9 +172,13 @@ export async function ensureHlsSegments(
       const timeout = (source.streamUrl || HLS_BITRATE) ? 120000 : 30000;
       await execFileAsync("ffmpeg", args, { timeout });
 
+      const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+      console.log(`HLS: done ${cacheKey} in ${elapsed}s`);
       return true;
     } catch (err) {
-      console.error(`HLS segmentation failed for ${cacheKey}:`, err);
+      const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+      const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      console.error(`HLS: failed ${cacheKey} after ${elapsed}s: ${msg}`);
       return false;
     } finally {
       releaseSlot();
