@@ -50,6 +50,22 @@ function codecArgs(): string[] {
 // Track in-flight segmentation to deduplicate concurrent requests
 const segmentingPromises = new Map<string, Promise<boolean>>();
 
+// Limit concurrent ffmpeg processes (transcoding + Google Drive downloads overwhelm I/O)
+const MAX_CONCURRENT = parseInt(process.env.HLS_MAX_CONCURRENT || "2") || 2;
+let activeCount = 0;
+const waitQueue: Array<() => void> = [];
+
+async function acquireSlot(): Promise<void> {
+  if (activeCount < MAX_CONCURRENT) { activeCount++; return; }
+  await new Promise<void>(resolve => waitQueue.push(resolve));
+}
+
+function releaseSlot(): void {
+  const next = waitQueue.shift();
+  if (next) next(); // hand slot directly to next waiter
+  else activeCount--;
+}
+
 export interface HlsSource {
   localPath: string;
   streamUrl?: { url: string; headers: Record<string, string> };
@@ -88,6 +104,7 @@ export async function ensureHlsSegments(
   if (existing) return existing;
 
   const promise = (async () => {
+    await acquireSlot();
     try {
       await mkdir(cacheDir, { recursive: true });
 
@@ -129,6 +146,7 @@ export async function ensureHlsSegments(
       console.error(`HLS segmentation failed for ${cacheKey}:`, err);
       return false;
     } finally {
+      releaseSlot();
       segmentingPromises.delete(cacheKey);
     }
   })();
