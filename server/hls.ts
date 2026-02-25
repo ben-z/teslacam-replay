@@ -1,16 +1,15 @@
 import { execFile } from "child_process";
-import { promisify } from "util";
 import { stat, mkdir } from "fs/promises";
 import path from "path";
+import { promisify } from "util";
+import { HLS_CACHE_DIR } from "./paths.js";
 
 const execFileAsync = promisify(execFile);
-
-export const HLS_CACHE_DIR = "/tmp/teslacam-replay-hls";
 const HLS_SEGMENT_DURATION = 4; // seconds per chunk
 
 /**
  * Get the cache directory for a specific camera stream.
- * Structure: /tmp/teslacam-replay-hls/{type}/{eventId}/{segment}/{camera}/
+ * Structure: {HLS_CACHE_DIR}/{type}/{eventId}/{segment}/{camera}/
  */
 export function hlsCacheDir(
   type: string,

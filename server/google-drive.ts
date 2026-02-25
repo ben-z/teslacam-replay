@@ -3,9 +3,7 @@ import { mkdir, readFile, stat, writeFile } from "fs/promises";
 import { createReadStream } from "fs";
 import path from "path";
 import type { StorageBackend } from "./storage.js";
-
-export const DOWNLOAD_CACHE_DIR = "/tmp/teslacam-replay-gdrive";
-const DIR_CACHE_PATH = "./data/google-drive-dircache.json";
+import { DOWNLOAD_CACHE_DIR, DIR_CACHE_PATH } from "./paths.js";
 
 /**
  * Google Drive storage backend.

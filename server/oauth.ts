@@ -1,7 +1,6 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
-
-export const TOKEN_PATH = "./data/google-drive-token.json";
+import { TOKEN_PATH } from "./paths.js";
 
 export interface SavedAuth {
   refreshToken: string;

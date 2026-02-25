@@ -14,10 +14,11 @@ import {
   type DashcamEvent,
 } from "./scan.js";
 import { extractTelemetry, type TelemetryData } from "./sei.js";
-import { ensureHlsSegments, hlsManifestPath, hlsCacheDir, HLS_CACHE_DIR } from "./hls.js";
+import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { LocalStorage, type StorageBackend } from "./storage.js";
-import { GoogleDriveStorage, DOWNLOAD_CACHE_DIR } from "./google-drive.js";
-import { loadSavedAuth, saveAuth, TOKEN_PATH } from "./oauth.js";
+import { GoogleDriveStorage } from "./google-drive.js";
+import { loadSavedAuth, saveAuth } from "./oauth.js";
+import { TOKEN_PATH, EVENTS_CACHE_PATH, HLS_CACHE_DIR, DOWNLOAD_CACHE_DIR } from "./paths.js";
 
 // --- Storage backend selection ---
 const STORAGE_BACKEND = process.env.STORAGE_BACKEND || "local";
@@ -110,13 +111,6 @@ let cachedEvents: DashcamEvent[] | null = null;
 let scanPromise: Promise<DashcamEvent[]> | null = null;
 let scanIsRefresh = false;
 
-const CACHE_DIR = path.join(
-  process.env.HOME || "/tmp",
-  ".cache",
-  "teslacam-replay"
-);
-const CACHE_FILE = path.join(CACHE_DIR, "events.json");
-
 // --- Background auto-refresh ---
 const AUTO_REFRESH_INTERVAL = Math.max(0, parseInt(process.env.AUTO_REFRESH_INTERVAL || "300") || 0);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -146,7 +140,7 @@ const CACHE_VERSION = 5;
 
 async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
-    const raw = await readFile(CACHE_FILE, "utf-8");
+    const raw = await readFile(EVENTS_CACHE_PATH, "utf-8");
     const data = JSON.parse(raw);
     if (!data || data.version !== CACHE_VERSION || !Array.isArray(data.events)) {
       console.log("Disk cache outdated (version mismatch), re-scanning");
@@ -161,8 +155,8 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
-    await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify({ version: CACHE_VERSION, events }));
+    await mkdir(path.dirname(EVENTS_CACHE_PATH), { recursive: true });
+    await writeFile(EVENTS_CACHE_PATH, JSON.stringify({ version: CACHE_VERSION, events }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);
@@ -449,7 +443,7 @@ async function dirSizeBytes(dirPath: string): Promise<number> {
 
 app.get("/api/debug/caches", async (c) => {
   const [diskStat, hlsSize, gdriveSize, tokenStat] = await Promise.all([
-    stat(CACHE_FILE).then((s) => ({ path: CACHE_FILE, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
+    stat(EVENTS_CACHE_PATH).then((s) => ({ path: EVENTS_CACHE_PATH, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
     dirSizeBytes(HLS_CACHE_DIR),
     dirSizeBytes(DOWNLOAD_CACHE_DIR),
     stat(TOKEN_PATH).then((s) => ({ path: TOKEN_PATH, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
@@ -472,7 +466,7 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
   const { id } = c.req.param();
   switch (id) {
     case "events-disk":
-      try { await unlink(CACHE_FILE); } catch {}
+      try { await unlink(EVENTS_CACHE_PATH); } catch {}
       cachedEvents = null;
       break;
     case "events-memory":
