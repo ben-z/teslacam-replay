@@ -51,10 +51,25 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
+const EVENTS_CACHE_KEY = "teslacam-replay:events";
+
+function cacheEvents(data: DashcamEvent[]): void {
+  try { localStorage.setItem(EVENTS_CACHE_KEY, JSON.stringify(data)); } catch {}
+}
+
+function loadCachedEvents(): DashcamEvent[] {
+  try {
+    const cached = localStorage.getItem(EVENTS_CACHE_KEY);
+    return cached ? JSON.parse(cached) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
-  const [events, setEvents] = useState<DashcamEvent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [events, setEvents] = useState<DashcamEvent[]>(loadCachedEvents);
+  const [loading, setLoading] = useState(events.length === 0);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
@@ -67,11 +82,11 @@ export function App() {
   const pushedHashRef = useRef(false);
 
   const loadEvents = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const data = await fetchEvents();
       setEvents(data);
+      cacheEvents(data);
       // Restore event from URL hash after initial load
       const hashEvent = parseHash();
       if (hashEvent) {
@@ -91,7 +106,6 @@ export function App() {
   }, []);
 
   const checkStatus = useCallback(() => {
-    setLoading(true);
     fetchStatus().then((s) => {
       setStatus(s);
       if (s.connected) loadEvents();
@@ -112,7 +126,13 @@ export function App() {
       if (loadingRef.current) return;
       try {
         const data = await fetchEvents();
-        setEvents((prev) => (data.length !== prev.length ? data : prev));
+        let updated = false;
+        setEvents((prev) => {
+          if (data.length === prev.length) return prev;
+          updated = true;
+          return data;
+        });
+        if (updated) cacheEvents(data);
       } catch {
         // silent -- manual refresh still available
       }
@@ -148,6 +168,7 @@ export function App() {
     try {
       const data = await refreshEvents();
       setEvents(data);
+      cacheEvents(data);
       // Clear stale browse list so navigation uses fresh event objects
       setBrowseList([]);
       // Update selectedEvent to new reference if still viewing one
