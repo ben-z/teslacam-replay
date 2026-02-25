@@ -70,31 +70,10 @@ function codecArgs(): string[] {
   return ["-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
 }
 
-// --- Job tracking and concurrency ---
+// --- Job tracking ---
 
 /** Tracks an in-flight ffmpeg job. Callers await `manifestReady`. */
 const activeJobs = new Map<string, Promise<boolean>>();
-
-// Limit concurrent ffmpeg processes to prevent I/O exhaustion.
-// Hardware encoding uses minimal CPU, so we can run more concurrently.
-const DEFAULT_CONCURRENT = hlsEncoder === "h264_videotoolbox" ? 4 : 2;
-const MAX_CONCURRENT = parseInt(process.env.HLS_MAX_CONCURRENT ?? "") || DEFAULT_CONCURRENT;
-let activeCount = 0;
-const waitQueue: Array<() => void> = [];
-
-async function acquireSlot(): Promise<void> {
-  if (activeCount < MAX_CONCURRENT) {
-    activeCount++;
-    return;
-  }
-  await new Promise<void>(resolve => waitQueue.push(resolve));
-}
-
-function releaseSlot(): void {
-  const next = waitQueue.shift();
-  if (next) next();
-  else activeCount--;
-}
 
 /** Check if a manifest is complete (has #EXT-X-ENDLIST). */
 async function isCompleteManifest(manifestPath: string): Promise<boolean> {
@@ -137,9 +116,7 @@ async function runSegmentation(
   cacheKey: string,
   timeoutMs: number,
 ): Promise<boolean> {
-  await acquireSlot();
-  const queued = waitQueue.length;
-  console.log(`HLS: segmenting ${cacheKey} [${activeCount}/${MAX_CONCURRENT} active${queued > 0 ? `, ${queued} queued` : ""}]`);
+  console.log(`HLS: segmenting ${cacheKey}`);
   const start = performance.now();
 
   try {
@@ -212,7 +189,6 @@ async function runSegmentation(
     console.error(`HLS: error ${cacheKey}: ${msg}`);
     return false;
   } finally {
-    releaseSlot();
     activeJobs.delete(cacheKey);
   }
 }
