@@ -7,3 +7,5 @@ dist/
 .worktrees/
 *.png
 .playwright-mcp/
+test-results/
+playwright-report/
