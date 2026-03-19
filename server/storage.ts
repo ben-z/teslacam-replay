@@ -43,6 +43,9 @@ export interface StorageBackend {
   /** Incrementally refresh caches by querying only for new entries. No-op for backends without caching. */
   refreshCache?(): Promise<void>;
 
+  /** Invalidate cached directory listings for specific paths so they are re-fetched on next access. */
+  invalidateDirCache?(paths: string[]): void;
+
   /** Return number of entries in any in-memory caches. 0 if none. */
   cacheEntryCount(): number;
 }

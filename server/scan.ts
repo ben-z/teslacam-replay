@@ -36,19 +36,37 @@ const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 // Max gap between consecutive clips before splitting into separate events (seconds)
 const SESSION_GAP_THRESHOLD = 120;
 
+// Max number of recent events per type to rescan on incremental refresh.
+// These are most likely to be incomplete from in-progress uploads.
+const RESCAN_RECENT_COUNT = 5;
+
 export async function scanTeslacamFolder(
   storage: StorageBackend,
   existingEvents?: DashcamEvent[]
 ): Promise<DashcamEvent[]> {
   // Compute cutoffs for incremental scanning (only scan folders newer than latest known)
   const cutoffs = new Map<string, string>();
+  // Paths of recent events to rescan (most likely to be incomplete from in-progress uploads)
+  const rescanPaths = new Set<string>();
   if (existingEvents) {
     for (const type of ["SavedClips", "SentryClips"] as const) {
-      const latest = existingEvents
+      const typeEvents = existingEvents
         .filter(e => e.type === type)
-        .reduce((max, e) => e.id > max ? e.id : max, "");
-      if (latest) cutoffs.set(type, latest);
+        .sort((a, b) => b.id.localeCompare(a.id));
+      if (typeEvents.length > 0) cutoffs.set(type, typeEvents[0].id);
+
+      // Always rescan the most recent N events per type — they are most likely
+      // to have been captured mid-upload (missing thumbnails, partial clip lists).
+      for (const e of typeEvents.slice(0, RESCAN_RECENT_COUNT)) {
+        rescanPaths.add(`${type}/${e.id}`);
+      }
     }
+  }
+
+  // Invalidate dir cache for events we're about to rescan so storage
+  // returns fresh file listings instead of stale cached ones.
+  if (rescanPaths.size > 0) {
+    storage.invalidateDirCache?.(Array.from(rescanPaths));
   }
 
   const events: DashcamEvent[] = [];
@@ -64,10 +82,12 @@ export async function scanTeslacamFolder(
     // Filter to only timestamp-patterned folders (skip .DS_Store, etc.)
     let folders = entries.filter((f) => FOLDER_PATTERN.test(f));
 
-    // Incremental: only scan folders newer than latest existing event
+    // Incremental: scan new folders + rescan recent ones that may be incomplete
     const cutoff = cutoffs.get(type);
     if (cutoff) {
-      folders = folders.filter(f => f > cutoff);
+      folders = folders.filter(f =>
+        f > cutoff || rescanPaths.has(`${type}/${f}`)
+      );
     }
 
     // Process in parallel batches

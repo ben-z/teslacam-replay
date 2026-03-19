@@ -328,6 +328,13 @@ export class GoogleDriveStorage implements StorageBackend {
     if (found > 0) this.scheduleSaveDirCache();
   }
 
+  /** Invalidate cached directory listings for specific paths so they are re-fetched on next readdir. */
+  invalidateDirCache(paths: string[]): void {
+    for (const p of paths) {
+      this.dirCache.delete(p);
+    }
+  }
+
   /** Clear all cached directory listings. Used by debug panel. */
   clearAllCaches(): void {
     this.dirCache.clear();

@@ -51,6 +51,21 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
+/** Compare two event lists by checking length + clip counts + thumbnail flags.
+ *  Avoids full deep equality while catching updates from in-progress uploads. */
+function eventsEqual(a: DashcamEvent[], b: DashcamEvent[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].type !== b[i].type ||
+      a[i].clips.length !== b[i].clips.length ||
+      a[i].hasThumbnail !== b[i].hasThumbnail
+    ) return false;
+  }
+  return true;
+}
+
 const EVENTS_CACHE_KEY = "teslacam-replay:events";
 
 function cacheEvents(data: DashcamEvent[]): void {
@@ -128,7 +143,7 @@ export function App() {
         const data = await fetchEvents();
         let updated = false;
         setEvents((prev) => {
-          if (data.length === prev.length) return prev;
+          if (eventsEqual(prev, data)) return prev;
           updated = true;
           return data;
         });

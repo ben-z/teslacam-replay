@@ -364,6 +364,11 @@ function EventCard({
     event.hasThumbnail ? "loading" : "error"
   );
 
+  // Reset thumb state when hasThumbnail changes (e.g., rescan found the thumbnail)
+  useEffect(() => {
+    setThumbState(event.hasThumbnail ? "loading" : "error");
+  }, [event.hasThumbnail]);
+
   return (
     <button onClick={onClick} className="browse-card">
       <div className="browse-card-thumb">
