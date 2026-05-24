@@ -1,9 +1,10 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { google } from "googleapis";
+import { createHash } from "crypto";
 import { createReadStream } from "fs";
 import { readFile, writeFile, stat, mkdir, readdir, rename, rm, unlink } from "fs/promises";
 import path from "path";
@@ -26,6 +27,7 @@ const STORAGE_BACKEND = process.env.STORAGE_BACKEND || "local";
 const isGoogleDrive = STORAGE_BACKEND === "googledrive";
 
 let storage: StorageBackend | null = null;
+let storageCacheKey = "";
 
 // Google Drive OAuth config (available at module level for route handlers)
 const gdClientId = process.env.GOOGLE_DRIVE_CLIENT_ID;
@@ -57,6 +59,7 @@ async function activateStorage(
   });
   const drive = google.drive({ version: "v3", auth: oauth2Client });
   storage = await GoogleDriveStorage.fromDriveClient(drive, folderId);
+  storageCacheKey = `googledrive:${folderId}`;
   console.log(`Google Drive storage activated (folder: ${folderId})`);
 }
 
@@ -102,6 +105,7 @@ async function initStorage(): Promise<void> {
       process.exit(1);
     }
     storage = new LocalStorage(teslacamPath);
+    storageCacheKey = `local:${path.resolve(teslacamPath)}`;
     console.log(`Using local storage (${teslacamPath})`);
     await verifyStorage(storage);
   }
@@ -109,6 +113,7 @@ async function initStorage(): Promise<void> {
 
 // --- Event cache (memory + disk, with deduplication) ---
 let cachedEvents: DashcamEvent[] | null = null;
+let cachedEventsEtag: string | null = null;
 let scanPromise: Promise<DashcamEvent[]> | null = null;
 let scanIsRefresh = false;
 
@@ -123,7 +128,11 @@ const app = new Hono();
 
 // CORS: allow cross-origin requests so the frontend can be hosted separately
 // (e.g., GitHub Pages pointing at a self-hosted backend)
-app.use("/api/*", cors());
+app.use("/api/*", cors({
+  origin: "*",
+  allowHeaders: ["Content-Type", "If-None-Match"],
+  exposeHeaders: ["ETag"],
+}));
 app.use("/api/*", compress());
 
 // Guard: return 503 when storage is not yet configured (skip status + oauth routes)
@@ -138,18 +147,46 @@ app.use("/api/*", async (c, next) => {
   return next();
 });
 
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 7;
+
+function computeEventsEtag(events: DashcamEvent[]): string {
+  const hash = createHash("sha1")
+    .update(JSON.stringify(events))
+    .digest("base64url");
+  return `"events-v${CACHE_VERSION}-${hash}"`;
+}
+
+function setCachedEvents(events: DashcamEvent[]): DashcamEvent[] {
+  cachedEvents = events;
+  cachedEventsEtag = computeEventsEtag(events);
+  return events;
+}
+
+function requestHasMatchingEtag(header: string | undefined, etag: string | null): boolean {
+  if (!header || !etag) return false;
+  return header.split(",").map((part) => part.trim()).includes(etag);
+}
+
+function withEventsCacheHeaders(c: Context): void {
+  c.header("Cache-Control", "no-cache");
+  if (cachedEventsEtag) c.header("ETag", cachedEventsEtag);
+}
 
 async function loadDiskCache(): Promise<DashcamEvent[] | null> {
   try {
     const raw = await readFile(EVENTS_CACHE_PATH, "utf-8");
     const data = JSON.parse(raw);
-    if (!data || data.version !== CACHE_VERSION || !Array.isArray(data.events)) {
-      console.log("Disk cache outdated (version mismatch), re-scanning");
+    if (
+      !data ||
+      data.version !== CACHE_VERSION ||
+      data.storageKey !== storageCacheKey ||
+      !Array.isArray(data.events)
+    ) {
+      console.log("Disk cache outdated or for different storage, re-scanning");
       return null;
     }
     console.log(`Loaded ${data.events.length} events from disk cache`);
-    return data.events;
+    return setCachedEvents(data.events);
   } catch {
     return null;
   }
@@ -158,7 +195,11 @@ async function loadDiskCache(): Promise<DashcamEvent[] | null> {
 async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
   try {
     await mkdir(path.dirname(EVENTS_CACHE_PATH), { recursive: true });
-    await writeFile(EVENTS_CACHE_PATH, JSON.stringify({ version: CACHE_VERSION, events }));
+    await writeFile(EVENTS_CACHE_PATH, JSON.stringify({
+      version: CACHE_VERSION,
+      storageKey: storageCacheKey,
+      events,
+    }));
     console.log(`Saved ${events.length} events to disk cache`);
   } catch (err) {
     console.error("Failed to save disk cache:", err);
@@ -186,8 +227,7 @@ async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
       if (!forceRefresh) {
         const diskCached = await loadDiskCache();
         if (diskCached) {
-          cachedEvents = diskCached;
-          return cachedEvents;
+          return diskCached;
         }
       }
 
@@ -208,9 +248,9 @@ async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
         `Found ${newEvents.length} events in ${elapsed.toFixed(1)}s`
       );
       // Only update cache after successful scan (errors propagate, keeping old cache intact)
-      cachedEvents = newEvents;
-      await saveDiskCache(cachedEvents);
-      return cachedEvents;
+      setCachedEvents(newEvents);
+      await saveDiskCache(newEvents);
+      return newEvents;
     } finally {
       scanPromise = null;
       scanIsRefresh = false;
@@ -248,6 +288,10 @@ app.get("/api/status", async (c) => {
 
 app.get("/api/events", async (c) => {
   const events = await getEvents();
+  withEventsCacheHeaders(c);
+  if (requestHasMatchingEtag(c.req.header("if-none-match"), cachedEventsEtag)) {
+    return c.body(null, 304);
+  }
   return c.json(events);
 });
 
@@ -496,6 +540,7 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
     case "oauth-token":
       try { await unlink(TOKEN_PATH); } catch {}
       storage = null;
+      storageCacheKey = "";
       cachedEvents = null;
       break;
     default:
@@ -587,6 +632,7 @@ app.post("/api/refresh", async (c) => {
   await storage?.refreshCache?.();
   try {
     const events = await getEvents(true);
+    withEventsCacheHeaders(c);
     return c.json(events);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Scan failed";

@@ -22,6 +22,7 @@ export interface DashcamEvent {
   hasThumbnail: boolean;
   clips: EventClip[];
   totalDurationSec: number; // estimated from number of segments
+  cameraCount: number;
 }
 
 const CLIP_REGEX = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$/;
@@ -36,18 +37,32 @@ const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 // Max gap between consecutive clips before splitting into separate events (seconds)
 const SESSION_GAP_THRESHOLD = 120;
 
+// Re-scan the newest known event folders on incremental refresh. Sync/upload
+// tools can expose an event folder before all camera files have arrived, so
+// treating the latest folder as immutable can permanently cache partial events.
+const INCREMENTAL_RESCAN_EVENT_COUNT = 3;
+
 export async function scanTeslacamFolder(
   storage: StorageBackend,
   existingEvents?: DashcamEvent[]
 ): Promise<DashcamEvent[]> {
   // Compute cutoffs for incremental scanning (only scan folders newer than latest known)
   const cutoffs = new Map<string, string>();
+  const mutableKnownFolders = new Map<string, Set<string>>();
   if (existingEvents) {
     for (const type of ["SavedClips", "SentryClips"] as const) {
-      const latest = existingEvents
+      const known = existingEvents
         .filter(e => e.type === type)
-        .reduce((max, e) => e.id > max ? e.id : max, "");
-      if (latest) cutoffs.set(type, latest);
+        .map(e => e.id)
+        .sort((a, b) => b.localeCompare(a));
+      const latest = known[0];
+      if (latest) {
+        cutoffs.set(type, latest);
+        mutableKnownFolders.set(
+          type,
+          new Set(known.slice(0, INCREMENTAL_RESCAN_EVENT_COUNT))
+        );
+      }
     }
   }
 
@@ -67,7 +82,8 @@ export async function scanTeslacamFolder(
     // Incremental: only scan folders newer than latest existing event
     const cutoff = cutoffs.get(type);
     if (cutoff) {
-      folders = folders.filter(f => f > cutoff);
+      const mutable = mutableKnownFolders.get(type);
+      folders = folders.filter(f => f > cutoff || Boolean(mutable?.has(f)));
     }
 
     // Process in parallel batches
@@ -83,15 +99,13 @@ export async function scanTeslacamFolder(
     }
   }
 
-  // RecentClips: always full scan (session grouping makes incremental complex)
-  const recentEvents = await scanRecentClips(storage);
+  const recentEvents = await scanRecentClips(storage, existingEvents);
   events.push(...recentEvents);
 
   // Merge with existing events when doing incremental scan
   if (existingEvents) {
     const newIds = new Set(events.map(e => `${e.type}:${e.id}`));
     for (const existing of existingEvents) {
-      if (existing.type === "RecentClips") continue; // replaced by fresh scan
       if (!newIds.has(`${existing.type}:${existing.id}`)) {
         events.push(existing);
       }
@@ -171,6 +185,7 @@ async function scanEventFolder(
     hasThumbnail,
     clips,
     totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
+    cameraCount: countUniqueCameras(clips),
   };
 }
 
@@ -201,16 +216,57 @@ function folderNameToISO(name: string): string {
   return `${match[1]}T${match[2]}:${match[3]}:${match[4]}`;
 }
 
+function countUniqueCameras(clips: EventClip[]): number {
+  const cameras = new Set<string>();
+  for (const clip of clips) {
+    for (const camera of clip.cameras) cameras.add(camera);
+  }
+  return cameras.size;
+}
+
+function recentIncrementalCutoff(existingEvents?: DashcamEvent[]): string | null {
+  if (!existingEvents) return null;
+
+  let newestEvent: DashcamEvent | null = null;
+  let newestClipTimestamp = "";
+  for (const event of existingEvents) {
+    if (event.type !== "RecentClips" || event.clips.length === 0) continue;
+    const eventNewestClip = event.clips.reduce(
+      (max, clip) => clip.timestamp > max ? clip.timestamp : max,
+      ""
+    );
+    if (eventNewestClip > newestClipTimestamp) {
+      newestClipTimestamp = eventNewestClip;
+      newestEvent = event;
+    }
+  }
+
+  // Re-scan the newest known driving session from its first segment. This lets
+  // a still-growing session merge with newly arrived segments without walking
+  // every older RecentClips date folder on each refresh.
+  return newestEvent?.clips[0]?.timestamp ?? null;
+}
+
 /**
  * Scan RecentClips: flat MP4 files + date subfolders, grouped into driving sessions.
+ *
+ * On incremental refresh, only segments at or after the newest known session's
+ * first timestamp are scanned. Older sessions are merged from existingEvents by
+ * scanTeslacamFolder, which avoids re-listing every historical date folder.
  */
-async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]> {
+async function scanRecentClips(
+  storage: StorageBackend,
+  existingEvents?: DashcamEvent[]
+): Promise<DashcamEvent[]> {
   let entries: string[];
   try {
     entries = await storage.readdir("RecentClips");
   } catch {
     return [];
   }
+
+  const cutoff = recentIncrementalCutoff(existingEvents);
+  const cutoffDate = cutoff?.slice(0, 10) ?? null;
 
   // Collect all clip files: { timestamp, camera, subfolder? }
   const segmentMap = new Map<string, { cameras: Set<string>; subfolder?: string }>();
@@ -220,6 +276,7 @@ async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]>
     const match = file.match(CLIP_REGEX);
     if (!match) continue;
     const [, timestamp, camera] = match;
+    if (cutoff && timestamp < cutoff) continue;
     if (!segmentMap.has(timestamp)) {
       segmentMap.set(timestamp, { cameras: new Set() });
     }
@@ -227,7 +284,9 @@ async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]>
   }
 
   // Parse date subfolders
-  const dateFolders = entries.filter((f) => DATE_FOLDER_PATTERN.test(f));
+  const dateFolders = entries.filter((f) =>
+    DATE_FOLDER_PATTERN.test(f) && (!cutoffDate || f >= cutoffDate)
+  );
   for (const folder of dateFolders) {
     let files: string[];
     try {
@@ -239,6 +298,7 @@ async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]>
       const match = file.match(CLIP_REGEX);
       if (!match) continue;
       const [, timestamp, camera] = match;
+      if (cutoff && timestamp < cutoff) continue;
       if (!segmentMap.has(timestamp)) {
         segmentMap.set(timestamp, { cameras: new Set(), subfolder: folder });
       }
@@ -286,6 +346,7 @@ async function scanRecentClips(storage: StorageBackend): Promise<DashcamEvent[]>
       hasThumbnail: false,
       clips,
       totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
+      cameraCount: countUniqueCameras(clips),
     };
   });
 }

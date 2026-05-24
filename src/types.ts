@@ -17,6 +17,7 @@ export interface DashcamEvent {
   hasThumbnail: boolean;
   clips: EventClip[];
   totalDurationSec: number;
+  cameraCount?: number;
 }
 
 export type ViewMode = "browse" | "player";
