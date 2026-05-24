@@ -28,6 +28,22 @@ const SYNC_THRESHOLD = 0.15; // seconds - max drift before re-syncing
 const SYNC_INTERVAL = 200; // ms - how often to check sync
 const SEEK_STEP = 5; // seconds for arrow key seeking
 const SPEED_OPTIONS = [0.5, 1, 1.5, 2];
+const PARENT_TIME_UPDATE_INTERVAL = 500; // ms - compact timeline does not need every sync tick
+const NEXT_SEGMENT_PREFETCH_WINDOW = 15; // seconds before boundary
+const WALL_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+  timeZoneName: "short",
+});
+const HEADER_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
 
 // Grid positions for 3x2 layout
 const GRID_POS = [
@@ -80,6 +96,8 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
   const endedCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const onTimeUpdateRef = useRef(onTimeUpdate);
+  const lastParentTimeUpdateRef = useRef({ time: -1, playing: false, at: 0 });
+  const prefetchedSegmentsRef = useRef<Set<string>>(new Set());
   onTimeUpdateRef.current = onTimeUpdate;
 
   // Keep refs in sync with state (displayTimeRef is omitted — it's the
@@ -176,10 +194,34 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
     []
   );
 
+  const notifyTimeUpdate = useCallback((time: number, playing: boolean, force = false) => {
+    const callback = onTimeUpdateRef.current;
+    if (!callback) return;
+
+    const now = performance.now();
+    const last = lastParentTimeUpdateRef.current;
+    if (
+      !force &&
+      playing === last.playing &&
+      Math.abs(time - last.time) < 0.5 &&
+      now - last.at < PARENT_TIME_UPDATE_INTERVAL
+    ) {
+      return;
+    }
+
+    lastParentTimeUpdateRef.current = { time, playing, at: now };
+    callback(time, playing);
+  }, []);
+
   // --- HLS helpers ---
 
   const handleVideoError = useCallback((cam: CameraAngle) => {
-    setVideoErrors((prev) => new Set(prev).add(cam));
+    setVideoErrors((prev) => {
+      if (prev.has(cam)) return prev;
+      const next = new Set(prev);
+      next.add(cam);
+      return next;
+    });
     // Destroy HLS instance on fatal error — HLS.js can't recover in-place.
     // attachHls will create a fresh instance when the camera is retried.
     const hls = hlsInstancesRef.current.get(cam);
@@ -223,15 +265,26 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
   const handleEnded = useCallback((cam: CameraAngle) => {
     // Ignore ended events during segment loading (stale events from previous segment)
     if (segmentLoadingRef.current) return;
-    setEndedCameras((prev) => new Set(prev).add(cam));
+    setEndedCameras((prev) => {
+      if (prev.has(cam)) return prev;
+      const next = new Set(prev);
+      next.add(cam);
+      return next;
+    });
   }, []);
 
   const handleWaiting = useCallback((cam: CameraAngle) => {
-    setBufferingCameras((prev) => new Set(prev).add(cam));
+    setBufferingCameras((prev) => {
+      if (prev.has(cam)) return prev;
+      const next = new Set(prev);
+      next.add(cam);
+      return next;
+    });
   }, []);
 
   const handlePlaying = useCallback((cam: CameraAngle) => {
     setBufferingCameras((prev) => {
+      if (!prev.has(cam)) return prev;
       const next = new Set(prev);
       next.delete(cam);
       return next;
@@ -291,7 +344,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
         const totalDur = segmentOffsetsRef.current[segmentOffsetsRef.current.length - 1];
         displayTimeRef.current = Math.min(displayTimeRef.current + elapsed, totalDur);
         setDisplayTime(displayTimeRef.current);
-        onTimeUpdateRef.current?.(displayTimeRef.current, true);
+        notifyTimeUpdate(displayTimeRef.current, true);
       }
 
       // 2. Sync each video independently to displayTime
@@ -438,7 +491,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((v) => v.pause());
-      onTimeUpdateRef.current?.(displayTimeRef.current, false);
+      notifyTimeUpdate(displayTimeRef.current, false, true);
     } else {
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -447,7 +500,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
         v.playbackRate = playbackRateRef.current;
         v.play().catch(() => {});
       });
-      onTimeUpdateRef.current?.(displayTimeRef.current, true);
+      notifyTimeUpdate(displayTimeRef.current, true, true);
     }
   }, []);
 
@@ -491,7 +544,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
       }
       setDisplayTime(clamped);
       displayTimeRef.current = clamped;
-      onTimeUpdateRef.current?.(clamped, isPlayingRef.current);
+      notifyTimeUpdate(clamped, isPlayingRef.current, true);
     },
     [event.clips, event.type, event.id, loadSegment, totalDuration, attachHls]
   );
@@ -527,6 +580,40 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
     });
   }, []);
 
+  // Prepare the next segment shortly before playback reaches it. The fetches
+  // trigger the server's lazy HLS cache so segment transitions are less likely
+  // to block on ffmpeg work.
+  useEffect(() => {
+    if (!isPlaying || segmentLoading) return;
+
+    const nextIdx = segmentIdx + 1;
+    const nextSegment = event.clips[nextIdx];
+    if (!nextSegment) return;
+
+    const nextOffset = segmentOffsets[nextIdx];
+    if (nextOffset == null || nextOffset - displayTime > NEXT_SEGMENT_PREFETCH_WINDOW) return;
+
+    const prefetchKey = `${event.type}/${event.id}/${nextSegment.timestamp}`;
+    if (prefetchedSegmentsRef.current.has(prefetchKey)) return;
+    prefetchedSegmentsRef.current.add(prefetchKey);
+
+    for (const cam of allEventCameras) {
+      if (!nextSegment.cameras.includes(cam)) continue;
+      fetch(hlsManifestUrl(event.type, event.id, nextSegment.timestamp, cam), { cache: "no-store" })
+        .catch(() => {});
+    }
+  }, [
+    allEventCameras,
+    displayTime,
+    event.clips,
+    event.id,
+    event.type,
+    isPlaying,
+    segmentIdx,
+    segmentLoading,
+    segmentOffsets,
+  ]);
+
   // Reset state and load first segment when event changes
   useEffect(() => {
     // Stop existing playback
@@ -545,6 +632,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
     setVideoErrors(new Set());
     setBufferingCameras(new Set());
     setEndedCameras(new Set());
+    prefetchedSegmentsRef.current.clear();
 
     loadSegment(0, 0);
   }, [event.id, loadSegment]);
@@ -664,7 +752,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
   };
 
   // Wall-clock time: compute from first clip timestamp + displayTime
-  const wallClockStr = useMemo(() => {
+  const wallClockBaseMs = useMemo(() => {
     if (!event.clips[0]?.timestamp) return null;
     const ts = event.clips[0].timestamp;
     const iso = ts.replace(/_/g, "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2");
@@ -673,14 +761,13 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
     return epoch;
   }, [event.clips]);
 
-  const wallClockDisplay = wallClockStr != null
-    ? new Date(wallClockStr + displayTime * 1000).toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        second: "2-digit",
-        timeZoneName: "short",
-      })
+  const wallClockDisplay = wallClockBaseMs != null
+    ? WALL_CLOCK_FORMATTER.format(new Date(wallClockBaseMs + displayTime * 1000))
     : null;
+  const headerDateDisplay = useMemo(
+    () => HEADER_DATE_FORMATTER.format(new Date(event.timestamp)),
+    [event.timestamp]
+  );
 
   const { label: badgeLabel, color: badgeColor } = BADGE_MAP[event.type];
 
@@ -844,14 +931,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
             {event.city || event.id}
             <span className="player-header-date">
               {" "}&middot;{" "}
-              {new Date(event.timestamp).toLocaleDateString("en-US", {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-                hour: "numeric",
-                minute: "2-digit",
-                timeZoneName: "short",
-              })}
+              {headerDateDisplay}
             </span>
           </span>
           {event.reason && (

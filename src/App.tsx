@@ -121,6 +121,8 @@ export function App() {
         );
         if (found) {
           setSelectedEvent(found);
+          setPlayerDisplayTime(0);
+          setPlayerIsPlaying(false);
           setView("player");
         }
       }
@@ -176,6 +178,8 @@ export function App() {
         );
         if (found) {
           setSelectedEvent(found);
+          setPlayerDisplayTime(0);
+          setPlayerIsPlaying(false);
           setView("player");
           return;
         }
@@ -212,6 +216,8 @@ export function App() {
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
     setSelectedEvent(event);
     setView("player");
+    setPlayerDisplayTime(0);
+    setPlayerIsPlaying(false);
     if (filteredList) setBrowseList(filteredList);
     pushedHashRef.current = true;
     location.hash = `/event/${event.type}/${event.id}`;
@@ -246,6 +252,8 @@ export function App() {
       if (nextIdx >= 0 && nextIdx < navList.length) {
         const next = navList[nextIdx];
         setSelectedEvent(next);
+        setPlayerDisplayTime(0);
+        setPlayerIsPlaying(false);
         // Replace hash (don't push, so back goes to browse not previous event)
         history.replaceState(null, "", `#/event/${next.type}/${next.id}`);
       }
@@ -254,8 +262,8 @@ export function App() {
   );
 
   const handleTimeUpdate = useCallback((time: number, playing: boolean) => {
-    setPlayerDisplayTime(time);
-    setPlayerIsPlaying(playing);
+    setPlayerDisplayTime((prev) => Math.abs(prev - time) < 0.05 ? prev : time);
+    setPlayerIsPlaying((prev) => prev === playing ? prev : playing);
   }, []);
 
   const handleSetupComplete = () => {
@@ -291,7 +299,7 @@ export function App() {
               onNavigate={handleNavigate}
               hasPrev={selectedIdx > 0}
               hasNext={selectedIdx < navList.length - 1}
-              onTimeUpdate={handleTimeUpdate}
+              onTimeUpdate={selectedEvent.type === "RecentClips" ? handleTimeUpdate : undefined}
             />
             {selectedEvent.type === "RecentClips" && (
               <Timeline

@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { memo, useMemo, useState, useCallback } from "react";
 import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
@@ -32,6 +32,8 @@ const EVENT_TYPE_CLASS: Record<DashcamEvent["type"], "recent" | "sentry" | "save
   SentryClips: "sentry",
   SavedClips: "saved",
 };
+const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", { weekday: "short" });
+const DATE_LABEL_FORMATTER = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 
 function parseTimestamp(ts: string): Date {
   const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
@@ -109,8 +111,8 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
       const d = new Date(dateStr + "T12:00:00");
       return {
         dateStr,
-        weekday: d.toLocaleDateString("en-US", { weekday: "short" }),
-        dateLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        weekday: WEEKDAY_FORMATTER.format(d),
+        dateLabel: DATE_LABEL_FORMATTER.format(d),
         sessions: sessions.sort((a, b) => {
           const aOrder = a.event.type === "RecentClips" ? 0 : 1;
           const bOrder = b.event.type === "RecentClips" ? 0 : 1;
@@ -183,8 +185,8 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     );
   }
 
-  const isSelected = (event: DashcamEvent) =>
-    selectedEvent?.type === event.type && selectedEvent?.id === event.id;
+  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
+  const handleTooltipClear = useCallback(() => setTooltip(null), []);
 
   return (
     <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
@@ -209,50 +211,16 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
 
         <div className="timeline-scroll">
           {days.map((day) => (
-            <div className="timeline-day" key={day.dateStr}>
-              <div className="timeline-day-label">
-                <span className="timeline-day-label-weekday">{day.weekday}</span>
-                <span className="timeline-day-label-date">{day.dateLabel}</span>
-              </div>
-              <div className="timeline-bar-container">
-                <div
-                  className="timeline-bar-inner"
-                  onMouseMove={(e) => handleBarMouseMove(e, day)}
-                  onMouseLeave={() => setTooltip(null)}
-                >
-                  <div className="timeline-track">
-                    {day.sessions.map((session) => {
-                      const left = (session.startHour / 24) * 100;
-                      const width = Math.max(((session.endHour - session.startHour) / 24) * 100, 0.3);
-                      const typeClass = EVENT_TYPE_CLASS[session.event.type];
-                      return (
-                        <div
-                          key={`${session.event.type}-${session.event.id}`}
-                          className={`timeline-segment timeline-segment--${typeClass} ${isSelected(session.event) ? "active" : ""}`}
-                          style={{ left: `${left}%`, width: `${width}%` }}
-                          onClick={() => handleSessionClick(session)}
-                          title={`${formatTimeDetailed(session.startHour)} — ${formatDurationShort(session.durationMin)}${typeClass !== "recent" ? ` (${typeClass})` : ""}`}
-                        />
-                      );
-                    })}
-                    {/* Playhead indicator */}
-                    {playheadInfo && playheadInfo.dateStr === day.dateStr && (
-                      <div
-                        className={`timeline-playhead ${isPlaying ? "timeline-playhead--playing" : ""}`}
-                        style={{ left: `${playheadInfo.leftPct}%` }}
-                      />
-                    )}
-                  </div>
-                  {HOUR_TICKS.map((h) => (
-                    <div
-                      key={h}
-                      className="timeline-hour-mark"
-                      style={{ left: `${(h / 24) * 100}%` }}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
+            <TimelineDayRow
+              key={day.dateStr}
+              day={day}
+              selectedKey={selectedKey}
+              playheadLeftPct={playheadInfo?.dateStr === day.dateStr ? playheadInfo.leftPct : null}
+              isPlaying={Boolean(isPlaying)}
+              onSessionClick={handleSessionClick}
+              onBarMouseMove={handleBarMouseMove}
+              onTooltipClear={handleTooltipClear}
+            />
           ))}
         </div>
 
@@ -284,3 +252,68 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     </div>
   );
 }
+
+const TimelineDayRow = memo(function TimelineDayRow({
+  day,
+  selectedKey,
+  playheadLeftPct,
+  isPlaying,
+  onSessionClick,
+  onBarMouseMove,
+  onTooltipClear,
+}: {
+  day: DayData;
+  selectedKey: string | null;
+  playheadLeftPct: number | null;
+  isPlaying: boolean;
+  onSessionClick: (session: SessionBlock) => void;
+  onBarMouseMove: (e: React.MouseEvent, day: DayData) => void;
+  onTooltipClear: () => void;
+}) {
+  return (
+    <div className="timeline-day">
+      <div className="timeline-day-label">
+        <span className="timeline-day-label-weekday">{day.weekday}</span>
+        <span className="timeline-day-label-date">{day.dateLabel}</span>
+      </div>
+      <div className="timeline-bar-container">
+        <div
+          className="timeline-bar-inner"
+          onMouseMove={(e) => onBarMouseMove(e, day)}
+          onMouseLeave={onTooltipClear}
+        >
+          <div className="timeline-track">
+            {day.sessions.map((session) => {
+              const left = (session.startHour / 24) * 100;
+              const width = Math.max(((session.endHour - session.startHour) / 24) * 100, 0.3);
+              const typeClass = EVENT_TYPE_CLASS[session.event.type];
+              const key = `${session.event.type}/${session.event.id}`;
+              return (
+                <div
+                  key={key}
+                  className={`timeline-segment timeline-segment--${typeClass} ${selectedKey === key ? "active" : ""}`}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                  onClick={() => onSessionClick(session)}
+                  title={`${formatTimeDetailed(session.startHour)} — ${formatDurationShort(session.durationMin)}${typeClass !== "recent" ? ` (${typeClass})` : ""}`}
+                />
+              );
+            })}
+            {playheadLeftPct != null && (
+              <div
+                className={`timeline-playhead ${isPlaying ? "timeline-playhead--playing" : ""}`}
+                style={{ left: `${playheadLeftPct}%` }}
+              />
+            )}
+          </div>
+          {HOUR_TICKS.map((h) => (
+            <div
+              key={h}
+              className="timeline-hour-mark"
+              style={{ left: `${(h / 24) * 100}%` }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});

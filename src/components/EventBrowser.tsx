@@ -1,4 +1,4 @@
-import { Fragment, useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { Fragment, memo, useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { thumbnailUrl, fetchStatus, fetchCaches, clearCache, getApiBase, type ServerStatus, type CacheInfo } from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
@@ -18,19 +18,25 @@ type ViewType = "events" | "recent";
 type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 48;
+const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
+const DATE_GROUP_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+});
 
 function formatTimestamp(ts: string): string {
   try {
-    const d = new Date(ts);
-    return d.toLocaleDateString("en-US", {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short",
-    });
+    return TIMESTAMP_FORMATTER.format(new Date(ts));
   } catch {
     return ts;
   }
@@ -48,12 +54,7 @@ function formatDuration(seconds: number): string {
 
 function formatDateGroup(ts: string): string {
   try {
-    return new Date(ts).toLocaleDateString("en-US", {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
+    return DATE_GROUP_FORMATTER.format(new Date(ts));
   } catch {
     return ts;
   }
@@ -148,6 +149,10 @@ export function EventBrowser({
 
   const visible = filtered.slice(0, visibleCount);
   const hasMore = visibleCount < filtered.length;
+  const handleCardSelect = useCallback(
+    (event: DashcamEvent) => onSelectEvent(event, filtered),
+    [onSelectEvent, filtered]
+  );
 
   // Infinite scroll: load more when sentinel enters viewport
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -304,7 +309,7 @@ export function EventBrowser({
                     )}
                     <EventCard
                       event={event}
-                      onClick={() => onSelectEvent(event, filtered)}
+                      onSelect={handleCardSelect}
                     />
                   </Fragment>
                 );
@@ -352,20 +357,33 @@ const BADGE_STYLES: Record<string, { label: string; color: string }> = {
 };
 const DEFAULT_BADGE = { label: "Saved", color: "var(--saved-color)" };
 
-function EventCard({
+const EventCard = memo(function EventCard({
   event,
-  onClick,
+  onSelect,
 }: {
   event: DashcamEvent;
-  onClick: () => void;
+  onSelect: (event: DashcamEvent) => void;
 }) {
   const badge = BADGE_STYLES[event.type] ?? DEFAULT_BADGE;
+  const formattedTimestamp = useMemo(
+    () => formatTimestamp(event.timestamp),
+    [event.timestamp]
+  );
+  const cameraCount = useMemo(() => {
+    if (event.cameraCount != null) return event.cameraCount;
+    return new Set(event.clips.flatMap((c) => c.cameras)).size;
+  }, [event]);
   const [thumbState, setThumbState] = useState<"loading" | "loaded" | "error">(
     event.hasThumbnail ? "loading" : "error"
   );
+  useEffect(() => {
+    setThumbState(event.hasThumbnail ? "loading" : "error");
+  }, [event.type, event.id, event.hasThumbnail]);
+
+  const handleClick = useCallback(() => onSelect(event), [event, onSelect]);
 
   return (
-    <button onClick={onClick} className="browse-card">
+    <button onClick={handleClick} className="browse-card">
       <div className="browse-card-thumb">
         {event.hasThumbnail && thumbState !== "error" ? (
           <>
@@ -375,6 +393,7 @@ function EventCard({
               alt=""
               className={`browse-card-img ${thumbState === "loaded" ? "loaded" : ""}`}
               loading="lazy"
+              decoding="async"
               onLoad={() => setThumbState("loaded")}
               onError={() => setThumbState("error")}
             />
@@ -394,7 +413,7 @@ function EventCard({
       </div>
       <div className="browse-card-info">
         <div className="browse-card-date">
-          {formatTimestamp(event.timestamp)}
+          {formattedTimestamp}
         </div>
         {event.city && (
           <div className="browse-card-city">{event.city}</div>
@@ -406,7 +425,7 @@ function EventCard({
         )}
         <div className="browse-card-meta">
           {event.clips.length} segments &middot;{" "}
-          {new Set(event.clips.flatMap((c) => c.cameras)).size} cameras
+          {cameraCount} cameras
           {event.lat != null && event.lon != null && (
             <>
               {" "}&middot;{" "}
@@ -425,7 +444,7 @@ function EventCard({
       </div>
     </button>
   );
-}
+});
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
