@@ -5,6 +5,9 @@ import path from "path";
 import type { StorageBackend } from "./storage.js";
 import { DOWNLOAD_CACHE_DIR, DIR_CACHE_PATH } from "./paths.js";
 
+const RECENT_DATE_FOLDER_PATTERN = /^RecentClips\/\d{4}-\d{2}-\d{2}$/;
+const EVENT_FOLDER_PATTERN = /^(SavedClips|SentryClips)\/\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
 /**
  * Google Drive storage backend.
  * Paths are relative (e.g. "SavedClips/2025-06-01_18-17-49/event.json")
@@ -92,13 +95,17 @@ export class GoogleDriveStorage implements StorageBackend {
    * List all entries in a Drive folder, with caching.
    * Returns a Map<name, { id, mimeType }>.
    */
-  private async listFolder(folderId: string, cachePath: string): Promise<Map<string, { id: string; mimeType: string }>> {
-    const cached = this.dirCache.get(cachePath);
-    if (cached) return cached;
-
+  private async listFolder(
+    folderId: string,
+    cachePath: string,
+    forceRefresh = false
+  ): Promise<Map<string, { id: string; mimeType: string }>> {
     // Deduplicate: if a request for the same path is already in-flight, wait for it
     const pending = this.pendingListFolder.get(cachePath);
     if (pending) return pending;
+
+    const cached = this.dirCache.get(cachePath);
+    if (cached && !forceRefresh) return cached;
 
     const promise = (async () => {
       try {
@@ -178,7 +185,11 @@ export class GoogleDriveStorage implements StorageBackend {
       throw new Error(`Directory not found: ${dirPath}`);
     }
 
-    const entries = await this.listFolder(resolved.id, dirPath);
+    const entries = await this.listFolder(
+      resolved.id,
+      dirPath,
+      RECENT_DATE_FOLDER_PATTERN.test(dirPath) || EVENT_FOLDER_PATTERN.test(dirPath)
+    );
     return Array.from(entries.keys());
   }
 

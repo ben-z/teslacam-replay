@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
 import type { ReactNode } from "react";
-import { fetchEvents, refreshEvents, fetchStatus, type ServerStatus } from "./api";
+import { fetchEvents, refreshEvents, fetchStatus, getApiBase, primeEventsCache, type ServerStatus } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
 import { Timeline } from "./components/Timeline";
@@ -54,21 +54,47 @@ function parseHash(): { type: string; id: string } | null {
 const EVENTS_CACHE_KEY = "teslacam-replay:events";
 
 function cacheEvents(data: DashcamEvent[]): void {
-  try { localStorage.setItem(EVENTS_CACHE_KEY, JSON.stringify(data)); } catch {}
+  try {
+    localStorage.setItem(EVENTS_CACHE_KEY, JSON.stringify({
+      apiBase: getApiBase(),
+      events: data,
+    }));
+  } catch {}
 }
 
 function loadCachedEvents(): DashcamEvent[] {
   try {
     const cached = localStorage.getItem(EVENTS_CACHE_KEY);
-    return cached ? JSON.parse(cached) : [];
+    if (!cached) return [];
+    const parsed: unknown = JSON.parse(cached);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "apiBase" in parsed &&
+      "events" in parsed &&
+      parsed.apiBase === getApiBase() &&
+      Array.isArray(parsed.events)
+    ) {
+      return parsed.events;
+    }
+    localStorage.removeItem(EVENTS_CACHE_KEY);
+    return [];
   } catch {
+    try {
+      localStorage.removeItem(EVENTS_CACHE_KEY);
+      localStorage.removeItem("teslacam-replay:events-etag");
+    } catch {}
     return [];
   }
 }
 
 export function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
-  const [events, setEvents] = useState<DashcamEvent[]>(loadCachedEvents);
+  const [events, setEvents] = useState<DashcamEvent[]>(() => {
+    const cached = loadCachedEvents();
+    primeEventsCache(cached);
+    return cached;
+  });
   const [loading, setLoading] = useState(events.length === 0);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() =>
@@ -128,7 +154,7 @@ export function App() {
         const data = await fetchEvents();
         let updated = false;
         setEvents((prev) => {
-          if (data.length === prev.length) return prev;
+          if (data === prev) return prev;
           updated = true;
           return data;
         });

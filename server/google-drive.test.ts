@@ -163,6 +163,92 @@ describe("GoogleDriveStorage", () => {
       // Only one API call
       expect(mock.list.callCount).toBe(1);
     });
+
+    it("refreshes mutable RecentClips date folders on repeated readdir calls", async () => {
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "recent-id", name: "RecentClips", mimeType: "application/vnd.google-apps.folder" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "date-id", name: "2026-01-02", mimeType: "application/vnd.google-apps.folder" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "clip-1", name: "2026-01-02_12-00-00-front.mp4", mimeType: "video/mp4" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "clip-1", name: "2026-01-02_12-00-00-front.mp4", mimeType: "video/mp4" },
+            { id: "clip-2", name: "2026-01-02_12-01-00-front.mp4", mimeType: "video/mp4" },
+          ],
+          nextPageToken: null,
+        },
+      });
+
+      const first = await storage.readdir("RecentClips/2026-01-02");
+      const second = await storage.readdir("RecentClips/2026-01-02");
+
+      expect(first).toHaveLength(1);
+      expect(second).toHaveLength(2);
+      expect(mock.list.callCount).toBe(4);
+    });
+
+    it("refreshes mutable SavedClips event folders on repeated readdir calls", async () => {
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "saved-id", name: "SavedClips", mimeType: "application/vnd.google-apps.folder" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "event-id", name: "2026-01-02_12-00-00", mimeType: "application/vnd.google-apps.folder" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "front-id", name: "2026-01-02_11-50-00-front.mp4", mimeType: "video/mp4" },
+          ],
+          nextPageToken: null,
+        },
+      });
+      mock.list.enqueue({
+        data: {
+          files: [
+            { id: "front-id", name: "2026-01-02_11-50-00-front.mp4", mimeType: "video/mp4" },
+            { id: "back-id", name: "2026-01-02_11-50-00-back.mp4", mimeType: "video/mp4" },
+          ],
+          nextPageToken: null,
+        },
+      });
+
+      const first = await storage.readdir("SavedClips/2026-01-02_12-00-00");
+      const second = await storage.readdir("SavedClips/2026-01-02_12-00-00");
+
+      expect(first).toHaveLength(1);
+      expect(second).toHaveLength(2);
+      expect(mock.list.callCount).toBe(4);
+    });
   });
 
   describe("readFile", () => {

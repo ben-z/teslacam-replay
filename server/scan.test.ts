@@ -201,6 +201,7 @@ describe("scanTeslacamFolder", () => {
     const sentry = events.find((e) => e.type === "SentryClips")!;
     expect(sentry.clips).toHaveLength(1);
     expect(sentry.clips[0].cameras).toHaveLength(6);
+    expect(sentry.cameraCount).toBe(6);
     // Single segment defaults to 60s
     expect(sentry.clips[0].durationSec).toBe(60);
   });
@@ -460,7 +461,40 @@ describe("In-memory mock StorageBackend", () => {
     expect(merged.map(e => e.id)).toContain("2025-06-01_12-00-00");
   });
 
-  it("incremental scan always re-scans RecentClips", async () => {
+  it("incremental scan refreshes newest SavedClips folders that were partially uploaded", async () => {
+    const partial = createMockStorage({
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
+    });
+    const existing = await scanTeslacamFolder(partial);
+    expect(existing).toHaveLength(1);
+    expect(existing[0].cameraCount).toBe(2);
+
+    const complete = createMockStorage({
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-left_repeater.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-right_repeater.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-left_pillar.mp4": "",
+      "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-right_pillar.mp4": "",
+    });
+
+    const rescanned = await scanTeslacamFolder(complete, existing);
+    const saved = rescanned.find(e => e.type === "SavedClips" && e.id === "2025-06-01_12-00-00");
+
+    expect(rescanned).toHaveLength(1);
+    expect(saved?.cameraCount).toBe(6);
+    expect(saved?.clips[0].cameras).toEqual([
+      "front",
+      "left_repeater",
+      "right_repeater",
+      "back",
+      "left_pillar",
+      "right_pillar",
+    ]);
+  });
+
+  it("incremental scan extends the newest RecentClips session", async () => {
     const mock1 = createMockStorage({
       "RecentClips/2026-01-01_12-00-00-front.mp4": "",
     });
@@ -478,5 +512,37 @@ describe("In-memory mock StorageBackend", () => {
     const recent = merged.filter(e => e.type === "RecentClips");
     expect(recent).toHaveLength(1);
     expect(recent[0].clips).toHaveLength(2); // fresh scan picked up both
+  });
+
+  it("incremental scan skips RecentClips date folders older than the newest session", async () => {
+    const initialFiles: Record<string, string | null> = {
+      "RecentClips/2026-01-01/2026-01-01_08-00-00-front.mp4": "",
+      "RecentClips/2026-01-02/2026-01-02_12-00-00-front.mp4": "",
+    };
+    const existing = await scanTeslacamFolder(createMockStorage(initialFiles));
+    expect(existing.filter(e => e.type === "RecentClips")).toHaveLength(2);
+
+    const updatedFiles: Record<string, string | null> = {
+      ...initialFiles,
+      "RecentClips/2026-01-02/2026-01-02_12-01-00-front.mp4": "",
+    };
+    const base = createMockStorage(updatedFiles);
+    const readdirCalls: string[] = [];
+    const tracked: StorageBackend = {
+      ...base,
+      async readdir(dirPath: string): Promise<string[]> {
+        readdirCalls.push(dirPath);
+        return base.readdir(dirPath);
+      },
+    };
+
+    const merged = await scanTeslacamFolder(tracked, existing);
+    const recent = merged.filter(e => e.type === "RecentClips");
+    const updated = recent.find(e => e.id === "2026-01-02_12-00-00");
+    const preserved = recent.find(e => e.id === "2026-01-01_08-00-00");
+
+    expect(readdirCalls).not.toContain("RecentClips/2026-01-01");
+    expect(updated?.clips).toHaveLength(2);
+    expect(preserved?.clips).toHaveLength(1);
   });
 });

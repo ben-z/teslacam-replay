@@ -1,6 +1,7 @@
 import type { DashcamEvent, TelemetryData } from "./types";
 
 const STORAGE_KEY = "teslacam-replay:api-url";
+const EVENTS_ETAG_KEY = "teslacam-replay:events-etag";
 
 function initApiBase(): string {
   const params = new URLSearchParams(window.location.search);
@@ -21,21 +22,58 @@ function initApiBase(): string {
 }
 
 const API_BASE = initApiBase();
+let eventsMemoryCache: DashcamEvent[] | null = null;
+let eventsEtag: string | null = (() => {
+  try {
+    return localStorage.getItem(EVENTS_ETAG_KEY);
+  } catch {
+    return null;
+  }
+})();
 
 export function getApiBase(): string {
   return API_BASE;
 }
 
+export function primeEventsCache(events: DashcamEvent[]): void {
+  eventsMemoryCache = events;
+}
+
+function storeEventsCache(events: DashcamEvent[], etag: string | null): DashcamEvent[] {
+  eventsMemoryCache = events;
+  if (etag) {
+    eventsEtag = etag;
+    try { localStorage.setItem(EVENTS_ETAG_KEY, etag); } catch {}
+  } else {
+    eventsEtag = null;
+    try { localStorage.removeItem(EVENTS_ETAG_KEY); } catch {}
+  }
+  return events;
+}
+
 export async function fetchEvents(): Promise<DashcamEvent[]> {
-  const res = await fetch(`${API_BASE}/events`);
+  const headers: HeadersInit = {};
+  if (eventsEtag) headers["If-None-Match"] = eventsEtag;
+
+  const res = await fetch(`${API_BASE}/events`, { headers });
+  if (res.status === 304) {
+    if (eventsMemoryCache) return eventsMemoryCache;
+
+    // The server still has the version identified by our persisted ETag, but
+    // this tab has no in-memory event data to pair with it. Retry once without
+    // the validator so the UI can rebuild its cache.
+    eventsEtag = null;
+    try { localStorage.removeItem(EVENTS_ETAG_KEY); } catch {}
+    return fetchEvents();
+  }
   if (!res.ok) throw new Error(`Failed to fetch events: ${res.status}`);
-  return res.json();
+  return storeEventsCache(await res.json(), res.headers.get("ETag"));
 }
 
 export async function refreshEvents(): Promise<DashcamEvent[]> {
   const res = await fetch(`${API_BASE}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to refresh: ${res.status}`);
-  return res.json();
+  return storeEventsCache(await res.json(), res.headers.get("ETag"));
 }
 
 export function thumbnailUrl(type: string, id: string): string {
