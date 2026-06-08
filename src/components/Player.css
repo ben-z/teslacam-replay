@@ -126,6 +126,25 @@
   box-shadow: 0 1px 4px var(--accent-glow);
 }
 
+.player-download-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  text-decoration: none;
+}
+.player-download-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
 .player-shortcuts-hint {
   width: 22px;
   height: 22px;

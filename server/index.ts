@@ -13,8 +13,11 @@ import {
   scanTeslacamFolder,
   getVideoPath,
   getThumbnailPath,
+  getEventDirPath,
+  getEventFilePaths,
   type DashcamEvent,
 } from "./scan.js";
+import archiver from "archiver";
 import { extractTelemetry, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { LocalStorage, type StorageBackend } from "./storage.js";
@@ -318,6 +321,58 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
   } catch {
     return c.json({ error: "Thumbnail not found" }, 404);
   }
+});
+
+// --- Download: zip original video files for an event ---
+
+app.get("/api/events/:type/:id/download", async (c) => {
+  const { type, id } = c.req.param();
+  if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
+
+  const events = await getEvents();
+  const event = events.find((e) => e.type === type && e.id === id);
+  if (!event) return c.json({ error: "Event not found" }, 404);
+
+  // For SavedClips/SentryClips, stream the entire directory as-is
+  // For RecentClips, collect individual clip files
+  const eventDir = getEventDirPath(type, id);
+  const folderName = type === "RecentClips" ? `RecentClips_${id}` : id;
+
+  const archive = archiver("zip", { store: true }); // store = no compression (videos don't compress well)
+
+  if (eventDir) {
+    // Stream the entire event directory
+    const dirFiles = await storage!.readdir(eventDir);
+    for (const file of dirFiles) {
+      const filePath = `${eventDir}/${file}`;
+      try {
+        const stream = await storage!.createReadStream(filePath);
+        archive.append(stream as Readable, { name: `${folderName}/${file}` });
+      } catch {
+        // Skip files that can't be read
+      }
+    }
+  } else {
+    // RecentClips: collect files from clips list
+    const filePaths = getEventFilePaths(event);
+    for (const { storagePath, archiveName } of filePaths) {
+      try {
+        const stream = await storage!.createReadStream(storagePath);
+        archive.append(stream as Readable, { name: `${folderName}/${archiveName}` });
+      } catch {
+        // Skip files that can't be read
+      }
+    }
+  }
+
+  archive.finalize();
+
+  c.header("Content-Type", "application/zip");
+  c.header("Content-Disposition", `attachment; filename="${folderName}.zip"`);
+
+  return new Response(Readable.toWeb(archive) as ReadableStream, {
+    headers: c.res.headers,
+  });
 });
 
 // --- Telemetry (SEI extraction with in-memory cache) ---

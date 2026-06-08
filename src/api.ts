@@ -150,6 +150,10 @@ export async function clearCache(id: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to clear cache: ${res.status}`);
 }
 
+export function downloadEventUrl(type: string, id: string): string {
+  return `${API_BASE}/events/${type}/${id}/download`;
+}
+
 export function hlsManifestUrl(
   type: string,
   eventId: string,

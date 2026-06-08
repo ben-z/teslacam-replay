@@ -374,3 +374,30 @@ export function getThumbnailPath(
 ): string {
   return `${type}/${eventId}/thumb.png`;
 }
+
+/**
+ * Get the directory path for an event (SavedClips/SentryClips only).
+ * Returns null for RecentClips since those don't have a single directory.
+ */
+export function getEventDirPath(type: string, eventId: string): string | null {
+  if (type === "RecentClips") return null;
+  return `${type}/${eventId}`;
+}
+
+/**
+ * Get all original file paths for an event's clips.
+ * Returns { storagePath, archiveName } tuples for zip creation.
+ */
+export function getEventFilePaths(event: DashcamEvent): { storagePath: string; archiveName: string }[] {
+  const files: { storagePath: string; archiveName: string }[] = [];
+
+  for (const clip of event.clips) {
+    for (const camera of clip.cameras) {
+      const storagePath = getVideoPath(event.type, event.id, clip.timestamp, camera, clip.subfolder);
+      const archiveName = `${clip.timestamp}-${camera}.mp4`;
+      files.push({ storagePath, archiveName });
+    }
+  }
+
+  return files;
+}

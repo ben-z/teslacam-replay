@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Hls from "hls.js";
-import { hlsManifestUrl } from "../api";
+import { hlsManifestUrl, downloadEventUrl } from "../api";
 import type { DashcamEvent, CameraAngle } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
 import { useTelemetry } from "../useTelemetry";
@@ -964,6 +964,17 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
             </button>
           ))}
         </div>
+        <a
+          href={downloadEventUrl(event.type, event.id)}
+          className="player-download-btn"
+          title="Download original videos"
+          aria-label="Download original videos"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 12l-4-4h2.5V2h3v6H12L8 12z" />
+            <path d="M2 14h12v-1.5H2V14z" />
+          </svg>
+        </a>
         <button
           className="player-shortcuts-hint"
           onClick={() => setShowShortcuts((s) => !s)}
