@@ -55,6 +55,7 @@ app.use("/api/*", compress());
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
 const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);
 const EVENT_FOLDER_ORDER_BY = process.env.GDRIVE_EVENT_ORDER_BY ?? "name desc";
+const RECENT_FILE_PAGE_SIZE = 1000;
 const EVENT_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
 
 const eventIndex = new Map<string, DashcamEvent>();
@@ -174,8 +175,8 @@ async function getEventPage(
     const page = await drive.listFolderPage(drive.folderRef(folder), {
       type: "files",
       pageToken,
-      pageSize: Math.min(1000, Math.max(limit * 6, limit)),
-      limit: Math.min(1000, Math.max(limit * 6, limit)),
+      pageSize: RECENT_FILE_PAGE_SIZE,
+      limit: RECENT_FILE_PAGE_SIZE,
     });
     const events = (await scanRecentClipsPage(drive, page.files))
       .sort((a, b) => b.id.localeCompare(a.id));

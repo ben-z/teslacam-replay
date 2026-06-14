@@ -191,7 +191,7 @@ export function EventBrowser({
   }, [filtered]);
 
   const visible = filtered.slice(0, visibleCount);
-  const hasMoreLoaded = visibleCount < filtered.length;
+  const hasMoreLoaded = view !== "recent" && visibleCount < filtered.length;
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
     if (view === "recent") return ["RecentClips"];
     if (filter === "all") return ["SavedClips", "SentryClips"];
@@ -241,7 +241,7 @@ export function EventBrowser({
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (view === "recent" || !sentinel || !hasMore) return;
+    if (!sentinel || !hasMore) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -253,12 +253,6 @@ export function EventBrowser({
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [hasMore, handleLoadMore, view]);
-
-  useEffect(() => {
-    if (view !== "recent" || !hasMorePages.RecentClips || loadingMore) return;
-    const timer = setTimeout(() => onLoadMore(["RecentClips"]), 300);
-    return () => clearTimeout(timer);
-  }, [hasMorePages.RecentClips, loadingMore, onLoadMore, recentScan.frontierLabel, view]);
 
   return (
     <div className="browse-container">
@@ -374,8 +368,8 @@ export function EventBrowser({
             </div>
             <Timeline events={recentScan.timelineEvents} onSelectEvent={onSelectEvent} />
             {hasMorePages.RecentClips && (
-              <div className="browse-load-more browse-load-more--passive">
-                {loadingMore ? "Loading older clips..." : "Older clips load automatically"}
+              <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
+                {loadingMore ? "Loading older clips..." : "Scroll for older clips"}
               </div>
             )}
           </>
