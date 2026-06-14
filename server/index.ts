@@ -246,7 +246,6 @@ app.get("/api/status", (c) => {
   return c.json({
     storageBackend: "gdrive-serve-lite",
     storagePath: drive.baseUrl,
-    loadedEventCount: eventIndex.size,
   });
 });
 
@@ -263,7 +262,6 @@ app.get("/api/events/page", async (c) => {
       type,
       events: publicEvents(page.events),
       nextPageToken: page.nextPageToken ?? null,
-      loadedEventCount: eventIndex.size,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to load event page";

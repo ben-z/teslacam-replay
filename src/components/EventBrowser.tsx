@@ -175,6 +175,7 @@ export function EventBrowser({
   );
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
+  const loadedEventCount = events.length;
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
@@ -236,7 +237,7 @@ export function EventBrowser({
                 className={`browse-view-btn ${view === "recent" ? "active" : ""}`}
                 aria-pressed={view === "recent"}
               >
-                Recent ({counts.recent})
+                Recent ({counts.recent} session{counts.recent !== 1 ? "s" : ""})
               </button>
             )}
           </div>
@@ -316,7 +317,7 @@ export function EventBrowser({
                   disabled={loadingMore}
                   onClick={handleLoadMore}
                 >
-                  {loadingMore ? "Loading..." : "Load more"}
+                  {loadingMore ? "Loading..." : "Load more events"}
                 </button>
               </div>
             )}
@@ -371,8 +372,8 @@ export function EventBrowser({
                   onClick={handleLoadMore}
                 >
                   {hasMoreLoaded
-                    ? `${filtered.length - visibleCount} more loaded`
-                    : loadingMore ? "Loading..." : "Load more"}
+                    ? `Show ${filtered.length - visibleCount} more events`
+                    : loadingMore ? "Loading..." : "Load more events"}
                 </button>
               </div>
             )}
@@ -391,10 +392,10 @@ export function EventBrowser({
               <span className="browse-status-path">{status.storagePath}</span>
             </>
           )}
-          {status.loadedEventCount > 0 && (
+          {loadedEventCount > 0 && (
             <>
               <span className="browse-status-sep">&middot;</span>
-              <span>{status.loadedEventCount} loaded</span>
+              <span>{loadedEventCount} event{loadedEventCount !== 1 ? "s" : ""} loaded</span>
             </>
           )}
           <DebugPanelToggle />

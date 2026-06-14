@@ -32,7 +32,6 @@ export interface EventPage {
   type: EventPageType;
   events: DashcamEvent[];
   nextPageToken: string | null;
-  loadedEventCount: number;
 }
 
 export async function fetchEventPage(
@@ -76,7 +75,6 @@ export type ServerStatus =
   {
     storageBackend: string;
     storagePath: string;
-    loadedEventCount: number;
   };
 
 export async function fetchStatus(): Promise<ServerStatus> {
