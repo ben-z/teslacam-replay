@@ -442,6 +442,44 @@
   opacity: 0.7;
 }
 
+.browse-load-more--passive {
+  padding: 12px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.recent-scan-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.recent-scan-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.recent-scan-dot.active {
+  background: var(--recent-color);
+  animation: scanPulse 1s ease-in-out infinite;
+}
+
+.recent-scan-frontier {
+  color: var(--text-dim);
+}
+
+@keyframes scanPulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .browse-header {

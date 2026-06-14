@@ -45,6 +45,34 @@ const DATE_GROUP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   year: "numeric",
 });
+const SCAN_FRONTIER_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function timestampToMs(ts: string): number {
+  const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
+  const d = m
+    ? new Date(
+      Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+      Number(m[4]), Number(m[5]), Number(m[6])
+    )
+    : new Date(ts);
+  const ms = d.getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function eventStartMs(event: DashcamEvent): number {
+  return timestampToMs(event.clips[0]?.timestamp ?? event.timestamp);
+}
+
+function formatScanFrontier(ms: number | null): string {
+  if (ms == null) return "not started";
+  return SCAN_FRONTIER_FORMATTER.format(new Date(ms));
+}
 
 function formatTimestamp(ts: string): string {
   try {
@@ -176,6 +204,27 @@ export function EventBrowser({
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
+  const recentScan = useMemo(() => {
+    const recentEvents = events.filter((event) => event.type === "RecentClips");
+    let oldestRecentMs: number | null = null;
+    for (const event of recentEvents) {
+      const ms = eventStartMs(event);
+      if (ms > 0 && (oldestRecentMs == null || ms < oldestRecentMs)) {
+        oldestRecentMs = ms;
+      }
+    }
+
+    const timelineEvents = oldestRecentMs == null
+      ? recentEvents
+      : events.filter((event) =>
+        event.type === "RecentClips" || eventStartMs(event) >= oldestRecentMs
+      );
+
+    return {
+      timelineEvents,
+      frontierLabel: formatScanFrontier(oldestRecentMs),
+    };
+  }, [events]);
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
@@ -204,6 +253,12 @@ export function EventBrowser({
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [hasMore, handleLoadMore, view]);
+
+  useEffect(() => {
+    if (view !== "recent" || !hasMorePages.RecentClips || loadingMore) return;
+    const timer = setTimeout(() => onLoadMore(["RecentClips"]), 300);
+    return () => clearTimeout(timer);
+  }, [hasMorePages.RecentClips, loadingMore, onLoadMore, recentScan.frontierLabel, view]);
 
   return (
     <div className="browse-container">
@@ -308,17 +363,19 @@ export function EventBrowser({
           </div>
         ) : view === "recent" ? (
           <>
-            <Timeline events={events} onSelectEvent={onSelectEvent} />
-            {hasMoreRemote && (
-              <div className="browse-load-more" ref={sentinelRef}>
-                <button
-                  type="button"
-                  className="browse-load-more-hint"
-                  disabled={loadingMore}
-                  onClick={handleLoadMore}
-                >
-                  {loadingMore ? "Loading..." : "Load more events"}
-                </button>
+            <div className="recent-scan-status" aria-live="polite">
+              <span className={`recent-scan-dot ${hasMorePages.RecentClips ? "active" : ""}`} />
+              <span>
+                {hasMorePages.RecentClips ? "Scanning older recent clips" : "Recent scan complete"}
+              </span>
+              <span className="recent-scan-frontier">
+                Scanned back to {recentScan.frontierLabel}
+              </span>
+            </div>
+            <Timeline events={recentScan.timelineEvents} onSelectEvent={onSelectEvent} />
+            {hasMorePages.RecentClips && (
+              <div className="browse-load-more browse-load-more--passive">
+                {loadingMore ? "Loading older clips..." : "Older clips load automatically"}
               </div>
             )}
           </>

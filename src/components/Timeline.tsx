@@ -177,6 +177,9 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     return { dateStr, leftPct };
   }, [selectedEvent, displayTime]);
 
+  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
+  const handleTooltipClear = useCallback(() => setTooltip(null), []);
+
   if (days.length === 0) {
     return (
       <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
@@ -184,9 +187,6 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
       </div>
     );
   }
-
-  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
-  const handleTooltipClear = useCallback(() => setTooltip(null), []);
 
   return (
     <div className={`timeline ${compact ? "timeline--compact" : ""}`}>

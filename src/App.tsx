@@ -174,8 +174,10 @@ export function App() {
   const pushedHashRef = useRef(false);
   const eventsRef = useRef(events);
   const nextPageTokensRef = useRef(nextPageTokens);
+  const loadingMoreRef = useRef(loadingMore);
   eventsRef.current = events;
   nextPageTokensRef.current = nextPageTokens;
+  loadingMoreRef.current = loadingMore;
 
   const selectEvent = useCallback((event: DashcamEvent) => {
     setSelectedEvent(event);
@@ -284,10 +286,14 @@ export function App() {
   };
 
   const handleLoadMore = useCallback((types: EventPageType[]) => {
-    if (loadingMore) return;
+    if (loadingMoreRef.current) return;
     const loadable = types.filter((type) => nextPageTokensRef.current[type]);
-    if (loadable.length > 0) loadPages(loadable, false);
-  }, [loadPages, loadingMore]);
+    if (loadable.length === 0) return;
+    loadingMoreRef.current = true;
+    loadPages(loadable, false).finally(() => {
+      loadingMoreRef.current = false;
+    });
+  }, [loadPages]);
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
     setSelectedEvent(event);

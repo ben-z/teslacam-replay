@@ -136,7 +136,7 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 | `GDRIVE_READ_TIMEOUT_MS` | No | Timeout for larger file proxy reads used by thumbnails/telemetry (default: `300000`) |
 | `EVENT_PAGE_SIZE` | No | Number of event folders requested per browse page (default: `48`) |
 | `EVENT_PAGE_SCAN_CONCURRENCY` | No | Number of event folders scanned concurrently while building one page (default: `8`) |
-| `GDRIVE_EVENT_ORDER_BY` | No | Drive order for Saved/Sentry event folders (default: `name desc`; RecentClips uses unsorted file pages for speed) |
+| `GDRIVE_EVENT_ORDER_BY` | No | Drive order for Saved/Sentry event folders (default: `name desc`) |
 | `PORT` | No | Server port (default: `3001`) |
 | `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
 
