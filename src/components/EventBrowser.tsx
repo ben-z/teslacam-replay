@@ -169,7 +169,10 @@ export function EventBrowser({
     if (filter === "all") return ["SavedClips", "SentryClips"];
     return [filter];
   }, [filter, view]);
-  const remoteTypesToLoad = pageTypesToLoad.filter((type) => hasMorePages[type]);
+  const remoteTypesToLoad = useMemo(
+    () => pageTypesToLoad.filter((type) => hasMorePages[type]),
+    [hasMorePages, pageTypesToLoad]
+  );
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const handleCardSelect = useCallback(
@@ -188,7 +191,7 @@ export function EventBrowser({
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || !hasMore) return;
+    if (view === "recent" || !sentinel || !hasMore) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -199,7 +202,7 @@ export function EventBrowser({
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, filtered, handleLoadMore]);
+  }, [hasMore, handleLoadMore, view]);
 
   return (
     <div className="browse-container">
@@ -388,14 +391,10 @@ export function EventBrowser({
               <span className="browse-status-path">{status.storagePath}</span>
             </>
           )}
-          {(status.eventCount != null || status.loadedEventCount > 0) && (
+          {status.loadedEventCount > 0 && (
             <>
               <span className="browse-status-sep">&middot;</span>
-              <span>
-                {status.eventCount != null
-                  ? `${status.eventCount} cached events`
-                  : `${status.loadedEventCount} loaded`}
-              </span>
+              <span>{status.loadedEventCount} loaded</span>
             </>
           )}
           <DebugPanelToggle />

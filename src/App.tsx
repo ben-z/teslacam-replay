@@ -57,7 +57,7 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
-const EVENTS_CACHE_KEY = "teslacam-replay:events";
+const BROWSE_CACHE_KEY = "teslacam-replay:browse-events";
 const PAGE_LOAD_LIMIT = 24;
 const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
 
@@ -77,7 +77,7 @@ const EMPTY_PAGE_AVAILABILITY: PageAvailability = {
 
 function cacheEvents(data: DashcamEvent[]): void {
   try {
-    localStorage.setItem(EVENTS_CACHE_KEY, JSON.stringify({
+    localStorage.setItem(BROWSE_CACHE_KEY, JSON.stringify({
       apiBase: getApiBase(),
       events: data,
     }));
@@ -86,7 +86,7 @@ function cacheEvents(data: DashcamEvent[]): void {
 
 function loadCachedEvents(): DashcamEvent[] {
   try {
-    const cached = localStorage.getItem(EVENTS_CACHE_KEY);
+    const cached = localStorage.getItem(BROWSE_CACHE_KEY);
     if (!cached) return [];
     const parsed: unknown = JSON.parse(cached);
     if (
@@ -99,12 +99,11 @@ function loadCachedEvents(): DashcamEvent[] {
     ) {
       return parsed.events;
     }
-    localStorage.removeItem(EVENTS_CACHE_KEY);
+    localStorage.removeItem(BROWSE_CACHE_KEY);
     return [];
   } catch {
     try {
-      localStorage.removeItem(EVENTS_CACHE_KEY);
-      localStorage.removeItem("teslacam-replay:events-etag");
+      localStorage.removeItem(BROWSE_CACHE_KEY);
     } catch {}
     return [];
   }

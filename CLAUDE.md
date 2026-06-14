@@ -72,10 +72,9 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdri
 
 ### Backend
 - **Drive access**: `gdrive-lite.ts` talks to `gdrive-serve-lite`; file IDs and direct read URLs are retained while building pages so playback does not re-resolve paths
-- **Event caching**: In-memory + disk cache at `~/.cache/teslacam-replay/events.json` with version tracking (CACHE_VERSION)
+- **Event index**: In-memory index of pages/events touched by the current server process; gdrive-serve-lite owns listing and pagination
 - **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching at `~/.cache/teslacam-replay/hls/`
 - **Page-first browsing**: `/api/events/page` scans only the requested Drive page, then the player routes use the in-memory event index or single-folder resolution
-- **Legacy full scan**: `/api/events` and `/api/refresh` still exist for full-catalog cache generation; `AUTO_REFRESH_INTERVAL` defaults to `0`
 
 ### Multi-Camera Sync
 - 6 cameras: front, back, left_repeater, right_repeater, left_pillar, right_pillar
@@ -95,7 +94,6 @@ Start `gdrive-serve-lite` separately, then copy `.env.example` to `.env` and con
 - `EVENT_PAGE_SIZE`: Event folders requested per page (default 48)
 - `EVENT_PAGE_SCAN_CONCURRENCY`: Event-folder scans per page (default 8)
 - `GDRIVE_EVENT_ORDER_BY`: Saved/Sentry folder ordering (default `name desc`)
-- `AUTO_REFRESH_INTERVAL`: Optional legacy full-catalog refresh interval (default 0)
 - `PORT`: Server port (default 3001)
 
 ### Testing Patterns

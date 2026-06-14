@@ -1,17 +1,15 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
-import { createHash } from "crypto";
 import { createReadStream } from "fs";
-import { readFile, writeFile, stat, mkdir, readdir, rename, rm, unlink } from "fs/promises";
+import { readFile, stat, readdir, rename, rm } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
   scanEventFolder,
   scanRecentClipsPage,
-  scanTeslacamFolder,
   getClipSource,
   type DashcamEvent,
   type EventType,
@@ -19,10 +17,9 @@ import {
 import { extractTelemetryFromBuffer, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { createGDriveLiteFromEnv, type DriveEntry } from "./gdrive-lite.js";
-import { EVENTS_CACHE_PATH, HLS_CACHE_DIR } from "./paths.js";
+import { HLS_CACHE_DIR } from "./paths.js";
 
 const drive = createGDriveLiteFromEnv();
-const storageCacheKey = `gdrive-lite:${drive.baseUrl}`;
 
 async function verifyDrive(): Promise<void> {
   try {
@@ -45,29 +42,16 @@ async function verifyDrive(): Promise<void> {
 
 await verifyDrive();
 
-// --- Event cache (memory + disk, with deduplication) ---
-let cachedEvents: DashcamEvent[] | null = null;
-let cachedEventsEtag: string | null = null;
-let scanPromise: Promise<DashcamEvent[]> | null = null;
-let scanIsRefresh = false;
-
-// --- Optional background full-catalog refresh ---
-const AUTO_REFRESH_INTERVAL = Math.max(0, parseInt(process.env.AUTO_REFRESH_INTERVAL || "0") || 0);
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let autoRefreshStarted = false;
-
 const app = new Hono();
 
 // CORS: allow cross-origin requests so the frontend can be hosted separately
 // (e.g., GitHub Pages pointing at a self-hosted backend)
 app.use("/api/*", cors({
   origin: "*",
-  allowHeaders: ["Content-Type", "If-None-Match"],
-  exposeHeaders: ["ETag"],
+  allowHeaders: ["Content-Type"],
 }));
 app.use("/api/*", compress());
 
-const CACHE_VERSION = 8;
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
 const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);
 const EVENT_FOLDER_ORDER_BY = process.env.GDRIVE_EVENT_ORDER_BY ?? "name desc";
@@ -142,118 +126,6 @@ function publicEvent(event: DashcamEvent): DashcamEvent {
 
 function publicEvents(events: DashcamEvent[]): DashcamEvent[] {
   return events.map(publicEvent);
-}
-
-function computeEventsEtag(events: DashcamEvent[]): string {
-  const hash = createHash("sha1")
-    .update(JSON.stringify(publicEvents(events)))
-    .digest("base64url");
-  return `"events-v${CACHE_VERSION}-${hash}"`;
-}
-
-function setCachedEvents(events: DashcamEvent[]): DashcamEvent[] {
-  cachedEvents = events;
-  cachedEventsEtag = computeEventsEtag(events);
-  rememberEvents(events);
-  return events;
-}
-
-function requestHasMatchingEtag(header: string | undefined, etag: string | null): boolean {
-  if (!header || !etag) return false;
-  return header.split(",").map((part) => part.trim()).includes(etag);
-}
-
-function withEventsCacheHeaders(c: Context): void {
-  c.header("Cache-Control", "no-cache");
-  if (cachedEventsEtag) c.header("ETag", cachedEventsEtag);
-}
-
-async function loadDiskCache(): Promise<DashcamEvent[] | null> {
-  try {
-    const raw = await readFile(EVENTS_CACHE_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    if (
-      !data ||
-      data.version !== CACHE_VERSION ||
-      data.storageKey !== storageCacheKey ||
-      !Array.isArray(data.events)
-    ) {
-      console.log("Disk cache outdated or for different gdrive-serve-lite endpoint, re-scanning");
-      return null;
-    }
-    console.log(`Loaded ${data.events.length} events from disk cache`);
-    return setCachedEvents(data.events);
-  } catch {
-    return null;
-  }
-}
-
-async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
-  try {
-    await mkdir(path.dirname(EVENTS_CACHE_PATH), { recursive: true });
-    await writeFile(EVENTS_CACHE_PATH, JSON.stringify({
-      version: CACHE_VERSION,
-      storageKey: storageCacheKey,
-      events,
-    }));
-    console.log(`Saved ${events.length} events to disk cache`);
-  } catch (err) {
-    console.error("Failed to save disk cache:", err);
-  }
-}
-
-async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
-  if (cachedEvents && !forceRefresh) return cachedEvents;
-
-  // If a scan is already in-flight...
-  if (scanPromise) {
-    // If we want a refresh but the in-flight scan is NOT a refresh,
-    // wait for it to finish, then start a fresh refresh scan
-    if (forceRefresh && !scanIsRefresh) {
-      await scanPromise;
-      return getEvents(true);
-    }
-    return scanPromise;
-  }
-
-  scanIsRefresh = forceRefresh;
-  scanPromise = (async () => {
-    try {
-      // Try disk cache first (skip for refresh)
-      if (!forceRefresh) {
-        const diskCached = await loadDiskCache();
-        if (diskCached) {
-          return diskCached;
-        }
-      }
-
-      const isIncremental = forceRefresh && cachedEvents !== null;
-      console.log(
-        isIncremental
-          ? "Refreshing events (incremental scan)..."
-          : "Scanning gdrive-serve-lite TeslaCam root..."
-      );
-      const start = performance.now();
-      // Incremental: pass existing events so only new folders are scanned
-      const newEvents = await scanTeslacamFolder(
-        drive,
-        isIncremental ? cachedEvents! : undefined
-      );
-      const elapsed = (performance.now() - start) / 1000;
-      console.log(
-        `Found ${newEvents.length} events in ${elapsed.toFixed(1)}s`
-      );
-      // Only update cache after successful scan (errors propagate, keeping old cache intact)
-      setCachedEvents(newEvents);
-      await saveDiskCache(newEvents);
-      return newEvents;
-    } finally {
-      scanPromise = null;
-      scanIsRefresh = false;
-    }
-  })();
-
-  return scanPromise;
 }
 
 async function getTypeFolder(type: EventType): Promise<DriveEntry> {
@@ -337,12 +209,6 @@ async function findEvent(type: string, id: string): Promise<DashcamEvent | null>
   const indexed = eventIndex.get(eventKey(type, id));
   if (indexed) return indexed;
 
-  const cached = cachedEvents?.find((event) => event.type === type && event.id === id);
-  if (cached) {
-    eventIndex.set(eventKey(type, id), cached);
-    return cached;
-  }
-
   if (type === "SavedClips" || type === "SentryClips") {
     try {
       const folder = await drive.resolvePath(`/${type}/${id}`, "folder");
@@ -380,9 +246,7 @@ app.get("/api/status", (c) => {
   return c.json({
     storageBackend: "gdrive-serve-lite",
     storagePath: drive.baseUrl,
-    eventCount: cachedEvents?.length ?? null,
     loadedEventCount: eventIndex.size,
-    scanning: scanPromise !== null,
   });
 });
 
@@ -405,15 +269,6 @@ app.get("/api/events/page", async (c) => {
     const msg = err instanceof Error ? err.message : "Failed to load event page";
     return c.json({ error: msg }, 500);
   }
-});
-
-app.get("/api/events", async (c) => {
-  const events = await getEvents();
-  withEventsCacheHeaders(c);
-  if (requestHasMatchingEtag(c.req.header("if-none-match"), cachedEventsEtag)) {
-    return c.body(null, 304);
-  }
-  return c.json(publicEvents(events));
 });
 
 app.get("/api/events/:type/:id", async (c) => {
@@ -584,15 +439,10 @@ async function dirSizeBytes(dirPath: string): Promise<number> {
 }
 
 app.get("/api/debug/caches", async (c) => {
-  const [diskStat, hlsSize] = await Promise.all([
-    stat(EVENTS_CACHE_PATH).then((s) => ({ path: EVENTS_CACHE_PATH, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
-    dirSizeBytes(HLS_CACHE_DIR),
-  ]);
+  const hlsSize = await dirSizeBytes(HLS_CACHE_DIR);
 
   return c.json({
     caches: [
-      { id: "events-disk", label: "Event scan cache", path: diskStat.path, sizeBytes: diskStat.sizeBytes },
-      { id: "events-memory", label: "Event scan (memory)", path: null, entryCount: cachedEvents?.length ?? 0 },
       { id: "hls", label: "HLS segments", path: HLS_CACHE_DIR, sizeBytes: hlsSize },
       { id: "telemetry", label: "Telemetry (memory)", path: null, entryCount: telemetryCache.size },
     ],
@@ -602,15 +452,6 @@ app.get("/api/debug/caches", async (c) => {
 app.post("/api/debug/caches/:id/clear", async (c) => {
   const { id } = c.req.param();
   switch (id) {
-    case "events-disk":
-      try { await unlink(EVENTS_CACHE_PATH); } catch {}
-      cachedEvents = null;
-      cachedEventsEtag = null;
-      break;
-    case "events-memory":
-      cachedEvents = null;
-      cachedEventsEtag = null;
-      break;
     case "hls": {
       // Rename first (atomic), then delete in background to avoid race with new ffmpeg writes
       const tmp = `${HLS_CACHE_DIR}_del_${Date.now()}`;
@@ -626,17 +467,6 @@ app.post("/api/debug/caches/:id/clear", async (c) => {
   return c.json({ ok: true });
 });
 
-app.post("/api/refresh", async (c) => {
-  try {
-    const events = await getEvents(true);
-    withEventsCacheHeaders(c);
-    return c.json(publicEvents(events));
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Scan failed";
-    return c.json({ error: msg }, 500);
-  }
-});
-
 // Serve static files when SERVE_FRONTEND is enabled
 if (process.env.SERVE_FRONTEND === "true") {
   app.use("/*", serveStatic({ root: "./dist" }));
@@ -645,35 +475,6 @@ if (process.env.SERVE_FRONTEND === "true") {
     if (c.req.path.startsWith("/api/")) return next();
     return serveStatic({ path: "./dist/index.html" })(c, next);
   });
-}
-
-function startAutoRefresh(): void {
-  if (autoRefreshStarted) return;
-  autoRefreshStarted = true;
-
-  // Warm the memory cache only when a compatible disk cache already exists.
-  loadDiskCache()
-    .catch((err) =>
-      console.error("Failed to load disk cache:", err instanceof Error ? err.message : err)
-    );
-
-  if (AUTO_REFRESH_INTERVAL <= 0) return;
-  autoRefreshTimer = setInterval(async () => {
-    if (scanPromise) return;
-    try {
-      const before = cachedEvents?.length ?? 0;
-      const events = await getEvents(true);
-      const added = events.length - before;
-      if (added > 0) {
-        console.log(`Auto-refresh: found ${added} new event${added !== 1 ? "s" : ""} (${events.length} total)`);
-      } else {
-        console.log(`Auto-refresh: no new events (${events.length} total)`);
-      }
-    } catch (err) {
-      console.error("Auto-refresh failed:", err instanceof Error ? err.message : err);
-    }
-  }, AUTO_REFRESH_INTERVAL * 1000);
-  console.log(`Auto-refresh enabled (every ${AUTO_REFRESH_INTERVAL}s)`);
 }
 
 function readHeaders(res: Response): Headers {
@@ -694,8 +495,6 @@ function readHeaders(res: Response): Headers {
   return headers;
 }
 
-startAutoRefresh();
-
 const port = parseInt(process.env.PORT || "3001");
 console.log(`TeslaCam Replay server starting on http://localhost:${port}`);
 
@@ -704,8 +503,6 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 });
 
 function shutdown() {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  autoRefreshStarted = false;
   server.close();
   process.exit(0);
 }
