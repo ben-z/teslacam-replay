@@ -27,7 +27,6 @@ interface Props {
 
 type FilterType = "all" | "SavedClips" | "SentryClips";
 type ViewType = "events" | "recent";
-type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 48;
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -122,7 +121,6 @@ export function EventBrowser({
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [status, setStatus] = useState<ServerStatus | null>(null);
 
@@ -157,11 +155,8 @@ export function EventBrowser({
           e.reason?.toLowerCase().includes(q)
       );
     }
-    if (sortOrder === "oldest") {
-      result = [...result].reverse();
-    }
     return result;
-  }, [events, view, filter, search, sortOrder]);
+  }, [events, view, filter, search]);
 
   const setFilterAndReset = useCallback((f: FilterType) => {
     setView("events");
@@ -208,7 +203,7 @@ export function EventBrowser({
     ? "Recent scan complete"
     : loadingMore
       ? "Scanning older recent clips"
-      : "Scroll to scan older clips";
+      : "Ready to scan older clips";
   const recentScan = useMemo(() => {
     const recentEvents = events.filter((event) => event.type === "RecentClips");
     let oldestRecentMs: number | null = null;
@@ -315,16 +310,6 @@ export function EventBrowser({
                   </button>
                 ))}
               </div>
-              <button
-                onClick={() => {
-                  setSortOrder((s) => (s === "newest" ? "oldest" : "newest"));
-                  setVisibleCount(PAGE_SIZE);
-                }}
-                className="browse-sort-btn"
-                title={`Sort by ${sortOrder === "newest" ? "oldest" : "newest"} first`}
-              >
-                {sortOrder === "newest" ? "Newest" : "Oldest"} &darr;
-              </button>
               <div className="browse-search-wrapper">
                 <input
                   type="text"
@@ -374,7 +359,14 @@ export function EventBrowser({
               onSelectEvent={onSelectEvent}
               footer={hasMorePages.RecentClips ? (
                 <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
-                  {loadingMore ? "Loading older clips..." : "Scroll for older clips"}
+                  <button
+                    type="button"
+                    className="browse-load-more-hint"
+                    disabled={loadingMore}
+                    onClick={handleLoadMore}
+                  >
+                    {loadingMore ? "Loading older clips..." : "Load older clips"}
+                  </button>
                 </div>
               ) : null}
             />
