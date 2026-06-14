@@ -239,16 +239,19 @@ export function EventBrowser({
 
   // Infinite scroll: load more when sentinel enters viewport
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const recentTimelineScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
+    const root = view === "recent" ? recentTimelineScrollRef.current : null;
     if (!sentinel || !hasMore) return;
+    if (view === "recent" && !root) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
           handleLoadMore();
         }
       },
-      { rootMargin: "200px" }
+      { root, rootMargin: view === "recent" ? "120px" : "200px" }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -357,6 +360,7 @@ export function EventBrowser({
             <Timeline
               events={recentScan.timelineEvents}
               onSelectEvent={onSelectEvent}
+              scrollRef={recentTimelineScrollRef}
               footer={hasMorePages.RecentClips ? (
                 <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
                   <button
