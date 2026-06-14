@@ -31,9 +31,6 @@ export interface DriveList {
   resourceKey?: string;
   files: DriveEntry[];
   nextPageToken?: string;
-  next?: string;
-  count?: number;
-  incompleteSearch?: boolean;
 }
 
 export interface DriveFileSource {
@@ -49,11 +46,8 @@ export interface DriveFileSource {
 interface ListResponse {
   folderId: string;
   resourceKey?: string;
-  count?: number;
   files?: DriveEntry[];
   nextPageToken?: string;
-  next?: string;
-  incompleteSearch?: boolean;
 }
 
 interface ResolveResponse {
@@ -120,10 +114,6 @@ export class GDriveLiteClient {
 
   async listRoot(): Promise<DriveList> {
     return this.listAll({});
-  }
-
-  async listRootPage(opts: DriveListPageOptions = {}): Promise<DriveList> {
-    return this.listPage({}, opts);
   }
 
   async listFolder(folder: DriveFolderRef): Promise<DriveList> {
@@ -252,10 +242,7 @@ export class GDriveLiteClient {
     return {
       folderId: data.folderId,
       resourceKey: data.resourceKey || folder.resourceKey,
-      count: data.count,
-      next: data.next,
       nextPageToken: data.nextPageToken,
-      incompleteSearch: data.incompleteSearch,
       files: (data.files || []).map((entry) => withAbsoluteUrl(entry, this.baseUrl)),
     };
   }

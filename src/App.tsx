@@ -3,10 +3,8 @@ import type { ReactNode } from "react";
 import {
   fetchEvent,
   fetchEventPage,
-  fetchStatus,
   getApiBase,
   type EventPageType,
-  type ServerStatus,
 } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
@@ -62,17 +60,11 @@ const PAGE_LOAD_LIMIT = 24;
 const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
 
 type PageTokens = Record<EventPageType, string | null>;
-type PageAvailability = Record<EventPageType, boolean>;
 
 const EMPTY_PAGE_TOKENS: PageTokens = {
   SavedClips: null,
   SentryClips: null,
   RecentClips: null,
-};
-const EMPTY_PAGE_AVAILABILITY: PageAvailability = {
-  SavedClips: false,
-  SentryClips: false,
-  RecentClips: false,
 };
 
 function cacheEvents(data: DashcamEvent[]): void {
@@ -154,14 +146,12 @@ function mergeEvents(existing: DashcamEvent[], incoming: DashcamEvent[]): Dashca
 }
 
 export function App() {
-  const [status, setStatus] = useState<ServerStatus | null>(null);
   const [events, setEvents] = useState<DashcamEvent[]>(() => {
     return loadCachedEvents();
   });
   const [loading, setLoading] = useState(events.length === 0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
-  const [hasMorePages, setHasMorePages] = useState<PageAvailability>(EMPTY_PAGE_AVAILABILITY);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
@@ -217,10 +207,8 @@ export function App() {
       );
 
       const tokenUpdates: Partial<PageTokens> = {};
-      const availabilityUpdates: Partial<PageAvailability> = {};
       for (const result of results) {
         tokenUpdates[result.type] = result.nextPageToken;
-        availabilityUpdates[result.type] = Boolean(result.nextPageToken);
       }
       const incoming = results.flatMap((result) => result.events);
       const merged = mergeEvents(reset ? [] : eventsRef.current, incoming);
@@ -229,15 +217,10 @@ export function App() {
         : { ...nextPageTokensRef.current, ...tokenUpdates };
       nextPageTokensRef.current = nextTokens;
       setNextPageTokens(nextTokens);
-      setHasMorePages((prev) => reset
-        ? { ...EMPTY_PAGE_AVAILABILITY, ...availabilityUpdates }
-        : { ...prev, ...availabilityUpdates }
-      );
       setEvents(merged);
       cacheEvents(merged);
       eventsRef.current = merged;
       await restoreHashEvent(merged);
-      fetchStatus().then(setStatus).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load events");
     } finally {
@@ -246,15 +229,7 @@ export function App() {
     }
   }, [restoreHashEvent]);
 
-  const checkStatus = useCallback(() => {
-    fetchStatus().then((s) => {
-      setStatus(s);
-      loadPages(PAGE_TYPES, true);
-    }).catch(() => setLoading(false));
-  }, [loadPages]);
-
-  // Check server status on mount.
-  useEffect(() => { checkStatus(); }, [checkStatus]);
+  useEffect(() => { loadPages(PAGE_TYPES, true); }, [loadPages]);
 
   // Sync URL hash with browser back/forward
   useEffect(() => {
@@ -265,10 +240,7 @@ export function App() {
           (e) => e.type === hashEvent.type && e.id === hashEvent.id
         );
         if (found) {
-          setSelectedEvent(found);
-          setPlayerDisplayTime(0);
-          setPlayerIsPlaying(false);
-          setView("player");
+          selectEvent(found);
           return;
         }
       }
@@ -277,7 +249,7 @@ export function App() {
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [events]);
+  }, [events, selectEvent]);
 
   const handleRefresh = async () => {
     if (loading) return;
@@ -296,10 +268,7 @@ export function App() {
   }, [loadPages]);
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
-    setSelectedEvent(event);
-    setView("player");
-    setPlayerDisplayTime(0);
-    setPlayerIsPlaying(false);
+    selectEvent(event);
     if (filteredList) setBrowseList(filteredList);
     pushedHashRef.current = true;
     location.hash = `/event/${event.type}/${event.id}`;
@@ -333,20 +302,24 @@ export function App() {
       const nextIdx = selectedIdx + direction;
       if (nextIdx >= 0 && nextIdx < navList.length) {
         const next = navList[nextIdx];
-        setSelectedEvent(next);
-        setPlayerDisplayTime(0);
-        setPlayerIsPlaying(false);
+        selectEvent(next);
         // Replace hash (don't push, so back goes to browse not previous event)
         history.replaceState(null, "", `#/event/${next.type}/${next.id}`);
       }
     },
-    [navList, selectedIdx]
+    [navList, selectedIdx, selectEvent]
   );
 
   const handleTimeUpdate = useCallback((time: number, playing: boolean) => {
     setPlayerDisplayTime((prev) => Math.abs(prev - time) < 0.05 ? prev : time);
     setPlayerIsPlaying((prev) => prev === playing ? prev : playing);
   }, []);
+
+  const hasMorePages = useMemo(() => ({
+    SavedClips: Boolean(nextPageTokens.SavedClips),
+    SentryClips: Boolean(nextPageTokens.SentryClips),
+    RecentClips: Boolean(nextPageTokens.RecentClips),
+  }), [nextPageTokens]);
 
   return (
     <ErrorBoundary>

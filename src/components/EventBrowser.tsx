@@ -126,7 +126,7 @@ export function EventBrowser({
 
   useEffect(() => {
     fetchStatus().then(setStatus).catch(() => {});
-  }, [events]); // refresh status when events change
+  }, []);
 
   // Debounce search input
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
