@@ -45,17 +45,7 @@ cd teslacam-replay
 npm install
 
 # Start gdrive-serve-lite separately, for example:
-/path/to/gdrive-serve-lite \
-  --remote gdrive-ro:/TeslaCam \
-  --config /path/to/rclone.conf \
-  --metadata-cache-ttl 5m \
-  --list-cache-ttl 30s \
-  --drive-response-header-timeout 30s \
-  --user gdrive-user \
-  --pass gdrive-password \
-  --allow-origin http://localhost:5173 \
-  --baseurl /gdrive \
-  --addr 127.0.0.1:8765
+/path/to/gdrive-serve-lite --remote gdrive-ro:/TeslaCam --addr 127.0.0.1:8765
 
 # Configure this app
 cp .env.example .env
@@ -85,9 +75,7 @@ The Docker image includes both the API server and the frontend. It's automatical
 ```bash
 docker run -d \
   -p 3001:3001 \
-  -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdrive \
-  -e GDRIVE_USER=gdrive-user \
-  -e GDRIVE_PASS=gdrive-password \
+  -e GDRIVE_BASE_URL=http://host.docker.internal:8765 \
   ghcr.io/ben-z/teslacam-replay
 ```
 
@@ -96,9 +84,7 @@ docker run -d \
 ```bash
 docker run -d \
   -p 3001:3001 \
-  -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdrive \
-  -e GDRIVE_USER=gdrive-user \
-  -e GDRIVE_PASS=gdrive-password \
+  -e GDRIVE_BASE_URL=http://host.docker.internal:8765 \
   -e SERVE_FRONTEND=false \
   ghcr.io/ben-z/teslacam-replay
 ```
@@ -111,9 +97,6 @@ The frontend is automatically deployed to GitHub Pages on push to `main`. To con
 
 1. Start the backend on your machine:
    ```bash
-   GDRIVE_BASE_URL=http://127.0.0.1:8765/gdrive \
-   GDRIVE_USER=gdrive-user \
-   GDRIVE_PASS=gdrive-password \
    npm start
    ```
 
@@ -128,7 +111,7 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 
 | Variable | Required | Description |
 |---|---|---|
-| `GDRIVE_BASE_URL` | No | Base URL for `gdrive-serve-lite`, including `--baseurl` if configured. Defaults to `http://127.0.0.1:8765/gdrive` |
+| `GDRIVE_BASE_URL` | No | Base URL for `gdrive-serve-lite`, including `--baseurl` if configured. Defaults to `http://127.0.0.1:8765` |
 | `GDRIVE_USER` | No | Basic Auth username when `gdrive-serve-lite` uses `--user` |
 | `GDRIVE_PASS` | No | Basic Auth password when `gdrive-serve-lite` uses `--pass` |
 | `GDRIVE_LIST_TIMEOUT_MS` | No | Timeout for each Drive-lite listing page (default: `120000`) |

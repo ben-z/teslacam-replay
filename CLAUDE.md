@@ -58,7 +58,7 @@ npm test                # Runs vitest in non-watch mode
 
 # Docker
 docker build -t teslacam-replay .
-docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdrive teslacam-replay
+docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 teslacam-replay
 ```
 
 ## Architecture
