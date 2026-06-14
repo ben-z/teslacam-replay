@@ -254,6 +254,16 @@ describe("scanRecentClipsPage", () => {
 });
 
 describe("GDriveLiteClient", () => {
+  it("synthesizes file URLs from an unprefixed base URL", () => {
+    const drive = new GDriveLiteClient({ baseUrl: "http://127.0.0.1:8765" });
+
+    expect(drive.fileSource({
+      id: "file-id",
+      name: "clip.mp4",
+      mimeType: "video/mp4",
+    }).url).toBe("http://127.0.0.1:8765/file/file-id/clip.mp4");
+  });
+
   it("keeps synthesized file URLs under the configured base path", () => {
     const drive = new GDriveLiteClient({ baseUrl: "http://127.0.0.1:8765/gdrive" });
 
