@@ -5,7 +5,13 @@ import {
   getClipSource,
   type TeslacamDrive,
 } from "./scan";
-import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList } from "./gdrive-lite";
+import {
+  GDriveLiteClient,
+  type DriveEntry,
+  type DriveFileSource,
+  type DriveFolderRef,
+  type DriveList,
+} from "./gdrive-lite";
 
 type MockFiles = Record<string, string | null>;
 
@@ -244,5 +250,24 @@ describe("scanRecentClipsPage", () => {
   it("returns an empty page when no clips are present", async () => {
     const drive = createMockDrive({});
     await expect(scanRecentClipsPage(drive, [])).resolves.toEqual([]);
+  });
+});
+
+describe("GDriveLiteClient", () => {
+  it("keeps synthesized file URLs under the configured base path", () => {
+    const drive = new GDriveLiteClient({ baseUrl: "http://127.0.0.1:8765/gdrive" });
+
+    expect(drive.fileSource({
+      id: "file-id",
+      name: "clip.mp4",
+      mimeType: "video/mp4",
+    }).url).toBe("http://127.0.0.1:8765/gdrive/file/file-id/clip.mp4");
+
+    expect(drive.fileSource({
+      id: "file-id",
+      name: "clip.mp4",
+      mimeType: "video/mp4",
+      url: "/gdrive/file/file-id/clip.mp4",
+    }).url).toBe("http://127.0.0.1:8765/gdrive/file/file-id/clip.mp4");
   });
 });

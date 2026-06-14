@@ -16,7 +16,7 @@ import {
 } from "./scan.js";
 import { extractTelemetryFromBuffer, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
-import { createGDriveLiteFromEnv, type DriveEntry } from "./gdrive-lite.js";
+import { createGDriveLiteFromEnv, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
 import { HLS_CACHE_DIR } from "./paths.js";
 
 const drive = createGDriveLiteFromEnv();
@@ -235,6 +235,41 @@ async function findEvent(type: string, id: string): Promise<DashcamEvent | null>
   return null;
 }
 
+async function findRecentClipSource(
+  segment: string,
+  camera: string
+): Promise<DriveFileSource | null> {
+  const candidates = [
+    `/RecentClips/${segment}-${camera}.mp4`,
+    `/RecentClips/${segment.slice(0, 10)}/${segment}-${camera}.mp4`,
+  ];
+
+  for (const filePath of candidates) {
+    try {
+      const file = await drive.resolvePath(filePath, "file");
+      return drive.fileSource(file);
+    } catch {
+      // Try the alternate RecentClips layout.
+    }
+  }
+  return null;
+}
+
+async function findClipSource(
+  type: string,
+  eventId: string,
+  segment: string,
+  camera: string
+): Promise<DriveFileSource | null> {
+  const indexed = eventIndex.get(eventKey(type, eventId));
+  const indexedSource = indexed ? getClipSource(indexed, segment, camera) : null;
+  if (indexedSource) return indexedSource;
+  if (type === "RecentClips") return findRecentClipSource(segment, camera);
+
+  const event = await findEvent(type, eventId);
+  return event ? getClipSource(event, segment, camera) ?? null : null;
+}
+
 // --- Validation ---
 const SAFE_PARAM = /^[\w-]+$/;
 function validateParams(...params: string[]): boolean {
@@ -323,16 +358,16 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const cached = telemetryCache.get(cacheKey);
   if (cached) return c.json(cached);
 
-  const event = await findEvent(type, eventId);
-  if (!event) return c.json({ error: "Event not found" }, 404);
+  const event = type === "RecentClips"
+    ? eventIndex.get(eventKey(type, eventId)) ?? null
+    : await findEvent(type, eventId);
+  if (!event && type !== "RecentClips") return c.json({ error: "Event not found" }, 404);
 
-  const clip = event.clips.find((cl) => cl.timestamp === segment);
-  if (!clip) return c.json({ error: "Segment not found" }, 404);
+  const clip = event?.clips.find((cl) => cl.timestamp === segment);
+  if (!clip && type !== "RecentClips") return c.json({ error: "Segment not found" }, 404);
 
-  const camera = clip.cameras.includes("front") ? "front" : clip.cameras[0];
-  if (!camera) return c.json({ error: "No camera available" }, 404);
-
-  const source = getClipSource(event, segment, camera);
+  const camera = clip?.cameras.includes("front") ? "front" : clip?.cameras[0] ?? "front";
+  const source = await findClipSource(type, eventId, segment, camera);
   if (!source) return c.json(NO_SEI);
 
   try {
@@ -358,10 +393,7 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
     return c.json({ error: "Invalid params" }, 400);
   }
 
-  const event = await findEvent(type, eventId);
-  if (!event) return c.json({ error: "Event not found" }, 404);
-
-  const source = getClipSource(event, segment, camera);
+  const source = await findClipSource(type, eventId, segment, camera);
   if (!source) return c.json({ error: "Video not found" }, 404);
 
   // Ensure HLS segments are ready (lazy segmentation)

@@ -272,8 +272,7 @@ export class GDriveLiteClient {
   }
 
   private absoluteUrl(value: string): string {
-    if (/^https?:\/\//i.test(value)) return value;
-    return new URL(value, `${this.baseUrl}/`).toString();
+    return absoluteUrl(this.baseUrl, value);
   }
 }
 
@@ -293,10 +292,27 @@ function targetIDAndKey(file: DriveEntry): DriveFolderRef {
 
 function withAbsoluteUrl(file: DriveEntry, baseUrl: string): DriveEntry {
   if (!file.url || /^https?:\/\//i.test(file.url)) return file;
-  return { ...file, url: new URL(file.url, `${baseUrl}/`).toString() };
+  return { ...file, url: absoluteUrl(baseUrl, file.url) };
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function absoluteUrl(baseUrl: string, value: string): string {
+  if (/^https?:\/\//i.test(value)) return value;
+
+  const base = new URL(`${baseUrl}/`);
+  if (!value.startsWith("/")) {
+    return new URL(value, base).toString();
+  }
+
+  const basePath = base.pathname.replace(/\/+$/, "");
+  const basePrefix = basePath.replace(/^\/+/, "");
+  const valuePath = value.replace(/^\/+/, "");
+  if (!basePrefix || valuePath === basePrefix || valuePath.startsWith(`${basePrefix}/`)) {
+    return `${base.origin}/${valuePath}`;
+  }
+  return `${base.origin}${basePath}/${valuePath}`;
 }
