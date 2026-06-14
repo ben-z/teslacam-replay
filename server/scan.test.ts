@@ -1,38 +1,101 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "fs/promises";
-import path from "path";
-import os from "os";
-import { scanTeslacamFolder, getVideoPath, getThumbnailPath } from "./scan";
-import { LocalStorage, type StorageBackend } from "./storage";
+import { describe, it, expect } from "vitest";
+import { scanTeslacamFolder, getClipSource, type TeslacamDrive } from "./scan";
+import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList } from "./gdrive-lite";
 
-let tmpDir: string;
-let storage: StorageBackend;
+type MockFiles = Record<string, string | null>;
 
-// Create a realistic test fixture
-async function createFixture() {
-  tmpDir = await mkdtemp(path.join(os.tmpdir(), "dashreplay-test-"));
+const FOLDER_MIME = "application/vnd.google-apps.folder";
 
-  // SavedClips event with 3 segments, 4 cameras each
-  const savedDir = path.join(tmpDir, "SavedClips", "2025-06-01_18-17-49");
-  await mkdir(savedDir, { recursive: true });
+function createMockDrive(files: MockFiles): TeslacamDrive & { listCalls: string[] } {
+  const listCalls: string[] = [];
 
-  // event.json
-  await writeFile(
-    path.join(savedDir, "event.json"),
-    JSON.stringify({
-      timestamp: "2025-06-01T18:17:49",
-      city: "San Francisco",
-      est_lat: "37.7749",
-      est_lon: "-122.4194",
-      reason: "user_interaction_dashcam_icon_tapped",
-      camera: "front",
-    })
-  );
+  function entryFor(path: string, isFolder: boolean): DriveEntry {
+    const name = path.split("/").pop() || "";
+    return {
+      id: path || "root",
+      name,
+      mimeType: isFolder ? FOLDER_MIME : mimeTypeFor(name),
+      size: isFolder ? undefined : String(files[path]?.length ?? 0),
+      url: isFolder ? undefined : `/file/${encodeURIComponent(path)}/${encodeURIComponent(name)}`,
+    };
+  }
 
-  // thumb.png
-  await writeFile(path.join(savedDir, "thumb.png"), "fake-png-data");
+  function listPath(dirPath: string): DriveList {
+    listCalls.push(dirPath);
+    const prefix = dirPath ? `${dirPath}/` : "";
+    const entries = new Set<string>();
 
-  // 3 segments, 60s apart
+    for (const key of Object.keys(files)) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      const name = rest.split("/")[0];
+      if (name) entries.add(name);
+    }
+
+    if (entries.size === 0 && dirPath && !(dirPath in files)) {
+      throw new Error(`ENOENT: ${dirPath}`);
+    }
+
+    const driveEntries = Array.from(entries).map((name) => {
+      const fullPath = prefix + name;
+      const isFolder = files[fullPath] === null || Object.keys(files).some((key) => key.startsWith(`${fullPath}/`));
+      return entryFor(fullPath, isFolder);
+    });
+
+    return { folderId: dirPath || "root", files: driveEntries };
+  }
+
+  return {
+    listCalls,
+    async listRoot(): Promise<DriveList> {
+      return listPath("");
+    },
+    async listFolder(folder: DriveFolderRef): Promise<DriveList> {
+      return listPath(folder.id === "root" ? "" : folder.id);
+    },
+    async readText(file: DriveEntry): Promise<string> {
+      const content = files[file.id];
+      if (typeof content !== "string") throw new Error(`ENOENT: ${file.id}`);
+      return content;
+    },
+    fileSource(file: DriveEntry): DriveFileSource {
+      return {
+        id: file.id,
+        name: file.name,
+        url: `http://gdrive.test${file.url || `/file/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`}`,
+        mimeType: file.mimeType,
+        sizeBytes: file.size ? Number(file.size) : undefined,
+      };
+    },
+    folderRef(file: DriveEntry): DriveFolderRef {
+      return { id: file.id };
+    },
+    isFolder(file: DriveEntry): boolean {
+      return file.mimeType === FOLDER_MIME;
+    },
+  };
+}
+
+function mimeTypeFor(name: string): string {
+  if (name.endsWith(".mp4")) return "video/mp4";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".json")) return "application/json";
+  return "application/octet-stream";
+}
+
+function createFixture(): MockFiles {
+  const files: MockFiles = {};
+
+  files["SavedClips/2025-06-01_18-17-49/event.json"] = JSON.stringify({
+    timestamp: "2025-06-01T18:17:49",
+    city: "San Francisco",
+    est_lat: "37.7749",
+    est_lon: "-122.4194",
+    reason: "user_interaction_dashcam_icon_tapped",
+    camera: "front",
+  });
+  files["SavedClips/2025-06-01_18-17-49/thumb.png"] = "fake-png-data";
+
   const cameras = ["front", "back", "left_repeater", "right_repeater"];
   const timestamps = [
     "2025-06-01_18-07-09",
@@ -41,22 +104,15 @@ async function createFixture() {
   ];
   for (const ts of timestamps) {
     for (const cam of cameras) {
-      await writeFile(path.join(savedDir, `${ts}-${cam}.mp4`), "");
+      files[`SavedClips/2025-06-01_18-17-49/${ts}-${cam}.mp4`] = "";
     }
   }
 
-  // SentryClips event with 1 segment, 6 cameras
-  const sentryDir = path.join(tmpDir, "SentryClips", "2025-11-08_16-41-34");
-  await mkdir(sentryDir, { recursive: true });
-
-  await writeFile(
-    path.join(sentryDir, "event.json"),
-    JSON.stringify({
-      timestamp: "2025-11-08T16:41:34",
-      city: "Oakland",
-      reason: "sentry_aware_object_detection",
-    })
-  );
+  files["SentryClips/2025-11-08_16-41-34/event.json"] = JSON.stringify({
+    timestamp: "2025-11-08T16:41:34",
+    city: "Oakland",
+    reason: "sentry_aware_object_detection",
+  });
 
   const allCameras = [
     "front",
@@ -67,86 +123,61 @@ async function createFixture() {
     "right_pillar",
   ];
   for (const cam of allCameras) {
-    await writeFile(
-      path.join(sentryDir, `2025-11-08_16-31-34-${cam}.mp4`),
-      ""
-    );
+    files[`SentryClips/2025-11-08_16-41-34/2025-11-08_16-31-34-${cam}.mp4`] = "";
   }
 
-  // Empty event folder (no mp4s) — should be skipped
-  const emptyDir = path.join(tmpDir, "SavedClips", "2025-01-01_00-00-00");
-  await mkdir(emptyDir, { recursive: true });
-  await writeFile(path.join(emptyDir, "event.json"), "{}");
-
-  // Non-timestamp folder — should be skipped
-  const junkDir = path.join(tmpDir, "SavedClips", ".DS_Store");
-  await mkdir(junkDir, { recursive: true });
+  // Empty event folder (no mp4s) should be skipped.
+  files["SavedClips/2025-01-01_00-00-00/event.json"] = "{}";
 
   // RecentClips: flat MP4 files (two driving sessions with a gap)
-  const recentDir = path.join(tmpDir, "RecentClips");
-  await mkdir(recentDir, { recursive: true });
-
-  // Session 1: 3 segments, 60s apart
   const recentCameras = ["front", "back", "left_repeater", "right_repeater"];
   const session1 = ["2026-02-01_10-00-00", "2026-02-01_10-01-00", "2026-02-01_10-02-00"];
   for (const ts of session1) {
     for (const cam of recentCameras) {
-      await writeFile(path.join(recentDir, `${ts}-${cam}.mp4`), "");
+      files[`RecentClips/${ts}-${cam}.mp4`] = "";
     }
   }
 
-  // Session 2: 2 segments, 60s apart, 10min gap from session 1
   const session2 = ["2026-02-01_10-12-00", "2026-02-01_10-13-00"];
   for (const ts of session2) {
     for (const cam of recentCameras) {
-      await writeFile(path.join(recentDir, `${ts}-${cam}.mp4`), "");
+      files[`RecentClips/${ts}-${cam}.mp4`] = "";
     }
   }
 
-  // RecentClips: date subfolder
-  const dateSub = path.join(recentDir, "2026-01-15");
-  await mkdir(dateSub, { recursive: true });
-  const subCams = ["front", "back"];
-  for (const cam of subCams) {
-    await writeFile(path.join(dateSub, `2026-01-15_08-00-00-${cam}.mp4`), "");
+  for (const cam of ["front", "back"]) {
+    files[`RecentClips/2026-01-15/2026-01-15_08-00-00-${cam}.mp4`] = "";
   }
 
-  storage = new LocalStorage(tmpDir);
+  return files;
 }
-
-beforeAll(async () => {
-  await createFixture();
-});
-
-afterAll(async () => {
-  await rm(tmpDir, { recursive: true, force: true });
-});
 
 describe("scanTeslacamFolder", () => {
   it("finds SavedClips, SentryClips, and RecentClips events", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     expect(events.map((e) => e.type)).toContain("SavedClips");
     expect(events.map((e) => e.type)).toContain("SentryClips");
     expect(events.map((e) => e.type)).toContain("RecentClips");
   });
 
   it("sorts events by id descending (newest first)", async () => {
-    const events = await scanTeslacamFolder(storage);
-    // Should be sorted newest first
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     for (let i = 1; i < events.length; i++) {
       expect(events[i - 1].id >= events[i].id).toBe(true);
     }
   });
 
   it("skips empty folders and non-timestamp folders", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const files = createFixture();
+    files["SavedClips/.DS_Store/ignored.txt"] = "";
+    const events = await scanTeslacamFolder(createMockDrive(files));
     const ids = events.map((e) => e.id);
     expect(ids).not.toContain("2025-01-01_00-00-00");
     expect(ids).not.toContain(".DS_Store");
   });
 
   it("parses event.json metadata correctly", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const saved = events.find((e) => e.type === "SavedClips")!;
     expect(saved.city).toBe("San Francisco");
     expect(saved.lat).toBeCloseTo(37.7749);
@@ -155,74 +186,69 @@ describe("scanTeslacamFolder", () => {
     expect(saved.timestamp).toBe("2025-06-01T18:17:49");
   });
 
-  it("detects thumbnails", async () => {
-    const events = await scanTeslacamFolder(storage);
+  it("detects thumbnails and keeps their direct source", async () => {
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const saved = events.find((e) => e.type === "SavedClips")!;
     const sentry = events.find((e) => e.type === "SentryClips")!;
     expect(saved.hasThumbnail).toBe(true);
+    expect(saved.thumbnailSource?.url).toContain("/file/SavedClips%2F2025-06-01_18-17-49%2Fthumb.png/");
     expect(sentry.hasThumbnail).toBe(false);
   });
 
-  it("groups clips by timestamp and sorts cameras canonically", async () => {
-    const events = await scanTeslacamFolder(storage);
+  it("groups clips by timestamp, sorts cameras canonically, and keeps file sources", async () => {
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const saved = events.find((e) => e.type === "SavedClips")!;
     expect(saved.clips).toHaveLength(3);
     expect(saved.clips[0].timestamp).toBe("2025-06-01_18-07-09");
     expect(saved.clips[1].timestamp).toBe("2025-06-01_18-08-09");
     expect(saved.clips[2].timestamp).toBe("2025-06-01_18-09-09");
-
-    // Cameras in canonical order
     expect(saved.clips[0].cameras).toEqual([
       "front",
       "left_repeater",
       "right_repeater",
       "back",
     ]);
+    expect(getClipSource(saved, "2025-06-01_18-07-09", "front")?.url).toContain("front.mp4");
   });
 
   it("computes segment durations from timestamp gaps", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const saved = events.find((e) => e.type === "SavedClips")!;
-    // Segments are 60s apart
     expect(saved.clips[0].durationSec).toBe(60);
     expect(saved.clips[1].durationSec).toBe(60);
-    // Last segment defaults to 60s (no next timestamp)
     expect(saved.clips[2].durationSec).toBe(60);
   });
 
   it("computes total duration as sum of clip durations", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const saved = events.find((e) => e.type === "SavedClips")!;
     expect(saved.totalDurationSec).toBe(180);
   });
 
   it("handles 6-camera events", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const sentry = events.find((e) => e.type === "SentryClips")!;
     expect(sentry.clips).toHaveLength(1);
     expect(sentry.clips[0].cameras).toHaveLength(6);
     expect(sentry.cameraCount).toBe(6);
-    // Single segment defaults to 60s
     expect(sentry.clips[0].durationSec).toBe(60);
   });
 
-  it("handles missing teslacam folder gracefully", async () => {
-    const emptyStorage = new LocalStorage("/nonexistent/path");
-    const events = await scanTeslacamFolder(emptyStorage);
+  it("handles missing teslacam folders gracefully", async () => {
+    const events = await scanTeslacamFolder(createMockDrive({}));
     expect(events).toEqual([]);
   });
 });
 
 describe("RecentClips scanning", () => {
   it("groups flat files into driving sessions by timestamp gaps", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const recent = events.filter((e) => e.type === "RecentClips");
-    // Should have 3 sessions: session1 (3 clips), session2 (2 clips), subfolder (1 clip)
     expect(recent).toHaveLength(3);
   });
 
   it("splits sessions at gaps > 2 minutes", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const recent = events.filter((e) => e.type === "RecentClips");
     const session1 = recent.find((e) => e.id === "2026-02-01_10-00-00");
     const session2 = recent.find((e) => e.id === "2026-02-01_10-12-00");
@@ -233,253 +259,70 @@ describe("RecentClips scanning", () => {
   });
 
   it("tracks subfolder for date-organized files", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const subfolderEvent = events.find((e) => e.id === "2026-01-15_08-00-00");
     expect(subfolderEvent).toBeDefined();
     expect(subfolderEvent!.clips[0].subfolder).toBe("2026-01-15");
   });
 
   it("has no subfolder for flat files", async () => {
-    const events = await scanTeslacamFolder(storage);
+    const events = await scanTeslacamFolder(createMockDrive(createFixture()));
     const flatEvent = events.find((e) => e.id === "2026-02-01_10-00-00");
     expect(flatEvent).toBeDefined();
     expect(flatEvent!.clips[0].subfolder).toBeUndefined();
   });
 });
 
-describe("getVideoPath", () => {
-  it("constructs correct path for SavedClips", () => {
-    const p = getVideoPath(
-      "SavedClips",
-      "2025-06-01_18-17-49",
-      "2025-06-01_18-07-09",
-      "front"
-    );
-    expect(p).toBe(
-      "SavedClips/2025-06-01_18-17-49/2025-06-01_18-07-09-front.mp4"
-    );
-  });
-
-  it("constructs correct path for RecentClips flat files", () => {
-    const p = getVideoPath(
-      "RecentClips",
-      "2026-02-01_10-00-00",
-      "2026-02-01_10-00-00",
-      "front"
-    );
-    expect(p).toBe(
-      "RecentClips/2026-02-01_10-00-00-front.mp4"
-    );
-  });
-
-  it("constructs correct path for RecentClips with subfolder", () => {
-    const p = getVideoPath(
-      "RecentClips",
-      "2026-01-15_08-00-00",
-      "2026-01-15_08-00-00",
-      "front",
-      "2026-01-15"
-    );
-    expect(p).toBe(
-      "RecentClips/2026-01-15/2026-01-15_08-00-00-front.mp4"
-    );
-  });
-});
-
-describe("getThumbnailPath", () => {
-  it("constructs correct path", () => {
-    const p = getThumbnailPath(
-      "SavedClips",
-      "2025-06-01_18-17-49"
-    );
-    expect(p).toBe(
-      "SavedClips/2025-06-01_18-17-49/thumb.png"
-    );
-  });
-});
-
-describe("StorageBackend (LocalStorage)", () => {
-  it("readdir lists directory entries", async () => {
-    const entries = await storage.readdir("SavedClips");
-    expect(entries).toContain("2025-06-01_18-17-49");
-  });
-
-  it("readFileUtf8 reads file content", async () => {
-    const content = await storage.readFileUtf8("SavedClips/2025-06-01_18-17-49/event.json");
-    const parsed = JSON.parse(content);
-    expect(parsed.city).toBe("San Francisco");
-  });
-
-  it("exists returns true for existing files", async () => {
-    expect(await storage.exists("SavedClips/2025-06-01_18-17-49/thumb.png")).toBe(true);
-  });
-
-  it("exists returns false for missing files", async () => {
-    expect(await storage.exists("SavedClips/nonexistent/thumb.png")).toBe(false);
-  });
-
-  it("getLocalPath returns full filesystem path", async () => {
-    const localPath = await storage.getLocalPath("SavedClips/2025-06-01_18-17-49/thumb.png");
-    expect(localPath).toContain(tmpDir);
-    expect(localPath).toContain("thumb.png");
-  });
-
-  it("readdir throws for nonexistent directory", async () => {
-    await expect(storage.readdir("NonexistentDir")).rejects.toThrow();
-  });
-});
-
-describe("In-memory mock StorageBackend", () => {
-  // Tests that scan.ts works with any StorageBackend, not just LocalStorage.
-  // This validates the abstraction by using a simple in-memory implementation.
-
-  function createMockStorage(files: Record<string, string | null>): StorageBackend {
-    // files: key = path (forward slash separated), value = content (null for directories)
-    return {
-      async readdir(dirPath: string): Promise<string[]> {
-        const prefix = dirPath ? dirPath + "/" : "";
-        const entries = new Set<string>();
-        for (const key of Object.keys(files)) {
-          if (key.startsWith(prefix)) {
-            const rest = key.slice(prefix.length);
-            const name = rest.split("/")[0];
-            if (name) entries.add(name);
-          }
-        }
-        if (entries.size === 0 && dirPath) {
-          throw new Error(`ENOENT: ${dirPath}`);
-        }
-        return Array.from(entries);
-      },
-      async readFile(filePath: string): Promise<Buffer> {
-        const content = files[filePath];
-        if (content === undefined || content === null) throw new Error(`ENOENT: ${filePath}`);
-        return Buffer.from(content);
-      },
-      async readFileUtf8(filePath: string): Promise<string> {
-        const content = files[filePath];
-        if (content === undefined || content === null) throw new Error(`ENOENT: ${filePath}`);
-        return content;
-      },
-      async exists(filePath: string): Promise<boolean> {
-        return filePath in files;
-      },
-      async getLocalPath(): Promise<string> {
-        throw new Error("Not implemented in mock");
-      },
-      async createReadStream(): Promise<NodeJS.ReadableStream> {
-        throw new Error("Not implemented in mock");
-      },
-      async fileSize(): Promise<number> {
-        throw new Error("Not implemented in mock");
-      },
-      cacheEntryCount(): number { return 0; },
-    };
-  }
-
-  it("scans events from mock storage", async () => {
-    const mockFiles: Record<string, string | null> = {
-      "SavedClips/2025-03-15_10-00-00/event.json": JSON.stringify({
-        city: "TestCity",
-        reason: "test_reason",
-      }),
-      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
-      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-back.mp4": "",
-      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-51-00-front.mp4": "",
-      "SavedClips/2025-03-15_10-00-00/2025-03-15_09-51-00-back.mp4": "",
-    };
-
-    const mock = createMockStorage(mockFiles);
-    const events = await scanTeslacamFolder(mock);
-
-    expect(events).toHaveLength(1);
-    expect(events[0].type).toBe("SavedClips");
-    expect(events[0].city).toBe("TestCity");
-    expect(events[0].clips).toHaveLength(2);
-    expect(events[0].clips[0].cameras).toContain("front");
-    expect(events[0].clips[0].cameras).toContain("back");
-  });
-
-  it("scans RecentClips from mock storage", async () => {
-    const mockFiles: Record<string, string | null> = {
-      "RecentClips/2026-01-01_12-00-00-front.mp4": "",
-      "RecentClips/2026-01-01_12-01-00-front.mp4": "",
-      "RecentClips/2026-01-01_12-01-00-back.mp4": "",
-    };
-
-    const mock = createMockStorage(mockFiles);
-    const events = await scanTeslacamFolder(mock);
-
-    expect(events).toHaveLength(1);
-    expect(events[0].type).toBe("RecentClips");
-    expect(events[0].clips).toHaveLength(2);
-  });
-
-  it("returns empty for empty storage", async () => {
-    const mock = createMockStorage({});
-    const events = await scanTeslacamFolder(mock);
-    expect(events).toEqual([]);
-  });
-
+describe("Incremental scanning", () => {
   it("incremental scan only picks up new folders", async () => {
-    const mockFiles: Record<string, string | null> = {
+    const files: MockFiles = {
       "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
       "SavedClips/2025-03-15_10-00-00/2025-03-15_09-50-00-back.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
     };
 
-    const mock = createMockStorage(mockFiles);
-
-    // Full scan first
+    const mock = createMockDrive(files);
     const fullEvents = await scanTeslacamFolder(mock);
     expect(fullEvents).toHaveLength(2);
 
-    // Incremental: pass existing events — no new folders, so only existing are returned
     const incEvents = await scanTeslacamFolder(mock, fullEvents);
     expect(incEvents).toHaveLength(2);
     expect(incEvents.map(e => e.id).sort()).toEqual(fullEvents.map(e => e.id).sort());
   });
 
   it("incremental scan merges new events with existing", async () => {
-    // Start with 1 event
-    const mock1 = createMockStorage({
+    const existing = await scanTeslacamFolder(createMockDrive({
       "SentryClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
-    });
-    const existing = await scanTeslacamFolder(mock1);
+    }));
     expect(existing).toHaveLength(1);
 
-    // Now storage has 2 events (old one + new one)
-    const mock2 = createMockStorage({
+    const merged = await scanTeslacamFolder(createMockDrive({
       "SentryClips/2025-03-15_10-00-00/2025-03-15_09-50-00-front.mp4": "",
       "SentryClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
-    });
+    }), existing);
 
-    const merged = await scanTeslacamFolder(mock2, existing);
     expect(merged).toHaveLength(2);
     expect(merged.map(e => e.id)).toContain("2025-03-15_10-00-00");
     expect(merged.map(e => e.id)).toContain("2025-06-01_12-00-00");
   });
 
   it("incremental scan refreshes newest SavedClips folders that were partially uploaded", async () => {
-    const partial = createMockStorage({
+    const existing = await scanTeslacamFolder(createMockDrive({
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
-    });
-    const existing = await scanTeslacamFolder(partial);
+    }));
     expect(existing).toHaveLength(1);
     expect(existing[0].cameraCount).toBe(2);
 
-    const complete = createMockStorage({
+    const rescanned = await scanTeslacamFolder(createMockDrive({
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-front.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-back.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-left_repeater.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-right_repeater.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-left_pillar.mp4": "",
       "SavedClips/2025-06-01_12-00-00/2025-06-01_11-50-00-right_pillar.mp4": "",
-    });
-
-    const rescanned = await scanTeslacamFolder(complete, existing);
+    }), existing);
     const saved = rescanned.find(e => e.type === "SavedClips" && e.id === "2025-06-01_12-00-00");
 
     expect(rescanned).toHaveLength(1);
@@ -495,53 +338,40 @@ describe("In-memory mock StorageBackend", () => {
   });
 
   it("incremental scan extends the newest RecentClips session", async () => {
-    const mock1 = createMockStorage({
+    const existing = await scanTeslacamFolder(createMockDrive({
       "RecentClips/2026-01-01_12-00-00-front.mp4": "",
-    });
-    const existing = await scanTeslacamFolder(mock1);
+    }));
     expect(existing).toHaveLength(1);
     expect(existing[0].clips).toHaveLength(1);
 
-    // Add a new RecentClips file
-    const mock2 = createMockStorage({
+    const merged = await scanTeslacamFolder(createMockDrive({
       "RecentClips/2026-01-01_12-00-00-front.mp4": "",
       "RecentClips/2026-01-01_12-01-00-front.mp4": "",
-    });
-
-    const merged = await scanTeslacamFolder(mock2, existing);
+    }), existing);
     const recent = merged.filter(e => e.type === "RecentClips");
     expect(recent).toHaveLength(1);
-    expect(recent[0].clips).toHaveLength(2); // fresh scan picked up both
+    expect(recent[0].clips).toHaveLength(2);
   });
 
   it("incremental scan skips RecentClips date folders older than the newest session", async () => {
-    const initialFiles: Record<string, string | null> = {
+    const initialFiles: MockFiles = {
       "RecentClips/2026-01-01/2026-01-01_08-00-00-front.mp4": "",
       "RecentClips/2026-01-02/2026-01-02_12-00-00-front.mp4": "",
     };
-    const existing = await scanTeslacamFolder(createMockStorage(initialFiles));
+    const existing = await scanTeslacamFolder(createMockDrive(initialFiles));
     expect(existing.filter(e => e.type === "RecentClips")).toHaveLength(2);
 
-    const updatedFiles: Record<string, string | null> = {
+    const mock = createMockDrive({
       ...initialFiles,
       "RecentClips/2026-01-02/2026-01-02_12-01-00-front.mp4": "",
-    };
-    const base = createMockStorage(updatedFiles);
-    const readdirCalls: string[] = [];
-    const tracked: StorageBackend = {
-      ...base,
-      async readdir(dirPath: string): Promise<string[]> {
-        readdirCalls.push(dirPath);
-        return base.readdir(dirPath);
-      },
-    };
+    });
 
-    const merged = await scanTeslacamFolder(tracked, existing);
+    const merged = await scanTeslacamFolder(mock, existing);
     const recent = merged.filter(e => e.type === "RecentClips");
     const updated = recent.find(e => e.id === "2026-01-02_12-00-00");
     const preserved = recent.find(e => e.id === "2026-01-01_08-00-00");
 
-    expect(readdirCalls).not.toContain("RecentClips/2026-01-01");
+    expect(mock.listCalls).not.toContain("RecentClips/2026-01-01");
     expect(updated?.clips).toHaveLength(2);
     expect(preserved?.clips).toHaveLength(1);
   });

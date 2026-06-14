@@ -1,5 +1,14 @@
 import { Fragment, memo, useState, useMemo, useCallback, useRef, useEffect } from "react";
-import { thumbnailUrl, fetchStatus, fetchCaches, clearCache, getApiBase, type ServerStatus, type CacheInfo } from "../api";
+import {
+  thumbnailUrl,
+  fetchStatus,
+  fetchCaches,
+  clearCache,
+  getApiBase,
+  type EventPageType,
+  type ServerStatus,
+  type CacheInfo,
+} from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
@@ -8,9 +17,12 @@ import "./EventBrowser.css";
 interface Props {
   events: DashcamEvent[];
   loading: boolean;
+  loadingMore: boolean;
   error: string | null;
+  hasMore: Record<EventPageType, boolean>;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
+  onLoadMore: (types: EventPageType[]) => void;
 }
 
 type FilterType = "all" | "SavedClips" | "SentryClips";
@@ -71,9 +83,12 @@ function dateKey(ts: string): string {
 export function EventBrowser({
   events,
   loading,
+  loadingMore,
   error,
+  hasMore: hasMorePages,
   onSelectEvent,
   onRefresh,
+  onLoadMore,
 }: Props) {
   const [view, setView] = useState<ViewType>("events");
   const [filter, setFilter] = useState<FilterType>("all");
@@ -148,11 +163,26 @@ export function EventBrowser({
   }, [filtered]);
 
   const visible = filtered.slice(0, visibleCount);
-  const hasMore = visibleCount < filtered.length;
+  const hasMoreLoaded = visibleCount < filtered.length;
+  const pageTypesToLoad = useMemo<EventPageType[]>(() => {
+    if (view === "recent") return ["RecentClips"];
+    if (filter === "all") return ["SavedClips", "SentryClips"];
+    return [filter];
+  }, [filter, view]);
+  const remoteTypesToLoad = pageTypesToLoad.filter((type) => hasMorePages[type]);
+  const hasMoreRemote = remoteTypesToLoad.length > 0;
+  const hasMore = hasMoreLoaded || hasMoreRemote;
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
   );
+  const handleLoadMore = useCallback(() => {
+    if (hasMoreLoaded) {
+      setVisibleCount((c) => c + PAGE_SIZE);
+    } else if (hasMoreRemote && !loadingMore) {
+      onLoadMore(remoteTypesToLoad);
+    }
+  }, [hasMoreLoaded, hasMoreRemote, loadingMore, onLoadMore, remoteTypesToLoad]);
 
   // Infinite scroll: load more when sentinel enters viewport
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -162,14 +192,14 @@ export function EventBrowser({
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setVisibleCount((c) => c + PAGE_SIZE);
+          handleLoadMore();
         }
       },
       { rootMargin: "200px" }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, filtered]);
+  }, [hasMore, filtered, handleLoadMore]);
 
   return (
     <div className="browse-container">
@@ -181,9 +211,9 @@ export function EventBrowser({
               onClick={onRefresh}
               disabled={loading}
               className="browse-refresh-btn"
-              title="Rescan teslacam folder"
+              title="Reload first event pages"
             >
-              {loading ? "Scanning..." : "Refresh"}
+              {loading ? "Loading..." : "Refresh"}
             </button>
           </div>
         </div>
@@ -269,11 +299,25 @@ export function EventBrowser({
             <div className="browse-spinner" />
             <p>Loading events...</p>
             <p className="browse-loading-hint">
-              First load may take a few minutes if files are on a cloud drive
+              Loading the first Drive pages
             </p>
           </div>
         ) : view === "recent" ? (
-          <Timeline events={events} onSelectEvent={onSelectEvent} />
+          <>
+            <Timeline events={events} onSelectEvent={onSelectEvent} />
+            {hasMoreRemote && (
+              <div className="browse-load-more" ref={sentinelRef}>
+                <button
+                  type="button"
+                  className="browse-load-more-hint"
+                  disabled={loadingMore}
+                  onClick={handleLoadMore}
+                >
+                  {loadingMore ? "Loading..." : "Load more"}
+                </button>
+              </div>
+            )}
+          </>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
@@ -317,16 +361,23 @@ export function EventBrowser({
             </div>
             {hasMore && (
               <div className="browse-load-more" ref={sentinelRef}>
-                <span className="browse-load-more-hint">
-                  {filtered.length - visibleCount} more
-                </span>
+                <button
+                  type="button"
+                  className="browse-load-more-hint"
+                  disabled={loadingMore}
+                  onClick={handleLoadMore}
+                >
+                  {hasMoreLoaded
+                    ? `${filtered.length - visibleCount} more loaded`
+                    : loadingMore ? "Loading..." : "Load more"}
+                </button>
               </div>
             )}
           </>
         )}
       </div>
 
-      {status?.connected && (
+      {status && (
         <div className="browse-status-bar">
           <span>Server: {getApiBase()}</span>
           <span className="browse-status-sep">&middot;</span>
@@ -337,10 +388,14 @@ export function EventBrowser({
               <span className="browse-status-path">{status.storagePath}</span>
             </>
           )}
-          {status.eventCount != null && (
+          {(status.eventCount != null || status.loadedEventCount > 0) && (
             <>
               <span className="browse-status-sep">&middot;</span>
-              <span>{status.eventCount} events</span>
+              <span>
+                {status.eventCount != null
+                  ? `${status.eventCount} cached events`
+                  : `${status.loadedEventCount} loaded`}
+              </span>
             </>
           )}
           <DebugPanelToggle />

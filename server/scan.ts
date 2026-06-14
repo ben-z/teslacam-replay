@@ -1,11 +1,11 @@
-import path from "path";
-import type { StorageBackend } from "./storage.js";
+import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList } from "./gdrive-lite.js";
 
 export interface EventClip {
   timestamp: string; // e.g. "2025-06-01_18-07-09"
   cameras: string[]; // available camera angles
   durationSec: number; // estimated from timestamp gaps, ~60s
   subfolder?: string; // for RecentClips: date subfolder if files are in one (e.g. "2025-12-19")
+  sourceByCamera?: Record<string, DriveFileSource>;
 }
 
 export type EventType = "SavedClips" | "SentryClips" | "RecentClips";
@@ -20,9 +20,19 @@ export interface DashcamEvent {
   reason?: string;
   camera?: string;
   hasThumbnail: boolean;
+  thumbnailSource?: DriveFileSource;
   clips: EventClip[];
   totalDurationSec: number; // estimated from number of segments
   cameraCount: number;
+}
+
+export interface TeslacamDrive {
+  listRoot(): Promise<DriveList>;
+  listFolder(folder: DriveFolderRef): Promise<DriveList>;
+  readText(file: DriveEntry): Promise<string>;
+  fileSource(file: DriveEntry): DriveFileSource;
+  folderRef(file: DriveEntry): DriveFolderRef;
+  isFolder(file: DriveEntry): boolean;
 }
 
 const CLIP_REGEX = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$/;
@@ -41,11 +51,19 @@ const SESSION_GAP_THRESHOLD = 120;
 // tools can expose an event folder before all camera files have arrived, so
 // treating the latest folder as immutable can permanently cache partial events.
 const INCREMENTAL_RESCAN_EVENT_COUNT = 3;
+const SCAN_BATCH_SIZE = positiveInt(process.env.SCAN_BATCH_SIZE, 100);
 
 export async function scanTeslacamFolder(
-  storage: StorageBackend,
+  drive: TeslacamDrive,
   existingEvents?: DashcamEvent[]
 ): Promise<DashcamEvent[]> {
+  const root = await drive.listRoot();
+  const rootFolders = new Map(
+    root.files
+      .filter((entry) => drive.isFolder(entry))
+      .map((entry) => [entry.name, entry])
+  );
+
   // Compute cutoffs for incremental scanning (only scan folders newer than latest known)
   const cutoffs = new Map<string, string>();
   const mutableKnownFolders = new Map<string, Set<string>>();
@@ -69,29 +87,31 @@ export async function scanTeslacamFolder(
   const events: DashcamEvent[] = [];
 
   for (const type of ["SavedClips", "SentryClips"] as const) {
-    let entries: string[];
+    const typeFolder = rootFolders.get(type);
+    if (!typeFolder) continue;
+
+    let entries: DriveEntry[];
     try {
-      entries = await storage.readdir(type);
+      entries = (await drive.listFolder(drive.folderRef(typeFolder))).files;
     } catch {
       continue;
     }
 
     // Filter to only timestamp-patterned folders (skip .DS_Store, etc.)
-    let folders = entries.filter((f) => FOLDER_PATTERN.test(f));
+    let folders = entries.filter((f) => drive.isFolder(f) && FOLDER_PATTERN.test(f.name));
 
     // Incremental: only scan folders newer than latest existing event
     const cutoff = cutoffs.get(type);
     if (cutoff) {
       const mutable = mutableKnownFolders.get(type);
-      folders = folders.filter(f => f > cutoff || Boolean(mutable?.has(f)));
+      folders = folders.filter(f => f.name > cutoff || Boolean(mutable?.has(f.name)));
     }
 
     // Process in parallel batches
-    const batchSize = 50;
-    for (let i = 0; i < folders.length; i += batchSize) {
-      const batch = folders.slice(i, i + batchSize);
+    for (let i = 0; i < folders.length; i += SCAN_BATCH_SIZE) {
+      const batch = folders.slice(i, i + SCAN_BATCH_SIZE);
       const results = await Promise.all(
-        batch.map((folder) => scanEventFolder(storage, type, folder))
+        batch.map((folder) => scanEventFolder(drive, type, folder))
       );
       for (const event of results) {
         if (event) events.push(event);
@@ -99,8 +119,11 @@ export async function scanTeslacamFolder(
     }
   }
 
-  const recentEvents = await scanRecentClips(storage, existingEvents);
-  events.push(...recentEvents);
+  const recentFolder = rootFolders.get("RecentClips");
+  if (recentFolder) {
+    const recentEvents = await scanRecentClips(drive, recentFolder, existingEvents);
+    events.push(...recentEvents);
+  }
 
   // Merge with existing events when doing incremental scan
   if (existingEvents) {
@@ -116,25 +139,24 @@ export async function scanTeslacamFolder(
   return events;
 }
 
-async function scanEventFolder(
-  storage: StorageBackend,
+export async function scanEventFolder(
+  drive: TeslacamDrive,
   type: "SavedClips" | "SentryClips",
-  folder: string
+  folder: DriveEntry
 ): Promise<DashcamEvent | null> {
-  const folderPath = `${type}/${folder}`;
-
-  let files: string[];
+  let files: DriveEntry[];
   try {
-    files = await storage.readdir(folderPath);
+    files = (await drive.listFolder(drive.folderRef(folder))).files;
   } catch {
     return null;
   }
 
   // Parse event.json if present
   let eventMeta: Record<string, string> = {};
-  if (files.includes("event.json")) {
+  const eventJson = files.find((file) => file.name === "event.json");
+  if (eventJson) {
     try {
-      const raw = await storage.readFileUtf8(`${folderPath}/event.json`);
+      const raw = await drive.readText(eventJson);
       eventMeta = JSON.parse(raw);
     } catch {
       // ignore malformed event.json
@@ -142,15 +164,15 @@ async function scanEventFolder(
   }
 
   // Group MP4 files by timestamp segment
-  const segmentMap = new Map<string, Set<string>>();
+  const segmentMap = new Map<string, Map<string, DriveEntry>>();
   for (const file of files) {
-    const match = file.match(CLIP_REGEX);
+    const match = file.name.match(CLIP_REGEX);
     if (!match) continue;
     const [, timestamp, camera] = match;
     if (!segmentMap.has(timestamp)) {
-      segmentMap.set(timestamp, new Set());
+      segmentMap.set(timestamp, new Map());
     }
-    segmentMap.get(timestamp)!.add(camera);
+    segmentMap.get(timestamp)!.set(camera, file);
   }
 
   if (segmentMap.size === 0) return null;
@@ -159,30 +181,26 @@ async function scanEventFolder(
   const sorted = Array.from(segmentMap.entries())
     .sort(([a], [b]) => a.localeCompare(b));
 
-  const clips: EventClip[] = sorted.map(([timestamp, cameras], i) => ({
+  const clips: EventClip[] = sorted.map(([timestamp, cameraFiles], i) => ({
     timestamp,
-    cameras: Array.from(cameras).sort((a, b) =>
-      CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
-    ),
+    cameras: sortCameras(Array.from(cameraFiles.keys())),
+    sourceByCamera: sourceByCamera(drive, cameraFiles),
     durationSec: estimateDuration(timestamp, sorted[i + 1]?.[0]),
   }));
 
-  const hasThumbnail = files.includes("thumb.png");
-
-  // Parse timestamp from folder name: "2025-06-01_18-17-49" -> ISO
-  const isoTimestamp =
-    eventMeta.timestamp || folderNameToISO(folder);
+  const thumbnail = files.find((file) => file.name === "thumb.png");
 
   return {
-    id: folder,
+    id: folder.name,
     type,
-    timestamp: isoTimestamp,
+    timestamp: eventMeta.timestamp || folderNameToISO(folder.name),
     city: eventMeta.city || undefined,
     lat: eventMeta.est_lat ? parseFloat(eventMeta.est_lat) : undefined,
     lon: eventMeta.est_lon ? parseFloat(eventMeta.est_lon) : undefined,
     reason: eventMeta.reason || undefined,
     camera: eventMeta.camera || undefined,
-    hasThumbnail,
+    hasThumbnail: Boolean(thumbnail),
+    thumbnailSource: thumbnail ? drive.fileSource(thumbnail) : undefined,
     clips,
     totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
     cameraCount: countUniqueCameras(clips),
@@ -255,12 +273,13 @@ function recentIncrementalCutoff(existingEvents?: DashcamEvent[]): string | null
  * scanTeslacamFolder, which avoids re-listing every historical date folder.
  */
 async function scanRecentClips(
-  storage: StorageBackend,
+  drive: TeslacamDrive,
+  recentFolder: DriveEntry,
   existingEvents?: DashcamEvent[]
 ): Promise<DashcamEvent[]> {
-  let entries: string[];
+  let entries: DriveEntry[];
   try {
-    entries = await storage.readdir("RecentClips");
+    entries = (await drive.listFolder(drive.folderRef(recentFolder))).files;
   } catch {
     return [];
   }
@@ -269,45 +288,82 @@ async function scanRecentClips(
   const cutoffDate = cutoff?.slice(0, 10) ?? null;
 
   // Collect all clip files: { timestamp, camera, subfolder? }
-  const segmentMap = new Map<string, { cameras: Set<string>; subfolder?: string }>();
+  const segmentMap = new Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>();
 
   // Parse flat MP4 files
   for (const file of entries) {
-    const match = file.match(CLIP_REGEX);
+    const match = file.name.match(CLIP_REGEX);
     if (!match) continue;
     const [, timestamp, camera] = match;
     if (cutoff && timestamp < cutoff) continue;
-    if (!segmentMap.has(timestamp)) {
-      segmentMap.set(timestamp, { cameras: new Set() });
-    }
-    segmentMap.get(timestamp)!.cameras.add(camera);
+    addSegment(segmentMap, timestamp, camera, file);
   }
 
   // Parse date subfolders
   const dateFolders = entries.filter((f) =>
-    DATE_FOLDER_PATTERN.test(f) && (!cutoffDate || f >= cutoffDate)
+    drive.isFolder(f) && DATE_FOLDER_PATTERN.test(f.name) && (!cutoffDate || f.name >= cutoffDate)
   );
   for (const folder of dateFolders) {
-    let files: string[];
+    let files: DriveEntry[];
     try {
-      files = await storage.readdir(`RecentClips/${folder}`);
+      files = (await drive.listFolder(drive.folderRef(folder))).files;
     } catch {
       continue;
     }
     for (const file of files) {
-      const match = file.match(CLIP_REGEX);
+      const match = file.name.match(CLIP_REGEX);
       if (!match) continue;
       const [, timestamp, camera] = match;
       if (cutoff && timestamp < cutoff) continue;
-      if (!segmentMap.has(timestamp)) {
-        segmentMap.set(timestamp, { cameras: new Set(), subfolder: folder });
-      }
-      segmentMap.get(timestamp)!.cameras.add(camera);
+      addSegment(segmentMap, timestamp, camera, file, folder.name);
     }
   }
 
   if (segmentMap.size === 0) return [];
 
+  return recentEventsFromSegmentMap(drive, segmentMap);
+}
+
+export async function scanRecentClipsPage(
+  drive: TeslacamDrive,
+  entries: DriveEntry[]
+): Promise<DashcamEvent[]> {
+  const segmentMap = new Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>();
+
+  for (const file of entries) {
+    const match = file.name.match(CLIP_REGEX);
+    if (!match) continue;
+    const [, timestamp, camera] = match;
+    addSegment(segmentMap, timestamp, camera, file);
+  }
+
+  const dateFolders = entries.filter((f) =>
+    drive.isFolder(f) && DATE_FOLDER_PATTERN.test(f.name)
+  );
+  for (const folder of dateFolders) {
+    let files: DriveEntry[];
+    try {
+      files = (await drive.listFolder(drive.folderRef(folder))).files;
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      const match = file.name.match(CLIP_REGEX);
+      if (!match) continue;
+      const [, timestamp, camera] = match;
+      addSegment(segmentMap, timestamp, camera, file, folder.name);
+    }
+  }
+
+  if (segmentMap.size === 0) return [];
+
+  return recentEventsFromSegmentMap(drive, segmentMap);
+}
+
+function recentEventsFromSegmentMap(
+  drive: TeslacamDrive,
+  segmentMap: Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>
+): DashcamEvent[] {
   // Sort all segments by timestamp
   const sorted = Array.from(segmentMap.entries())
     .sort(([a], [b]) => a.localeCompare(b));
@@ -331,9 +387,8 @@ async function scanRecentClips(
   return sessions.map((session) => {
     const clips: EventClip[] = session.map(([timestamp, { cameras, subfolder }], i) => ({
       timestamp,
-      cameras: Array.from(cameras).sort((a, b) =>
-        CAMERA_ORDER.indexOf(a) - CAMERA_ORDER.indexOf(b)
-      ),
+      cameras: sortCameras(Array.from(cameras.keys())),
+      sourceByCamera: sourceByCamera(drive, cameras),
       durationSec: estimateDuration(timestamp, session[i + 1]?.[0]),
       subfolder,
     }));
@@ -351,26 +406,49 @@ async function scanRecentClips(
   });
 }
 
-export function getVideoPath(
-  type: string,
-  eventId: string,
-  segment: string,
+function addSegment(
+  segmentMap: Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>,
+  timestamp: string,
   camera: string,
+  file: DriveEntry,
   subfolder?: string
-): string {
-  if (type === "RecentClips") {
-    // RecentClips: files are either in a date subfolder or flat in RecentClips/
-    if (subfolder) {
-      return `${type}/${subfolder}/${segment}-${camera}.mp4`;
-    }
-    return `${type}/${segment}-${camera}.mp4`;
+): void {
+  if (!segmentMap.has(timestamp)) {
+    segmentMap.set(timestamp, { cameras: new Map(), subfolder });
   }
-  return `${type}/${eventId}/${segment}-${camera}.mp4`;
+  const segment = segmentMap.get(timestamp)!;
+  segment.cameras.set(camera, file);
+  if (subfolder) segment.subfolder = subfolder;
 }
 
-export function getThumbnailPath(
-  type: string,
-  eventId: string
-): string {
-  return `${type}/${eventId}/thumb.png`;
+function sortCameras(cameras: string[]): string[] {
+  return cameras.sort((a, b) => cameraRank(a) - cameraRank(b) || a.localeCompare(b));
+}
+
+function cameraRank(camera: string): number {
+  const rank = CAMERA_ORDER.indexOf(camera);
+  return rank === -1 ? CAMERA_ORDER.length : rank;
+}
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sourceByCamera(
+  drive: TeslacamDrive,
+  cameraFiles: Map<string, DriveEntry>
+): Record<string, DriveFileSource> {
+  return Object.fromEntries(
+    Array.from(cameraFiles.entries()).map(([camera, file]) => [camera, drive.fileSource(file)])
+  );
+}
+
+export function getClipSource(
+  event: DashcamEvent,
+  segment: string,
+  camera: string
+): DriveFileSource | null {
+  const clip = event.clips.find((cl) => cl.timestamp === segment);
+  return clip?.sourceByCamera?.[camera] ?? null;
 }

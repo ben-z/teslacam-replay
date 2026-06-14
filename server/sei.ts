@@ -242,9 +242,14 @@ class Mp4Parser {
 export async function extractTelemetry(
   filePath: string
 ): Promise<TelemetryData | null> {
-  const SeiMetadata = await getProtoType();
   const buf = await readFile(filePath);
+  return extractTelemetryFromBuffer(buf);
+}
 
+export async function extractTelemetryFromBuffer(
+  buf: Buffer
+): Promise<TelemetryData | null> {
+  const SeiMetadata = await getProtoType();
   const parser = new Mp4Parser(buf);
   const frames = parser.extractSeiMessages(SeiMetadata);
   if (frames.length === 0) return null;

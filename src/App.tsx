@@ -1,10 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
 import type { ReactNode } from "react";
-import { fetchEvents, refreshEvents, fetchStatus, getApiBase, primeEventsCache, type ServerStatus } from "./api";
+import {
+  fetchEvent,
+  fetchEventPage,
+  fetchStatus,
+  getApiBase,
+  type EventPageType,
+  type ServerStatus,
+} from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
 import { Timeline } from "./components/Timeline";
-import { SetupScreen } from "./components/SetupScreen";
 import type { DashcamEvent, ViewMode } from "./types";
 
 class ErrorBoundary extends Component<
@@ -52,6 +58,22 @@ function parseHash(): { type: string; id: string } | null {
 }
 
 const EVENTS_CACHE_KEY = "teslacam-replay:events";
+const PAGE_LOAD_LIMIT = 24;
+const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
+
+type PageTokens = Record<EventPageType, string | null>;
+type PageAvailability = Record<EventPageType, boolean>;
+
+const EMPTY_PAGE_TOKENS: PageTokens = {
+  SavedClips: null,
+  SentryClips: null,
+  RecentClips: null,
+};
+const EMPTY_PAGE_AVAILABILITY: PageAvailability = {
+  SavedClips: false,
+  SentryClips: false,
+  RecentClips: false,
+};
 
 function cacheEvents(data: DashcamEvent[]): void {
   try {
@@ -88,14 +110,59 @@ function loadCachedEvents(): DashcamEvent[] {
   }
 }
 
+function sortEvents(data: DashcamEvent[]): DashcamEvent[] {
+  return [...data].sort((a, b) => b.id.localeCompare(a.id));
+}
+
+function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEvent {
+  const clipsByTimestamp = new Map(existing.clips.map((clip) => [clip.timestamp, clip]));
+  for (const clip of incoming.clips) {
+    const prev = clipsByTimestamp.get(clip.timestamp);
+    if (!prev) {
+      clipsByTimestamp.set(clip.timestamp, clip);
+      continue;
+    }
+    clipsByTimestamp.set(clip.timestamp, {
+      ...prev,
+      ...clip,
+      cameras: Array.from(new Set([...prev.cameras, ...clip.cameras])),
+      durationSec: Math.max(prev.durationSec, clip.durationSec),
+      subfolder: prev.subfolder ?? clip.subfolder,
+    });
+  }
+  const clips = Array.from(clipsByTimestamp.values())
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const cameraCount = new Set(clips.flatMap((clip) => clip.cameras)).size;
+  return {
+    ...existing,
+    ...incoming,
+    hasThumbnail: existing.hasThumbnail || incoming.hasThumbnail,
+    clips,
+    totalDurationSec: clips.reduce((sum, clip) => sum + clip.durationSec, 0),
+    cameraCount,
+  };
+}
+
+function mergeEvents(existing: DashcamEvent[], incoming: DashcamEvent[]): DashcamEvent[] {
+  const byKey = new Map<string, DashcamEvent>();
+  for (const event of existing) byKey.set(`${event.type}/${event.id}`, event);
+  for (const event of incoming) {
+    const key = `${event.type}/${event.id}`;
+    const prev = byKey.get(key);
+    byKey.set(key, prev ? mergeEvent(prev, event) : event);
+  }
+  return sortEvents(Array.from(byKey.values()));
+}
+
 export function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [events, setEvents] = useState<DashcamEvent[]>(() => {
-    const cached = loadCachedEvents();
-    primeEventsCache(cached);
-    return cached;
+    return loadCachedEvents();
   });
   const [loading, setLoading] = useState(events.length === 0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
+  const [hasMorePages, setHasMorePages] = useState<PageAvailability>(EMPTY_PAGE_AVAILABILITY);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
@@ -106,67 +173,87 @@ export function App() {
   const [playerDisplayTime, setPlayerDisplayTime] = useState(0);
   const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
   const pushedHashRef = useRef(false);
+  const eventsRef = useRef(events);
+  const nextPageTokensRef = useRef(nextPageTokens);
+  eventsRef.current = events;
+  nextPageTokensRef.current = nextPageTokens;
 
-  const loadEvents = useCallback(async () => {
+  const selectEvent = useCallback((event: DashcamEvent) => {
+    setSelectedEvent(event);
+    setPlayerDisplayTime(0);
+    setPlayerIsPlaying(false);
+    setView("player");
+  }, []);
+
+  const restoreHashEvent = useCallback(async (data: DashcamEvent[]) => {
+    const hashEvent = parseHash();
+    if (!hashEvent) return;
+
+    let found = data.find(
+      (e) => e.type === hashEvent.type && e.id === hashEvent.id
+    );
+    if (!found) {
+      found = await fetchEvent(hashEvent.type, hashEvent.id);
+      const merged = mergeEvents(data, [found]);
+      setEvents(merged);
+      cacheEvents(merged);
+      eventsRef.current = merged;
+    }
+    selectEvent(found);
+  }, [selectEvent]);
+
+  const loadPages = useCallback(async (
+    types: EventPageType[] = PAGE_TYPES,
+    reset = false
+  ) => {
     setError(null);
+    if (reset) setLoading(true);
+    else setLoadingMore(true);
     try {
-      const data = await fetchEvents();
-      setEvents(data);
-      cacheEvents(data);
-      // Restore event from URL hash after initial load
-      const hashEvent = parseHash();
-      if (hashEvent) {
-        const found = data.find(
-          (e) => e.type === hashEvent.type && e.id === hashEvent.id
-        );
-        if (found) {
-          setSelectedEvent(found);
-          setPlayerDisplayTime(0);
-          setPlayerIsPlaying(false);
-          setView("player");
-        }
+      const tokenSource = reset ? EMPTY_PAGE_TOKENS : nextPageTokensRef.current;
+      const results = await Promise.all(
+        types.map((type) => fetchEventPage(type, tokenSource[type], PAGE_LOAD_LIMIT))
+      );
+
+      const tokenUpdates: Partial<PageTokens> = {};
+      const availabilityUpdates: Partial<PageAvailability> = {};
+      for (const result of results) {
+        tokenUpdates[result.type] = result.nextPageToken;
+        availabilityUpdates[result.type] = Boolean(result.nextPageToken);
       }
+      const incoming = results.flatMap((result) => result.events);
+      const merged = mergeEvents(reset ? [] : eventsRef.current, incoming);
+      const nextTokens = reset
+        ? { ...EMPTY_PAGE_TOKENS, ...tokenUpdates }
+        : { ...nextPageTokensRef.current, ...tokenUpdates };
+      nextPageTokensRef.current = nextTokens;
+      setNextPageTokens(nextTokens);
+      setHasMorePages((prev) => reset
+        ? { ...EMPTY_PAGE_AVAILABILITY, ...availabilityUpdates }
+        : { ...prev, ...availabilityUpdates }
+      );
+      setEvents(merged);
+      cacheEvents(merged);
+      eventsRef.current = merged;
+      await restoreHashEvent(merged);
+      fetchStatus().then(setStatus).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load events");
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, []);
+  }, [restoreHashEvent]);
 
   const checkStatus = useCallback(() => {
     fetchStatus().then((s) => {
       setStatus(s);
-      if (s.connected) loadEvents();
-      else setLoading(false);
+      loadPages(PAGE_TYPES, true);
     }).catch(() => setLoading(false));
-  }, [loadEvents]);
+  }, [loadPages]);
 
-  // Check server status on mount to determine if setup is needed
+  // Check server status on mount.
   useEffect(() => { checkStatus(); }, [checkStatus]);
-
-  // Auto-refresh: poll for new events every 30s while browsing
-  const loadingRef = useRef(loading);
-  loadingRef.current = loading;
-
-  useEffect(() => {
-    if (view !== "browse" || !status?.connected) return;
-    const interval = setInterval(async () => {
-      if (loadingRef.current) return;
-      try {
-        const data = await fetchEvents();
-        let updated = false;
-        setEvents((prev) => {
-          if (data === prev) return prev;
-          updated = true;
-          return data;
-        });
-        if (updated) cacheEvents(data);
-      } catch {
-        // silent -- manual refresh still available
-      }
-    }, 30_000);
-    return () => clearInterval(interval);
-  }, [view, status?.connected]);
 
   // Sync URL hash with browser back/forward
   useEffect(() => {
@@ -193,25 +280,15 @@ export function App() {
 
   const handleRefresh = async () => {
     if (loading) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await refreshEvents();
-      setEvents(data);
-      cacheEvents(data);
-      // Clear stale browse list so navigation uses fresh event objects
-      setBrowseList([]);
-      // Update selectedEvent to new reference if still viewing one
-      setSelectedEvent((prev) => {
-        if (!prev) return null;
-        return data.find((e) => e.type === prev.type && e.id === prev.id) ?? null;
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to refresh");
-    } finally {
-      setLoading(false);
-    }
+    setBrowseList([]);
+    await loadPages(PAGE_TYPES, true);
   };
+
+  const handleLoadMore = useCallback((types: EventPageType[]) => {
+    if (loadingMore) return;
+    const loadable = types.filter((type) => nextPageTokensRef.current[type]);
+    if (loadable.length > 0) loadPages(loadable, false);
+  }, [loadPages, loadingMore]);
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
     setSelectedEvent(event);
@@ -266,20 +343,6 @@ export function App() {
     setPlayerIsPlaying((prev) => prev === playing ? prev : playing);
   }, []);
 
-  const handleSetupComplete = () => {
-    setStatus(null);
-    checkStatus();
-  };
-
-  // Show setup screen when server reports not connected
-  if (status && !status.connected) {
-    return (
-      <ErrorBoundary>
-        <SetupScreen setupStep={status.setupStep} onComplete={handleSetupComplete} />
-      </ErrorBoundary>
-    );
-  }
-
   return (
     <ErrorBoundary>
       <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -287,9 +350,12 @@ export function App() {
           <EventBrowser
             events={events}
             loading={loading}
+            loadingMore={loadingMore}
             error={error}
             onSelectEvent={handleSelectEvent}
             onRefresh={handleRefresh}
+            onLoadMore={handleLoadMore}
+            hasMore={hasMorePages}
           />
         ) : selectedEvent ? (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>

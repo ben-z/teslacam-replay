@@ -425,8 +425,21 @@
 }
 
 .browse-load-more-hint {
+  padding: 7px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   color: var(--text-dim);
   font-size: 12px;
+  cursor: pointer;
+}
+.browse-load-more-hint:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.browse-load-more-hint:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 
 /* Responsive */
