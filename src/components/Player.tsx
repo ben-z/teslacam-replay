@@ -30,6 +30,8 @@ const SEEK_STEP = 5; // seconds for arrow key seeking
 const SPEED_OPTIONS = [0.5, 1, 1.5, 2];
 const PARENT_TIME_UPDATE_INTERVAL = 500; // ms - compact timeline does not need every sync tick
 const NEXT_SEGMENT_PREFETCH_WINDOW = 15; // seconds before boundary
+const HLS_LOAD_TIMEOUT_MS = 120_000; // first-run server-side segmentation can take tens of seconds
+const SEGMENT_READY_TIMEOUT_MS = 60_000;
 const WALL_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -243,6 +245,9 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
       const hls = new Hls({
         maxBufferLength: 10,
         maxMaxBufferLength: 30,
+        manifestLoadingTimeOut: HLS_LOAD_TIMEOUT_MS,
+        levelLoadingTimeOut: HLS_LOAD_TIMEOUT_MS,
+        fragLoadingTimeOut: HLS_LOAD_TIMEOUT_MS,
       });
       hls.loadSource(url);
       hls.attachMedia(video);
@@ -460,7 +465,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
       canplayCleanupRef.current = () => cleanups.forEach(fn => fn());
 
       // Safety timeout if no camera becomes ready (onReady is guarded by readyFired)
-      loadTimeoutRef.current = setTimeout(onReady, 10000);
+      loadTimeoutRef.current = setTimeout(onReady, SEGMENT_READY_TIMEOUT_MS);
 
       // No video elements available — clear loading state immediately
       if (cleanups.length === 0 && !readyFired) {
