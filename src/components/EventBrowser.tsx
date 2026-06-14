@@ -363,7 +363,7 @@ export function EventBrowser({
         ) : view === "recent" ? (
           <div className="recent-view">
             <div className="recent-scan-status" aria-live="polite">
-              <span className={`recent-scan-dot ${hasMorePages.RecentClips ? "active" : ""}`} />
+              <span className={`recent-scan-dot ${loadingMore ? "active" : ""}`} />
               <span>{recentScanLabel}</span>
               <span className="recent-scan-frontier">
                 Scanned back to {recentScan.frontierLabel}
