@@ -16,14 +16,14 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 ## Architecture
 
 ```
-┌──────────────────┐         ┌──────────────────┐
-│  Static Frontend │  HTTP   │   Node.js Server  │
-│  (React + Vite)  │ ──────> │   (Hono + ffmpeg) │
+┌──────────────────┐         ┌────────────────────┐
+│  Static Frontend │  HTTP   │  Node.js Server    │
+│  (React + Vite)  │ ──────> │  Hono + ffmpeg     │
 │                  │         │                    │
 │  GitHub Pages /  │         │  Reads dashcam     │
 │  any static host │         │  files via         │
 │                  │         │  gdrive-serve-lite │
-└──────────────────┘         └──────────────────┘
+└──────────────────┘         └────────────────────┘
 ```
 
 The frontend is a static SPA that can be hosted anywhere. The backend serves the API, pages through TeslaCam folders via `gdrive-serve-lite`, and streams video via HLS. `gdrive-serve-lite` owns Google Drive auth, pagination, path resolution, and range-capable file reads.
@@ -45,15 +45,15 @@ cd teslacam-replay
 npm install
 
 # Start gdrive-serve-lite separately, for example:
-~/Projects/gdrive-serve-lite/gdrive-serve-lite \
-  --remote gdrive-ro:/teslacam1 \
-  --config ~/Projects/gdrive-serve-lite/rclone-gdrive-ro.conf \
+/path/to/gdrive-serve-lite \
+  --remote gdrive-ro:/TeslaCam \
+  --config /path/to/rclone.conf \
   --metadata-cache-ttl 5m \
   --list-cache-ttl 30s \
   --drive-response-header-timeout 30s \
   --user gdrive-user \
   --pass gdrive-password \
-  --allow-origin http://localhost:3000 \
+  --allow-origin http://localhost:5173 \
   --baseurl /gdrive \
   --addr 127.0.0.1:8765
 
@@ -162,6 +162,7 @@ TeslaCam/
 
 ## Related
 
+- [gdrive-serve-lite](https://github.com/ben-z/gdrive-serve-lite) — Lightweight Google Drive HTTP server with pagination and range-capable file reads
 - [teslausb-ng](https://github.com/ben-z/teslausb-ng) — Runs onboard the vehicle to offload dashcam data automatically
 
 ## License
