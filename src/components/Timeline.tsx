@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, useCallback } from "react";
+import { memo, useMemo, useState, useCallback, type ReactNode } from "react";
 import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
@@ -9,6 +9,7 @@ interface Props {
   displayTime?: number;
   isPlaying?: boolean;
   compact?: boolean;
+  footer?: ReactNode;
 }
 
 interface DayData {
@@ -74,7 +75,7 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact }: Props) {
+export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact, footer }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const sessionList = useMemo(
@@ -222,6 +223,7 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
               onTooltipClear={handleTooltipClear}
             />
           ))}
+          {footer}
         </div>
 
         {!compact && (

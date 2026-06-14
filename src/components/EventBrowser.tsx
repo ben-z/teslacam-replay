@@ -204,6 +204,11 @@ export function EventBrowser({
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
+  const recentScanLabel = !hasMorePages.RecentClips
+    ? "Recent scan complete"
+    : loadingMore
+      ? "Scanning older recent clips"
+      : "Scroll to scan older clips";
   const recentScan = useMemo(() => {
     const recentEvents = events.filter((event) => event.type === "RecentClips");
     let oldestRecentMs: number | null = null;
@@ -356,23 +361,24 @@ export function EventBrowser({
             </p>
           </div>
         ) : view === "recent" ? (
-          <>
+          <div className="recent-view">
             <div className="recent-scan-status" aria-live="polite">
               <span className={`recent-scan-dot ${hasMorePages.RecentClips ? "active" : ""}`} />
-              <span>
-                {hasMorePages.RecentClips ? "Scanning older recent clips" : "Recent scan complete"}
-              </span>
+              <span>{recentScanLabel}</span>
               <span className="recent-scan-frontier">
                 Scanned back to {recentScan.frontierLabel}
               </span>
             </div>
-            <Timeline events={recentScan.timelineEvents} onSelectEvent={onSelectEvent} />
-            {hasMorePages.RecentClips && (
-              <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
-                {loadingMore ? "Loading older clips..." : "Scroll for older clips"}
-              </div>
-            )}
-          </>
+            <Timeline
+              events={recentScan.timelineEvents}
+              onSelectEvent={onSelectEvent}
+              footer={hasMorePages.RecentClips ? (
+                <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
+                  {loadingMore ? "Loading older clips..." : "Scroll for older clips"}
+                </div>
+              ) : null}
+            />
+          </div>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
