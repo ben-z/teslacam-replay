@@ -436,6 +436,10 @@
   font-size: 12px;
 }
 
+.browse-load-more-sentinel {
+  height: 1px;
+}
+
 .recent-view {
   height: 100%;
   min-height: 0;

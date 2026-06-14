@@ -362,16 +362,19 @@ export function EventBrowser({
               onSelectEvent={onSelectEvent}
               scrollRef={recentTimelineScrollRef}
               footer={hasMorePages.RecentClips ? (
-                <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
-                  <button
-                    type="button"
-                    className="browse-load-more-hint"
-                    disabled={loadingMore}
-                    onClick={handleLoadMore}
-                  >
-                    {loadingMore ? "Loading older clips..." : "Load older clips"}
-                  </button>
-                </div>
+                <>
+                  <div className="browse-load-more browse-load-more--passive">
+                    <button
+                      type="button"
+                      className="browse-load-more-hint"
+                      disabled={loadingMore}
+                      onClick={handleLoadMore}
+                    >
+                      {loadingMore ? "Loading older clips..." : "Load older clips"}
+                    </button>
+                  </div>
+                  <div className="browse-load-more-sentinel" ref={sentinelRef} aria-hidden="true" />
+                </>
               ) : null}
             />
           </div>
