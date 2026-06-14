@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.9",
-    "googleapis": "^171.4.0",
     "hls.js": "^1.5.0",
     "hono": "^4.12.1",
     "protobufjs": "^8.0.0",

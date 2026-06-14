@@ -108,8 +108,8 @@ async function waitForManifest(manifestPath: string, timeoutMs: number): Promise
 }
 
 export interface HlsSource {
-  localPath: string;
-  streamUrl?: { url: string; headers: Record<string, string> };
+  url: string;
+  headers: Record<string, string>;
 }
 
 /**
@@ -132,21 +132,17 @@ async function runSegmentation(
 
     const args: string[] = [];
 
-    if (source.streamUrl) {
-      const headerStr = Object.entries(source.streamUrl.headers)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join("\r\n") + "\r\n";
-      args.push(
-        "-headers", headerStr,
-        "-seekable", "1",
-        "-reconnect", "1",
-        "-reconnect_on_network_error", "1",
-        "-reconnect_delay_max", "5",
-        "-i", source.streamUrl.url,
-      );
-    } else {
-      args.push("-i", source.localPath);
-    }
+    const headerStr = Object.entries(source.headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("\r\n");
+    if (headerStr) args.push("-headers", `${headerStr}\r\n`);
+    args.push(
+      "-seekable", "1",
+      "-reconnect", "1",
+      "-reconnect_on_network_error", "1",
+      "-reconnect_delay_max", "5",
+      "-i", source.url,
+    );
 
     args.push(...codecArgs());
     args.push(
@@ -247,7 +243,7 @@ export async function ensureHlsSegments(
   // the manifest appears (for progressive serving) or false on failure.
   // We race manifest appearance against process completion so callers don't
   // have to wait for the entire encode.
-  const timeoutMs = (source.streamUrl || HLS_BITRATE) ? 120000 : 30000;
+  const timeoutMs = 120000;
   const processComplete = runSegmentation(source, cacheDir, manifestFile, cacheKey, timeoutMs);
 
   const manifestReady = Promise.race([

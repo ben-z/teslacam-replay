@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, useCallback } from "react";
+import { memo, useMemo, useState, useCallback, type ReactNode, type Ref } from "react";
 import type { DashcamEvent } from "../types";
 import "./Timeline.css";
 
@@ -9,6 +9,8 @@ interface Props {
   displayTime?: number;
   isPlaying?: boolean;
   compact?: boolean;
+  footer?: ReactNode;
+  scrollRef?: Ref<HTMLDivElement>;
 }
 
 interface DayData {
@@ -74,7 +76,7 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact }: Props) {
+export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact, footer, scrollRef }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const sessionList = useMemo(
@@ -177,6 +179,9 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     return { dateStr, leftPct };
   }, [selectedEvent, displayTime]);
 
+  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
+  const handleTooltipClear = useCallback(() => setTooltip(null), []);
+
   if (days.length === 0) {
     return (
       <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
@@ -184,9 +189,6 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
       </div>
     );
   }
-
-  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
-  const handleTooltipClear = useCallback(() => setTooltip(null), []);
 
   return (
     <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
@@ -209,7 +211,7 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
           </div>
         )}
 
-        <div className="timeline-scroll">
+        <div className="timeline-scroll" ref={scrollRef}>
           {days.map((day) => (
             <TimelineDayRow
               key={day.dateStr}
@@ -222,6 +224,7 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
               onTooltipClear={handleTooltipClear}
             />
           ))}
+          {footer}
         </div>
 
         {!compact && (

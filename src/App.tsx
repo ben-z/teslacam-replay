@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
 import type { ReactNode } from "react";
-import { fetchEvents, refreshEvents, fetchStatus, getApiBase, primeEventsCache, type ServerStatus } from "./api";
+import {
+  fetchEvent,
+  fetchEventPage,
+  getApiBase,
+  type EventPageType,
+} from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
 import { Timeline } from "./components/Timeline";
-import { SetupScreen } from "./components/SetupScreen";
 import type { DashcamEvent, ViewMode } from "./types";
 
 class ErrorBoundary extends Component<
@@ -51,11 +55,21 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
-const EVENTS_CACHE_KEY = "teslacam-replay:events";
+const BROWSE_CACHE_KEY = "teslacam-replay:browse-events";
+const PAGE_LOAD_LIMIT = 24;
+const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
+
+type PageTokens = Record<EventPageType, string | null>;
+
+const EMPTY_PAGE_TOKENS: PageTokens = {
+  SavedClips: null,
+  SentryClips: null,
+  RecentClips: null,
+};
 
 function cacheEvents(data: DashcamEvent[]): void {
   try {
-    localStorage.setItem(EVENTS_CACHE_KEY, JSON.stringify({
+    localStorage.setItem(BROWSE_CACHE_KEY, JSON.stringify({
       apiBase: getApiBase(),
       events: data,
     }));
@@ -64,7 +78,7 @@ function cacheEvents(data: DashcamEvent[]): void {
 
 function loadCachedEvents(): DashcamEvent[] {
   try {
-    const cached = localStorage.getItem(EVENTS_CACHE_KEY);
+    const cached = localStorage.getItem(BROWSE_CACHE_KEY);
     if (!cached) return [];
     const parsed: unknown = JSON.parse(cached);
     if (
@@ -77,25 +91,67 @@ function loadCachedEvents(): DashcamEvent[] {
     ) {
       return parsed.events;
     }
-    localStorage.removeItem(EVENTS_CACHE_KEY);
+    localStorage.removeItem(BROWSE_CACHE_KEY);
     return [];
   } catch {
     try {
-      localStorage.removeItem(EVENTS_CACHE_KEY);
-      localStorage.removeItem("teslacam-replay:events-etag");
+      localStorage.removeItem(BROWSE_CACHE_KEY);
     } catch {}
     return [];
   }
 }
 
+function sortEvents(data: DashcamEvent[]): DashcamEvent[] {
+  return [...data].sort((a, b) => b.id.localeCompare(a.id));
+}
+
+function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEvent {
+  const clipsByTimestamp = new Map(existing.clips.map((clip) => [clip.timestamp, clip]));
+  for (const clip of incoming.clips) {
+    const prev = clipsByTimestamp.get(clip.timestamp);
+    if (!prev) {
+      clipsByTimestamp.set(clip.timestamp, clip);
+      continue;
+    }
+    clipsByTimestamp.set(clip.timestamp, {
+      ...prev,
+      ...clip,
+      cameras: Array.from(new Set([...prev.cameras, ...clip.cameras])),
+      durationSec: Math.max(prev.durationSec, clip.durationSec),
+      subfolder: prev.subfolder ?? clip.subfolder,
+    });
+  }
+  const clips = Array.from(clipsByTimestamp.values())
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const cameraCount = new Set(clips.flatMap((clip) => clip.cameras)).size;
+  return {
+    ...existing,
+    ...incoming,
+    hasThumbnail: existing.hasThumbnail || incoming.hasThumbnail,
+    clips,
+    totalDurationSec: clips.reduce((sum, clip) => sum + clip.durationSec, 0),
+    cameraCount,
+  };
+}
+
+function mergeEvents(existing: DashcamEvent[], incoming: DashcamEvent[]): DashcamEvent[] {
+  const byKey = new Map<string, DashcamEvent>();
+  for (const event of existing) byKey.set(`${event.type}/${event.id}`, event);
+  for (const event of incoming) {
+    const key = `${event.type}/${event.id}`;
+    const prev = byKey.get(key);
+    byKey.set(key, prev ? mergeEvent(prev, event) : event);
+  }
+  return sortEvents(Array.from(byKey.values()));
+}
+
 export function App() {
-  const [status, setStatus] = useState<ServerStatus | null>(null);
   const [events, setEvents] = useState<DashcamEvent[]>(() => {
-    const cached = loadCachedEvents();
-    primeEventsCache(cached);
-    return cached;
+    return loadCachedEvents();
   });
   const [loading, setLoading] = useState(events.length === 0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
@@ -106,67 +162,74 @@ export function App() {
   const [playerDisplayTime, setPlayerDisplayTime] = useState(0);
   const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
   const pushedHashRef = useRef(false);
+  const eventsRef = useRef(events);
+  const nextPageTokensRef = useRef(nextPageTokens);
+  const loadingMoreRef = useRef(loadingMore);
+  eventsRef.current = events;
+  nextPageTokensRef.current = nextPageTokens;
+  loadingMoreRef.current = loadingMore;
 
-  const loadEvents = useCallback(async () => {
+  const selectEvent = useCallback((event: DashcamEvent) => {
+    setSelectedEvent(event);
+    setPlayerDisplayTime(0);
+    setPlayerIsPlaying(false);
+    setView("player");
+  }, []);
+
+  const restoreHashEvent = useCallback(async (data: DashcamEvent[]) => {
+    const hashEvent = parseHash();
+    if (!hashEvent) return;
+
+    let found = data.find(
+      (e) => e.type === hashEvent.type && e.id === hashEvent.id
+    );
+    if (!found) {
+      found = await fetchEvent(hashEvent.type, hashEvent.id);
+      const merged = mergeEvents(data, [found]);
+      setEvents(merged);
+      cacheEvents(merged);
+      eventsRef.current = merged;
+    }
+    selectEvent(found);
+  }, [selectEvent]);
+
+  const loadPages = useCallback(async (
+    types: EventPageType[] = PAGE_TYPES,
+    reset = false
+  ) => {
     setError(null);
+    if (reset) setLoading(true);
+    else setLoadingMore(true);
     try {
-      const data = await fetchEvents();
-      setEvents(data);
-      cacheEvents(data);
-      // Restore event from URL hash after initial load
-      const hashEvent = parseHash();
-      if (hashEvent) {
-        const found = data.find(
-          (e) => e.type === hashEvent.type && e.id === hashEvent.id
-        );
-        if (found) {
-          setSelectedEvent(found);
-          setPlayerDisplayTime(0);
-          setPlayerIsPlaying(false);
-          setView("player");
-        }
+      const tokenSource = reset ? EMPTY_PAGE_TOKENS : nextPageTokensRef.current;
+      const results = await Promise.all(
+        types.map((type) => fetchEventPage(type, tokenSource[type], PAGE_LOAD_LIMIT))
+      );
+
+      const tokenUpdates: Partial<PageTokens> = {};
+      for (const result of results) {
+        tokenUpdates[result.type] = result.nextPageToken;
       }
+      const incoming = results.flatMap((result) => result.events);
+      const merged = mergeEvents(reset ? [] : eventsRef.current, incoming);
+      const nextTokens = reset
+        ? { ...EMPTY_PAGE_TOKENS, ...tokenUpdates }
+        : { ...nextPageTokensRef.current, ...tokenUpdates };
+      nextPageTokensRef.current = nextTokens;
+      setNextPageTokens(nextTokens);
+      setEvents(merged);
+      cacheEvents(merged);
+      eventsRef.current = merged;
+      await restoreHashEvent(merged);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load events");
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, []);
+  }, [restoreHashEvent]);
 
-  const checkStatus = useCallback(() => {
-    fetchStatus().then((s) => {
-      setStatus(s);
-      if (s.connected) loadEvents();
-      else setLoading(false);
-    }).catch(() => setLoading(false));
-  }, [loadEvents]);
-
-  // Check server status on mount to determine if setup is needed
-  useEffect(() => { checkStatus(); }, [checkStatus]);
-
-  // Auto-refresh: poll for new events every 30s while browsing
-  const loadingRef = useRef(loading);
-  loadingRef.current = loading;
-
-  useEffect(() => {
-    if (view !== "browse" || !status?.connected) return;
-    const interval = setInterval(async () => {
-      if (loadingRef.current) return;
-      try {
-        const data = await fetchEvents();
-        let updated = false;
-        setEvents((prev) => {
-          if (data === prev) return prev;
-          updated = true;
-          return data;
-        });
-        if (updated) cacheEvents(data);
-      } catch {
-        // silent -- manual refresh still available
-      }
-    }, 30_000);
-    return () => clearInterval(interval);
-  }, [view, status?.connected]);
+  useEffect(() => { loadPages(PAGE_TYPES, true); }, [loadPages]);
 
   // Sync URL hash with browser back/forward
   useEffect(() => {
@@ -177,10 +240,7 @@ export function App() {
           (e) => e.type === hashEvent.type && e.id === hashEvent.id
         );
         if (found) {
-          setSelectedEvent(found);
-          setPlayerDisplayTime(0);
-          setPlayerIsPlaying(false);
-          setView("player");
+          selectEvent(found);
           return;
         }
       }
@@ -189,35 +249,26 @@ export function App() {
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [events]);
+  }, [events, selectEvent]);
 
   const handleRefresh = async () => {
     if (loading) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await refreshEvents();
-      setEvents(data);
-      cacheEvents(data);
-      // Clear stale browse list so navigation uses fresh event objects
-      setBrowseList([]);
-      // Update selectedEvent to new reference if still viewing one
-      setSelectedEvent((prev) => {
-        if (!prev) return null;
-        return data.find((e) => e.type === prev.type && e.id === prev.id) ?? null;
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to refresh");
-    } finally {
-      setLoading(false);
-    }
+    setBrowseList([]);
+    await loadPages(PAGE_TYPES, true);
   };
 
+  const handleLoadMore = useCallback((types: EventPageType[]) => {
+    if (loadingMoreRef.current) return;
+    const loadable = types.filter((type) => nextPageTokensRef.current[type]);
+    if (loadable.length === 0) return;
+    loadingMoreRef.current = true;
+    loadPages(loadable, false).finally(() => {
+      loadingMoreRef.current = false;
+    });
+  }, [loadPages]);
+
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
-    setSelectedEvent(event);
-    setView("player");
-    setPlayerDisplayTime(0);
-    setPlayerIsPlaying(false);
+    selectEvent(event);
     if (filteredList) setBrowseList(filteredList);
     pushedHashRef.current = true;
     location.hash = `/event/${event.type}/${event.id}`;
@@ -251,14 +302,12 @@ export function App() {
       const nextIdx = selectedIdx + direction;
       if (nextIdx >= 0 && nextIdx < navList.length) {
         const next = navList[nextIdx];
-        setSelectedEvent(next);
-        setPlayerDisplayTime(0);
-        setPlayerIsPlaying(false);
+        selectEvent(next);
         // Replace hash (don't push, so back goes to browse not previous event)
         history.replaceState(null, "", `#/event/${next.type}/${next.id}`);
       }
     },
-    [navList, selectedIdx]
+    [navList, selectedIdx, selectEvent]
   );
 
   const handleTimeUpdate = useCallback((time: number, playing: boolean) => {
@@ -266,19 +315,11 @@ export function App() {
     setPlayerIsPlaying((prev) => prev === playing ? prev : playing);
   }, []);
 
-  const handleSetupComplete = () => {
-    setStatus(null);
-    checkStatus();
-  };
-
-  // Show setup screen when server reports not connected
-  if (status && !status.connected) {
-    return (
-      <ErrorBoundary>
-        <SetupScreen setupStep={status.setupStep} onComplete={handleSetupComplete} />
-      </ErrorBoundary>
-    );
-  }
+  const hasMorePages = useMemo(() => ({
+    SavedClips: Boolean(nextPageTokens.SavedClips),
+    SentryClips: Boolean(nextPageTokens.SentryClips),
+    RecentClips: Boolean(nextPageTokens.RecentClips),
+  }), [nextPageTokens]);
 
   return (
     <ErrorBoundary>
@@ -287,9 +328,12 @@ export function App() {
           <EventBrowser
             events={events}
             loading={loading}
+            loadingMore={loadingMore}
             error={error}
             onSelectEvent={handleSelectEvent}
             onRefresh={handleRefresh}
+            onLoadMore={handleLoadMore}
+            hasMore={hasMorePages}
           />
         ) : selectedEvent ? (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>

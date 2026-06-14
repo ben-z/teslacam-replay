@@ -696,7 +696,9 @@
 
 @media (max-width: 480px) {
   .player-segment-group {
-    display: none;
+    order: 9;
+    flex-basis: 100%;
+    justify-content: center;
   }
   .player-videos-grid {
     grid-template-columns: repeat(2, 1fr) !important;

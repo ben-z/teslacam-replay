@@ -21,12 +21,12 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 │  (React + Vite)  │ ──────> │   (Hono + ffmpeg) │
 │                  │         │                    │
 │  GitHub Pages /  │         │  Reads dashcam     │
-│  any static host │         │  files from disk   │
-│                  │         │  or Google Drive   │
+│  any static host │         │  files via         │
+│                  │         │  gdrive-serve-lite │
 └──────────────────┘         └──────────────────┘
 ```
 
-The frontend is a static SPA that can be hosted anywhere. The backend serves the API and streams video via HLS. Storage is pluggable — local disk (default) or Google Drive. They can run on the same machine or separately — the frontend can point to any backend URL.
+The frontend is a static SPA that can be hosted anywhere. The backend serves the API, pages through TeslaCam folders via `gdrive-serve-lite`, and streams video via HLS. `gdrive-serve-lite` owns Google Drive auth, pagination, path resolution, and range-capable file reads.
 
 ## Quick Start
 
@@ -34,7 +34,7 @@ The frontend is a static SPA that can be hosted anywhere. The backend serves the
 
 - Node.js 22+
 - ffmpeg installed and on PATH
-- Tesla dashcam footage (USB drive or synced folder)
+- `gdrive-serve-lite` serving the TeslaCam folder root
 
 ### Local Development
 
@@ -44,9 +44,22 @@ git clone https://github.com/ben-z/teslacam-replay.git
 cd teslacam-replay
 npm install
 
-# Configure
+# Start gdrive-serve-lite separately, for example:
+~/Projects/gdrive-serve-lite/gdrive-serve-lite \
+  --remote gdrive-ro:/teslacam1 \
+  --config ~/Projects/gdrive-serve-lite/rclone-gdrive-ro.conf \
+  --metadata-cache-ttl 5m \
+  --list-cache-ttl 30s \
+  --drive-response-header-timeout 30s \
+  --user gdrive-user \
+  --pass gdrive-password \
+  --allow-origin http://localhost:3000 \
+  --baseurl /gdrive \
+  --addr 127.0.0.1:8765
+
+# Configure this app
 cp .env.example .env
-# Edit .env and set TESLACAM_PATH to your dashcam folder
+# Edit .env if your gdrive-serve-lite URL or credentials differ
 
 # Run (starts both frontend dev server and backend)
 npm run dev
@@ -72,8 +85,9 @@ The Docker image includes both the API server and the frontend. It's automatical
 ```bash
 docker run -d \
   -p 3001:3001 \
-  -v /path/to/TeslaCam:/data:ro \
-  -e TESLACAM_PATH=/data \
+  -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdrive \
+  -e GDRIVE_USER=gdrive-user \
+  -e GDRIVE_PASS=gdrive-password \
   ghcr.io/ben-z/teslacam-replay
 ```
 
@@ -82,8 +96,9 @@ docker run -d \
 ```bash
 docker run -d \
   -p 3001:3001 \
-  -v /path/to/TeslaCam:/data:ro \
-  -e TESLACAM_PATH=/data \
+  -e GDRIVE_BASE_URL=http://host.docker.internal:8765/gdrive \
+  -e GDRIVE_USER=gdrive-user \
+  -e GDRIVE_PASS=gdrive-password \
   -e SERVE_FRONTEND=false \
   ghcr.io/ben-z/teslacam-replay
 ```
@@ -96,7 +111,10 @@ The frontend is automatically deployed to GitHub Pages on push to `main`. To con
 
 1. Start the backend on your machine:
    ```bash
-   TESLACAM_PATH=/path/to/teslacam npm start
+   GDRIVE_BASE_URL=http://127.0.0.1:8765/gdrive \
+   GDRIVE_USER=gdrive-user \
+   GDRIVE_PASS=gdrive-password \
+   npm start
    ```
 
 2. Open the GitHub Pages URL with a `?server=` parameter:
@@ -110,10 +128,15 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 
 | Variable | Required | Description |
 |---|---|---|
-| `STORAGE_BACKEND` | No | `local` (default) or `googledrive` |
-| `TESLACAM_PATH` | Yes (local) | Path to Tesla dashcam folder (e.g., `/mnt/usb/TeslaCam`) |
-| `GOOGLE_DRIVE_CREDENTIALS_FILE` | Yes (googledrive) | Path to OAuth or service account credentials JSON |
-| `GOOGLE_DRIVE_FOLDER_ID` | No | Override root folder ID (defaults to `root_folder_id` in credentials file) |
+| `GDRIVE_BASE_URL` | No | Base URL for `gdrive-serve-lite`, including `--baseurl` if configured. Defaults to `http://127.0.0.1:8765/gdrive` |
+| `GDRIVE_USER` | No | Basic Auth username when `gdrive-serve-lite` uses `--user` |
+| `GDRIVE_PASS` | No | Basic Auth password when `gdrive-serve-lite` uses `--pass` |
+| `GDRIVE_LIST_TIMEOUT_MS` | No | Timeout for each Drive-lite listing page (default: `120000`) |
+| `GDRIVE_METADATA_TIMEOUT_MS` | No | Timeout for small metadata reads such as `event.json` (default: `30000`) |
+| `GDRIVE_READ_TIMEOUT_MS` | No | Timeout for larger file proxy reads used by thumbnails/telemetry (default: `300000`) |
+| `EVENT_PAGE_SIZE` | No | Number of Saved/Sentry event folders requested per browse page (default: `48`; the app requests `24`) |
+| `EVENT_PAGE_SCAN_CONCURRENCY` | No | Number of event folders scanned concurrently while building one page (default: `8`) |
+| `GDRIVE_EVENT_ORDER_BY` | No | Drive order for Saved/Sentry event folders (default: `name desc`) |
 | `PORT` | No | Server port (default: `3001`) |
 | `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
 

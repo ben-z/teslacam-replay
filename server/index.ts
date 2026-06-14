@@ -1,128 +1,46 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
-import { google } from "googleapis";
-import { createHash } from "crypto";
 import { createReadStream } from "fs";
-import { readFile, writeFile, stat, mkdir, readdir, rename, rm, unlink } from "fs/promises";
+import { readFile, stat, readdir, rename, rm } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
-  scanTeslacamFolder,
-  getVideoPath,
-  getThumbnailPath,
+  scanEventFolder,
+  scanRecentClipsPage,
+  getClipSource,
   type DashcamEvent,
+  type EventType,
 } from "./scan.js";
-import { extractTelemetry, type TelemetryData } from "./sei.js";
+import { extractTelemetryFromBuffer, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
-import { LocalStorage, type StorageBackend } from "./storage.js";
-import { GoogleDriveStorage } from "./google-drive.js";
-import { loadSavedAuth, saveAuth } from "./oauth.js";
-import { TOKEN_PATH, EVENTS_CACHE_PATH, HLS_CACHE_DIR, DOWNLOAD_CACHE_DIR } from "./paths.js";
+import { createGDriveLiteFromEnv, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
+import { HLS_CACHE_DIR } from "./paths.js";
 
-// --- Storage backend selection ---
-const STORAGE_BACKEND = process.env.STORAGE_BACKEND || "local";
-const isGoogleDrive = STORAGE_BACKEND === "googledrive";
+const drive = createGDriveLiteFromEnv();
 
-let storage: StorageBackend | null = null;
-let storageCacheKey = "";
-
-// Google Drive OAuth config (available at module level for route handlers)
-const gdClientId = process.env.GOOGLE_DRIVE_CLIENT_ID;
-const gdClientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET;
-
-async function activateStorage(
-  clientId: string,
-  clientSecret: string,
-  refreshToken: string,
-  folderId: string,
-  accessToken?: string,
-  expiryDate?: number,
-): Promise<void> {
-  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
-  oauth2Client.setCredentials({
-    refresh_token: refreshToken,
-    access_token: accessToken,
-    expiry_date: expiryDate,
-  });
-  oauth2Client.on("tokens", async (tokens) => {
-    const saved = await loadSavedAuth();
-    if (saved) {
-      await saveAuth({
-        ...saved,
-        accessToken: tokens.access_token ?? undefined,
-        expiryDate: tokens.expiry_date ?? undefined,
-      });
-    }
-  });
-  const drive = google.drive({ version: "v3", auth: oauth2Client });
-  storage = await GoogleDriveStorage.fromDriveClient(drive, folderId);
-  storageCacheKey = `googledrive:${folderId}`;
-  console.log(`Google Drive storage activated (folder: ${folderId})`);
-}
-
-async function verifyStorage(backend: StorageBackend): Promise<void> {
+async function verifyDrive(): Promise<void> {
   try {
-    const rootEntries = await backend.readdir("");
+    await drive.healthCheck();
+    const rootEntries = (await drive.listRoot()).files.map((entry) => entry.name);
     const expected = ["SavedClips", "SentryClips", "RecentClips"];
     const found = expected.filter((e) => rootEntries.includes(e));
     if (found.length === 0) {
       console.warn("Warning: No TeslaCam folders (SavedClips, SentryClips, RecentClips) found.");
-      console.warn("Check that your storage path/folder contains TeslaCam data.");
+      console.warn("Check that gdrive-serve-lite is serving the TeslaCam folder root.");
     } else {
       console.log(`Found TeslaCam folders: ${found.join(", ")}`);
     }
   } catch (err) {
-    console.error("Error: Failed to access storage:", err instanceof Error ? err.message : err);
+    console.error("Error: Failed to access gdrive-serve-lite:", err instanceof Error ? err.message : err);
+    console.error("Set GDRIVE_BASE_URL, GDRIVE_USER, and GDRIVE_PASS to match gdrive-serve-lite.");
     process.exit(1);
   }
 }
 
-async function initStorage(): Promise<void> {
-  if (isGoogleDrive) {
-    if (!gdClientId || !gdClientSecret) {
-      console.error("Error: GOOGLE_DRIVE_CLIENT_ID and GOOGLE_DRIVE_CLIENT_SECRET are required when STORAGE_BACKEND=googledrive");
-      process.exit(1);
-    }
-
-    const saved = await loadSavedAuth();
-    const refreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN || saved?.refreshToken;
-    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || saved?.folderId;
-
-    if (refreshToken && folderId) {
-      await activateStorage(gdClientId, gdClientSecret, refreshToken, folderId, saved?.accessToken, saved?.expiryDate);
-      await verifyStorage(storage!);
-    } else {
-      console.log("Google Drive storage: waiting for OAuth setup via browser");
-    }
-  } else {
-    const teslacamPath = process.env.TESLACAM_PATH ?? "";
-    if (!teslacamPath) {
-      console.error("Error: TESLACAM_PATH environment variable is required.");
-      console.error("Usage: TESLACAM_PATH=/path/to/teslacam npm run dev:server");
-      process.exit(1);
-    }
-    storage = new LocalStorage(teslacamPath);
-    storageCacheKey = `local:${path.resolve(teslacamPath)}`;
-    console.log(`Using local storage (${teslacamPath})`);
-    await verifyStorage(storage);
-  }
-}
-
-// --- Event cache (memory + disk, with deduplication) ---
-let cachedEvents: DashcamEvent[] | null = null;
-let cachedEventsEtag: string | null = null;
-let scanPromise: Promise<DashcamEvent[]> | null = null;
-let scanIsRefresh = false;
-
-// --- Background auto-refresh ---
-const AUTO_REFRESH_INTERVAL = Math.max(0, parseInt(process.env.AUTO_REFRESH_INTERVAL || "300") || 0);
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let autoRefreshStarted = false;
-
-await initStorage();
+await verifyDrive();
 
 const app = new Hono();
 
@@ -130,134 +48,226 @@ const app = new Hono();
 // (e.g., GitHub Pages pointing at a self-hosted backend)
 app.use("/api/*", cors({
   origin: "*",
-  allowHeaders: ["Content-Type", "If-None-Match"],
-  exposeHeaders: ["ETag"],
+  allowHeaders: ["Content-Type"],
 }));
 app.use("/api/*", compress());
 
-// Guard: return 503 when storage is not yet configured (skip status + oauth routes)
-app.use("/api/*", async (c, next) => {
-  const p = c.req.path;
-  if (p === "/api/status" || p.startsWith("/api/oauth/") || p.startsWith("/api/debug/")) {
-    return next();
+const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
+const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);
+const EVENT_FOLDER_ORDER_BY = process.env.GDRIVE_EVENT_ORDER_BY ?? "name desc";
+const RECENT_FILE_PAGE_SIZE = 1000;
+const EVENT_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
+const eventIndex = new Map<string, DashcamEvent>();
+const typeFolders = new Map<EventType, DriveEntry>();
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function eventKey(type: string, id: string): string {
+  return `${type}:${id}`;
+}
+
+function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEvent {
+  const clipsByTimestamp = new Map(existing.clips.map((clip) => [clip.timestamp, clip]));
+  for (const clip of incoming.clips) {
+    const prev = clipsByTimestamp.get(clip.timestamp);
+    if (!prev) {
+      clipsByTimestamp.set(clip.timestamp, clip);
+      continue;
+    }
+    clipsByTimestamp.set(clip.timestamp, {
+      ...prev,
+      ...clip,
+      cameras: Array.from(new Set([...prev.cameras, ...clip.cameras])),
+      sourceByCamera: {
+        ...prev.sourceByCamera,
+        ...clip.sourceByCamera,
+      },
+      durationSec: Math.max(prev.durationSec, clip.durationSec),
+      subfolder: prev.subfolder ?? clip.subfolder,
+    });
   }
-  if (!storage) {
-    return c.json({ error: "Storage not configured. Complete setup first." }, 503);
+  const clips = Array.from(clipsByTimestamp.values())
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const cameraCount = new Set(clips.flatMap((clip) => clip.cameras)).size;
+  return {
+    ...existing,
+    ...incoming,
+    hasThumbnail: existing.hasThumbnail || incoming.hasThumbnail,
+    thumbnailSource: existing.thumbnailSource ?? incoming.thumbnailSource,
+    clips,
+    totalDurationSec: clips.reduce((sum, clip) => sum + clip.durationSec, 0),
+    cameraCount,
+  };
+}
+
+function rememberEvents(events: DashcamEvent[]): void {
+  for (const event of events) {
+    const key = eventKey(event.type, event.id);
+    const existing = eventIndex.get(key);
+    eventIndex.set(key, existing ? mergeEvent(existing, event) : event);
   }
-  return next();
-});
-
-const CACHE_VERSION = 7;
-
-function computeEventsEtag(events: DashcamEvent[]): string {
-  const hash = createHash("sha1")
-    .update(JSON.stringify(events))
-    .digest("base64url");
-  return `"events-v${CACHE_VERSION}-${hash}"`;
 }
 
-function setCachedEvents(events: DashcamEvent[]): DashcamEvent[] {
-  cachedEvents = events;
-  cachedEventsEtag = computeEventsEtag(events);
-  return events;
+function publicEvent(event: DashcamEvent): DashcamEvent {
+  return {
+    ...event,
+    thumbnailSource: undefined,
+    clips: event.clips.map((clip) => ({
+      timestamp: clip.timestamp,
+      cameras: clip.cameras,
+      durationSec: clip.durationSec,
+      subfolder: clip.subfolder,
+    })),
+  };
 }
 
-function requestHasMatchingEtag(header: string | undefined, etag: string | null): boolean {
-  if (!header || !etag) return false;
-  return header.split(",").map((part) => part.trim()).includes(etag);
+function publicEvents(events: DashcamEvent[]): DashcamEvent[] {
+  return events.map(publicEvent);
 }
 
-function withEventsCacheHeaders(c: Context): void {
-  c.header("Cache-Control", "no-cache");
-  if (cachedEventsEtag) c.header("ETag", cachedEventsEtag);
-}
-
-async function loadDiskCache(): Promise<DashcamEvent[] | null> {
+async function getTypeFolder(type: EventType): Promise<DriveEntry> {
+  const cached = typeFolders.get(type);
+  if (cached) return cached;
+  let folder: DriveEntry | undefined;
   try {
-    const raw = await readFile(EVENTS_CACHE_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    if (
-      !data ||
-      data.version !== CACHE_VERSION ||
-      data.storageKey !== storageCacheKey ||
-      !Array.isArray(data.events)
-    ) {
-      console.log("Disk cache outdated or for different storage, re-scanning");
+    folder = await drive.resolvePath(`/${type}`, "folder");
+  } catch {
+    folder = (await drive.listRoot()).files.find((entry) =>
+      entry.name === type && drive.isFolder(entry)
+    );
+  }
+  if (!folder) {
+    throw new Error(`TeslaCam folder not found: ${type}`);
+  }
+  typeFolders.set(type, folder);
+  return folder;
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }));
+  return results;
+}
+
+async function getEventPage(
+  type: EventType,
+  pageToken: string | undefined,
+  limit: number
+): Promise<{ events: DashcamEvent[]; nextPageToken?: string }> {
+  const folder = await getTypeFolder(type);
+
+  if (type === "RecentClips") {
+    const page = await drive.listFolderPage(drive.folderRef(folder), {
+      type: "files",
+      pageToken,
+      pageSize: RECENT_FILE_PAGE_SIZE,
+      limit: RECENT_FILE_PAGE_SIZE,
+    });
+    const events = (await scanRecentClipsPage(drive, page.files))
+      .sort((a, b) => b.id.localeCompare(a.id));
+    rememberEvents(events);
+    return { events, nextPageToken: page.nextPageToken };
+  }
+
+  const page = await drive.listFolderPage(drive.folderRef(folder), {
+    type: "folders",
+    pageToken,
+    pageSize: Math.min(1000, limit),
+    limit: Math.min(1000, limit),
+    orderBy: EVENT_FOLDER_ORDER_BY || undefined,
+  });
+  const folders = page.files.filter((entry) =>
+    drive.isFolder(entry) && EVENT_FOLDER_PATTERN.test(entry.name)
+  );
+  const scanned = await mapLimit(
+    folders,
+    EVENT_PAGE_SCAN_CONCURRENCY,
+    (entry) => scanEventFolder(drive, type, entry)
+  );
+  const events = scanned
+    .filter((event): event is DashcamEvent => Boolean(event))
+    .sort((a, b) => b.id.localeCompare(a.id));
+  rememberEvents(events);
+  return { events, nextPageToken: page.nextPageToken };
+}
+
+async function findEvent(type: string, id: string): Promise<DashcamEvent | null> {
+  const indexed = eventIndex.get(eventKey(type, id));
+  if (indexed) return indexed;
+
+  if (type === "SavedClips" || type === "SentryClips") {
+    try {
+      const folder = await drive.resolvePath(`/${type}/${id}`, "folder");
+      const event = await scanEventFolder(drive, type, folder);
+      if (event) rememberEvents([event]);
+      return event;
+    } catch {
       return null;
     }
-    console.log(`Loaded ${data.events.length} events from disk cache`);
-    return setCachedEvents(data.events);
-  } catch {
-    return null;
-  }
-}
-
-async function saveDiskCache(events: DashcamEvent[]): Promise<void> {
-  try {
-    await mkdir(path.dirname(EVENTS_CACHE_PATH), { recursive: true });
-    await writeFile(EVENTS_CACHE_PATH, JSON.stringify({
-      version: CACHE_VERSION,
-      storageKey: storageCacheKey,
-      events,
-    }));
-    console.log(`Saved ${events.length} events to disk cache`);
-  } catch (err) {
-    console.error("Failed to save disk cache:", err);
-  }
-}
-
-async function getEvents(forceRefresh = false): Promise<DashcamEvent[]> {
-  if (cachedEvents && !forceRefresh) return cachedEvents;
-
-  // If a scan is already in-flight...
-  if (scanPromise) {
-    // If we want a refresh but the in-flight scan is NOT a refresh,
-    // wait for it to finish, then start a fresh refresh scan
-    if (forceRefresh && !scanIsRefresh) {
-      await scanPromise;
-      return getEvents(true);
-    }
-    return scanPromise;
   }
 
-  scanIsRefresh = forceRefresh;
-  scanPromise = (async () => {
+  if (type === "RecentClips") {
     try {
-      // Try disk cache first (skip for refresh)
-      if (!forceRefresh) {
-        const diskCached = await loadDiskCache();
-        if (diskCached) {
-          return diskCached;
-        }
-      }
-
-      const isIncremental = forceRefresh && cachedEvents !== null;
-      console.log(
-        isIncremental
-          ? "Refreshing events (incremental scan)..."
-          : "Scanning teslacam folder (this may take a few minutes on cloud drives)..."
-      );
-      const start = performance.now();
-      // Incremental: pass existing events so only new folders are scanned
-      const newEvents = await scanTeslacamFolder(
-        storage!,
-        isIncremental ? cachedEvents! : undefined
-      );
-      const elapsed = (performance.now() - start) / 1000;
-      console.log(
-        `Found ${newEvents.length} events in ${elapsed.toFixed(1)}s`
-      );
-      // Only update cache after successful scan (errors propagate, keeping old cache intact)
-      setCachedEvents(newEvents);
-      await saveDiskCache(newEvents);
-      return newEvents;
-    } finally {
-      scanPromise = null;
-      scanIsRefresh = false;
+      const folder = await drive.resolvePath(`/RecentClips/${id.slice(0, 10)}`, "folder");
+      const events = await scanRecentClipsPage(drive, [folder]);
+      rememberEvents(events);
+      return events.find((event) => event.id === id) ?? null;
+    } catch {
+      return null;
     }
-  })();
+  }
 
-  return scanPromise;
+  return null;
+}
+
+async function findRecentClipSource(
+  segment: string,
+  camera: string
+): Promise<DriveFileSource | null> {
+  const candidates = [
+    `/RecentClips/${segment}-${camera}.mp4`,
+    `/RecentClips/${segment.slice(0, 10)}/${segment}-${camera}.mp4`,
+  ];
+
+  for (const filePath of candidates) {
+    try {
+      const file = await drive.resolvePath(filePath, "file");
+      return drive.fileSource(file);
+    } catch {
+      // Try the alternate RecentClips layout.
+    }
+  }
+  return null;
+}
+
+async function findClipSource(
+  type: string,
+  eventId: string,
+  segment: string,
+  camera: string
+): Promise<DriveFileSource | null> {
+  const indexed = eventIndex.get(eventKey(type, eventId));
+  const indexedSource = indexed ? getClipSource(indexed, segment, camera) : null;
+  if (indexedSource) return indexedSource;
+  if (type === "RecentClips") return findRecentClipSource(segment, camera);
+
+  const event = await findEvent(type, eventId);
+  return event ? getClipSource(event, segment, camera) ?? null : null;
 }
 
 // --- Validation ---
@@ -268,56 +278,55 @@ function validateParams(...params: string[]): boolean {
 
 // --- API Routes ---
 
-app.get("/api/status", async (c) => {
-  if (!storage) {
-    // Determine which setup step the user is on
-    const saved = await loadSavedAuth();
-    const setupStep = saved?.refreshToken ? "folder" : "oauth";
-    return c.json({ connected: false, setupStep });
-  }
+app.get("/api/status", (c) => {
   return c.json({
-    connected: true,
-    storageBackend: isGoogleDrive ? "Google Drive" : "Local",
-    storagePath: isGoogleDrive
-      ? `Drive folder ${process.env.GOOGLE_DRIVE_FOLDER_ID || "(cached)"}`
-      : process.env.TESLACAM_PATH,
-    eventCount: cachedEvents?.length ?? null,
-    scanning: scanPromise !== null,
+    storageBackend: "gdrive-serve-lite",
+    storagePath: drive.baseUrl,
   });
 });
 
-app.get("/api/events", async (c) => {
-  const events = await getEvents();
-  withEventsCacheHeaders(c);
-  if (requestHasMatchingEtag(c.req.header("if-none-match"), cachedEventsEtag)) {
-    return c.body(null, 304);
+app.get("/api/events/page", async (c) => {
+  const type = c.req.query("type") as EventType | undefined;
+  if (type !== "SavedClips" && type !== "SentryClips" && type !== "RecentClips") {
+    return c.json({ error: "Invalid event type" }, 400);
   }
-  return c.json(events);
+
+  const limit = Math.min(1000, positiveInt(c.req.query("limit"), EVENT_PAGE_SIZE));
+  try {
+    const page = await getEventPage(type, c.req.query("pageToken") || undefined, limit);
+    return c.json({
+      type,
+      events: publicEvents(page.events),
+      nextPageToken: page.nextPageToken ?? null,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to load event page";
+    return c.json({ error: msg }, 500);
+  }
 });
 
 app.get("/api/events/:type/:id", async (c) => {
   const { type, id } = c.req.param();
   if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
-  const events = await getEvents();
-  const event = events.find((e) => e.type === type && e.id === id);
+  const event = await findEvent(type, id);
   if (!event) return c.json({ error: "Event not found" }, 404);
-  return c.json(event);
+  return c.json(publicEvent(event));
 });
 
 app.get("/api/events/:type/:id/thumbnail", async (c) => {
   const { type, id } = c.req.param();
   if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
-  const thumbRelPath = getThumbnailPath(type, id);
-  try {
-    const stream = await storage!.createReadStream(thumbRelPath);
-    c.header("Content-Type", "image/png");
-    c.header("Cache-Control", "public, max-age=86400");
-    return new Response(Readable.toWeb(stream as Readable) as ReadableStream, {
-      headers: c.res.headers,
-    });
-  } catch {
-    return c.json({ error: "Thumbnail not found" }, 404);
-  }
+  const event = await findEvent(type, id);
+  const source = event?.thumbnailSource;
+  if (!source) return c.json({ error: "Thumbnail not found" }, 404);
+
+  const res = await drive.fetchSource(source);
+  if (!res.ok || !res.body) return c.json({ error: "Thumbnail not found" }, 404);
+
+  const headers = readHeaders(res);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "image/png");
+  headers.set("Cache-Control", "public, max-age=86400");
+  return new Response(res.body, { status: res.status, headers });
 });
 
 // --- Telemetry (SEI extraction with in-memory cache) ---
@@ -349,21 +358,22 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const cached = telemetryCache.get(cacheKey);
   if (cached) return c.json(cached);
 
-  const events = await getEvents();
-  const event = events.find((e) => e.type === type && e.id === eventId);
-  if (!event) return c.json({ error: "Event not found" }, 404);
+  const event = type === "RecentClips"
+    ? eventIndex.get(eventKey(type, eventId)) ?? null
+    : await findEvent(type, eventId);
+  if (!event && type !== "RecentClips") return c.json({ error: "Event not found" }, 404);
 
-  const clip = event.clips.find((cl) => cl.timestamp === segment);
-  if (!clip) return c.json({ error: "Segment not found" }, 404);
+  const clip = event?.clips.find((cl) => cl.timestamp === segment);
+  if (!clip && type !== "RecentClips") return c.json({ error: "Segment not found" }, 404);
 
-  const camera = clip.cameras.includes("front") ? "front" : clip.cameras[0];
-  if (!camera) return c.json({ error: "No camera available" }, 404);
-
-  const videoRelPath = getVideoPath(type, eventId, segment, camera, clip.subfolder);
+  const camera = clip?.cameras.includes("front") ? "front" : clip?.cameras[0] ?? "front";
+  const source = await findClipSource(type, eventId, segment, camera);
+  if (!source) return c.json(NO_SEI);
 
   try {
-    const localPath = await storage!.getLocalPath(videoRelPath);
-    const data = await extractTelemetry(localPath);
+    const res = await drive.fetchSource(source);
+    if (!res.ok) return c.json(NO_SEI);
+    const data = await extractTelemetryFromBuffer(Buffer.from(await res.arrayBuffer()));
     const result: TelemetryResult = data
       ? { hasSei: true, frameTimesMs: data.frameTimesMs, frames: data.frames }
       : NO_SEI;
@@ -383,42 +393,12 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
     return c.json({ error: "Invalid params" }, 400);
   }
 
-  // Look up clip subfolder for RecentClips
-  let subfolder: string | undefined;
-  if (type === "RecentClips") {
-    const events = await getEvents();
-    const event = events.find((e) => e.type === type && e.id === eventId);
-    const clip = event?.clips.find((cl) => cl.timestamp === segment);
-    subfolder = clip?.subfolder;
-  }
-
-  const videoRelPath = getVideoPath(type, eventId, segment, camera, subfolder);
-
-  // Try streaming directly from remote storage (avoids downloading entire file)
-  const streamUrl = await storage!.getStreamUrl?.(videoRelPath) ?? null;
-
-  // Get local file path as fallback (or primary for local storage)
-  let localPath: string;
-  try {
-    localPath = streamUrl
-      ? videoRelPath // placeholder — won't be used by ffmpeg when streamUrl is set
-      : await storage!.getLocalPath(videoRelPath);
-  } catch {
-    return c.json({ error: "Video not found" }, 404);
-  }
-
-  // Verify source file exists locally (skip for streaming)
-  if (!streamUrl) {
-    try {
-      await stat(localPath);
-    } catch {
-      return c.json({ error: "Video not found" }, 404);
-    }
-  }
+  const source = await findClipSource(type, eventId, segment, camera);
+  if (!source) return c.json({ error: "Video not found" }, 404);
 
   // Ensure HLS segments are ready (lazy segmentation)
   const ready = await ensureHlsSegments(
-    { localPath, streamUrl: streamUrl ?? undefined },
+    drive.streamSource(source),
     type, eventId, segment, camera,
   );
   if (!ready) {
@@ -490,22 +470,12 @@ async function dirSizeBytes(dirPath: string): Promise<number> {
 }
 
 app.get("/api/debug/caches", async (c) => {
-  const [diskStat, hlsSize, gdriveSize, tokenStat] = await Promise.all([
-    stat(EVENTS_CACHE_PATH).then((s) => ({ path: EVENTS_CACHE_PATH, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
-    dirSizeBytes(HLS_CACHE_DIR),
-    dirSizeBytes(DOWNLOAD_CACHE_DIR),
-    stat(TOKEN_PATH).then((s) => ({ path: TOKEN_PATH, sizeBytes: s.size })).catch(() => ({ path: null, sizeBytes: 0 })),
-  ]);
+  const hlsSize = await dirSizeBytes(HLS_CACHE_DIR);
 
   return c.json({
     caches: [
-      { id: "events-disk", label: "Event scan cache", path: diskStat.path, sizeBytes: diskStat.sizeBytes },
-      { id: "events-memory", label: "Event scan (memory)", path: null, entryCount: cachedEvents?.length ?? 0 },
       { id: "hls", label: "HLS segments", path: HLS_CACHE_DIR, sizeBytes: hlsSize },
-      { id: "gdrive-downloads", label: "Drive file downloads", path: DOWNLOAD_CACHE_DIR, sizeBytes: gdriveSize },
-      { id: "gdrive-dirs", label: "Drive directory listings (memory)", path: null, entryCount: storage?.cacheEntryCount() ?? 0 },
       { id: "telemetry", label: "Telemetry (memory)", path: null, entryCount: telemetryCache.size },
-      { id: "oauth-token", label: "OAuth token", path: tokenStat.path, sizeBytes: tokenStat.sizeBytes },
     ],
   });
 });
@@ -513,131 +483,19 @@ app.get("/api/debug/caches", async (c) => {
 app.post("/api/debug/caches/:id/clear", async (c) => {
   const { id } = c.req.param();
   switch (id) {
-    case "events-disk":
-      try { await unlink(EVENTS_CACHE_PATH); } catch {}
-      cachedEvents = null;
-      break;
-    case "events-memory":
-      cachedEvents = null;
-      break;
     case "hls": {
       // Rename first (atomic), then delete in background to avoid race with new ffmpeg writes
       const tmp = `${HLS_CACHE_DIR}_del_${Date.now()}`;
       try { await rename(HLS_CACHE_DIR, tmp); rm(tmp, { recursive: true, force: true }).catch(() => {}); } catch {}
       break;
     }
-    case "gdrive-downloads": {
-      const tmp = `${DOWNLOAD_CACHE_DIR}_del_${Date.now()}`;
-      try { await rename(DOWNLOAD_CACHE_DIR, tmp); rm(tmp, { recursive: true, force: true }).catch(() => {}); } catch {}
-      break;
-    }
-    case "gdrive-dirs":
-      if (storage instanceof GoogleDriveStorage) storage.clearAllCaches();
-      break;
     case "telemetry":
       telemetryCache.clear();
-      break;
-    case "oauth-token":
-      try { await unlink(TOKEN_PATH); } catch {}
-      storage = null;
-      storageCacheKey = "";
-      cachedEvents = null;
       break;
     default:
       return c.json({ error: "Unknown cache id" }, 400);
   }
   return c.json({ ok: true });
-});
-
-// --- OAuth setup routes (Google Drive) ---
-
-// Guard: all OAuth routes require Google Drive credentials
-app.use("/api/oauth/*", async (c, next) => {
-  if (!gdClientId || !gdClientSecret) {
-    return c.json({ error: "Google Drive not configured" }, 400);
-  }
-  return next();
-});
-
-app.get("/api/oauth/start", (c) => {
-  const redirectUri = new URL("/api/oauth/callback", c.req.url).toString();
-  const oauth2Client = new google.auth.OAuth2(gdClientId!, gdClientSecret!, redirectUri);
-  const url = oauth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: ["https://www.googleapis.com/auth/drive.readonly"],
-  });
-  return c.json({ url });
-});
-
-app.get("/api/oauth/callback", async (c) => {
-  const code = c.req.query("code");
-  if (!code) return c.json({ error: "Missing code parameter" }, 400);
-
-  const redirectUri = new URL("/api/oauth/callback", c.req.url);
-  redirectUri.search = "";
-  const oauth2Client = new google.auth.OAuth2(gdClientId!, gdClientSecret!, redirectUri.toString());
-
-  try {
-    const { tokens } = await oauth2Client.getToken(code);
-    if (!tokens.refresh_token) {
-      return c.json({ error: "No refresh token received. Try revoking app access and retrying." }, 400);
-    }
-
-    const existing = await loadSavedAuth();
-    await saveAuth({
-      refreshToken: tokens.refresh_token,
-      accessToken: tokens.access_token ?? undefined,
-      expiryDate: tokens.expiry_date ?? undefined,
-      folderId: existing?.folderId,
-    });
-
-    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID || existing?.folderId;
-    if (folderId) {
-      await activateStorage(gdClientId!, gdClientSecret!, tokens.refresh_token, folderId, tokens.access_token ?? undefined, tokens.expiry_date ?? undefined);
-    }
-
-    console.log("OAuth tokens saved successfully");
-    return c.html("<h1>Authorized</h1><p>You can close this tab and return to the app.</p>");
-  } catch (err) {
-    console.error("OAuth token exchange failed:", err);
-    return c.json({ error: "Token exchange failed" }, 500);
-  }
-});
-
-app.post("/api/oauth/select-folder", async (c) => {
-  const body = await c.req.json<{ folderUrl: string }>();
-  const folderUrl = body.folderUrl?.trim();
-  if (!folderUrl) return c.json({ error: "Missing folderUrl" }, 400);
-
-  const match = folderUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
-  const folderId = match ? match[1] : folderUrl;
-  if (!folderId || !/^[a-zA-Z0-9_-]+$/.test(folderId)) {
-    return c.json({ error: "Could not extract a valid folder ID" }, 400);
-  }
-
-  const saved = await loadSavedAuth();
-  if (!saved?.refreshToken) {
-    return c.json({ error: "No OAuth token found. Complete OAuth first." }, 400);
-  }
-
-  await saveAuth({ ...saved, folderId });
-  await activateStorage(gdClientId!, gdClientSecret!, saved.refreshToken, folderId, saved.accessToken, saved.expiryDate);
-  startAutoRefresh();
-
-  return c.json({ ok: true });
-});
-
-app.post("/api/refresh", async (c) => {
-  await storage?.refreshCache?.();
-  try {
-    const events = await getEvents(true);
-    withEventsCacheHeaders(c);
-    return c.json(events);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Scan failed";
-    return c.json({ error: msg }, 500);
-  }
 });
 
 // Serve static files when SERVE_FRONTEND is enabled
@@ -650,39 +508,23 @@ if (process.env.SERVE_FRONTEND === "true") {
   });
 }
 
-function startAutoRefresh(): void {
-  if (autoRefreshStarted) return;
-  autoRefreshStarted = true;
-
-  // Load from disk cache immediately, then kick off a background refresh
-  getEvents()
-    .then(() => getEvents(true))
-    .catch((err) =>
-      console.error("Initial scan failed:", err instanceof Error ? err.message : err)
-    );
-
-  if (AUTO_REFRESH_INTERVAL <= 0) return;
-  autoRefreshTimer = setInterval(async () => {
-    if (!storage || scanPromise) return;
-    try {
-      const before = cachedEvents?.length ?? 0;
-      // Incrementally refresh dir cache (cheap: only queries for new entries since last check).
-      await storage.refreshCache?.();
-      const events = await getEvents(true);
-      const added = events.length - before;
-      if (added > 0) {
-        console.log(`Auto-refresh: found ${added} new event${added !== 1 ? "s" : ""} (${events.length} total)`);
-      } else {
-        console.log(`Auto-refresh: no new events (${events.length} total)`);
-      }
-    } catch (err) {
-      console.error("Auto-refresh failed:", err instanceof Error ? err.message : err);
-    }
-  }, AUTO_REFRESH_INTERVAL * 1000);
-  console.log(`Auto-refresh enabled (every ${AUTO_REFRESH_INTERVAL}s)`);
+function readHeaders(res: Response): Headers {
+  const headers = new Headers();
+  for (const key of [
+    "Content-Type",
+    "Content-Length",
+    "Content-Range",
+    "Accept-Ranges",
+    "ETag",
+    "Last-Modified",
+    "Cache-Control",
+    "Expires",
+  ]) {
+    const value = res.headers.get(key);
+    if (value) headers.set(key, value);
+  }
+  return headers;
 }
-
-if (storage) startAutoRefresh();
 
 const port = parseInt(process.env.PORT || "3001");
 console.log(`TeslaCam Replay server starting on http://localhost:${port}`);
@@ -692,8 +534,6 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
 });
 
 function shutdown() {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  autoRefreshStarted = false;
   server.close();
   process.exit(0);
 }

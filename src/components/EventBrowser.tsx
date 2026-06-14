@@ -1,5 +1,14 @@
 import { Fragment, memo, useState, useMemo, useCallback, useRef, useEffect } from "react";
-import { thumbnailUrl, fetchStatus, fetchCaches, clearCache, getApiBase, type ServerStatus, type CacheInfo } from "../api";
+import {
+  thumbnailUrl,
+  fetchStatus,
+  fetchCaches,
+  clearCache,
+  getApiBase,
+  type EventPageType,
+  type ServerStatus,
+  type CacheInfo,
+} from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
@@ -8,14 +17,16 @@ import "./EventBrowser.css";
 interface Props {
   events: DashcamEvent[];
   loading: boolean;
+  loadingMore: boolean;
   error: string | null;
+  hasMore: Record<EventPageType, boolean>;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
+  onLoadMore: (types: EventPageType[]) => void;
 }
 
 type FilterType = "all" | "SavedClips" | "SentryClips";
 type ViewType = "events" | "recent";
-type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 48;
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -33,6 +44,34 @@ const DATE_GROUP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   year: "numeric",
 });
+const SCAN_FRONTIER_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function timestampToMs(ts: string): number {
+  const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
+  const d = m
+    ? new Date(
+      Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+      Number(m[4]), Number(m[5]), Number(m[6])
+    )
+    : new Date(ts);
+  const ms = d.getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function eventStartMs(event: DashcamEvent): number {
+  return timestampToMs(event.clips[0]?.timestamp ?? event.timestamp);
+}
+
+function formatScanFrontier(ms: number | null): string {
+  if (ms == null) return "not started";
+  return SCAN_FRONTIER_FORMATTER.format(new Date(ms));
+}
 
 function formatTimestamp(ts: string): string {
   try {
@@ -71,21 +110,23 @@ function dateKey(ts: string): string {
 export function EventBrowser({
   events,
   loading,
+  loadingMore,
   error,
+  hasMore: hasMorePages,
   onSelectEvent,
   onRefresh,
+  onLoadMore,
 }: Props) {
   const [view, setView] = useState<ViewType>("events");
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [status, setStatus] = useState<ServerStatus | null>(null);
 
   useEffect(() => {
     fetchStatus().then(setStatus).catch(() => {});
-  }, [events]); // refresh status when events change
+  }, []);
 
   // Debounce search input
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -114,11 +155,8 @@ export function EventBrowser({
           e.reason?.toLowerCase().includes(q)
       );
     }
-    if (sortOrder === "oldest") {
-      result = [...result].reverse();
-    }
     return result;
-  }, [events, view, filter, search, sortOrder]);
+  }, [events, view, filter, search]);
 
   const setFilterAndReset = useCallback((f: FilterType) => {
     setView("events");
@@ -148,28 +186,76 @@ export function EventBrowser({
   }, [filtered]);
 
   const visible = filtered.slice(0, visibleCount);
-  const hasMore = visibleCount < filtered.length;
+  const hasMoreLoaded = view !== "recent" && visibleCount < filtered.length;
+  const pageTypesToLoad = useMemo<EventPageType[]>(() => {
+    if (view === "recent") return ["RecentClips"];
+    if (filter === "all") return ["SavedClips", "SentryClips"];
+    return [filter];
+  }, [filter, view]);
+  const remoteTypesToLoad = useMemo(
+    () => pageTypesToLoad.filter((type) => hasMorePages[type]),
+    [hasMorePages, pageTypesToLoad]
+  );
+  const hasMoreRemote = remoteTypesToLoad.length > 0;
+  const hasMore = hasMoreLoaded || hasMoreRemote;
+  const loadedEventCount = events.length;
+  const recentScanLabel = !hasMorePages.RecentClips
+    ? "Recent scan complete"
+    : loadingMore
+      ? "Scanning older recent clips"
+      : "Ready to scan older clips";
+  const recentScan = useMemo(() => {
+    const recentEvents = events.filter((event) => event.type === "RecentClips");
+    let oldestRecentMs: number | null = null;
+    for (const event of recentEvents) {
+      const ms = eventStartMs(event);
+      if (ms > 0 && (oldestRecentMs == null || ms < oldestRecentMs)) {
+        oldestRecentMs = ms;
+      }
+    }
+
+    const timelineEvents = oldestRecentMs == null
+      ? recentEvents
+      : events.filter((event) =>
+        event.type === "RecentClips" || eventStartMs(event) >= oldestRecentMs
+      );
+
+    return {
+      timelineEvents,
+      frontierLabel: formatScanFrontier(oldestRecentMs),
+    };
+  }, [events]);
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
   );
+  const handleLoadMore = useCallback(() => {
+    if (hasMoreLoaded) {
+      setVisibleCount((c) => c + PAGE_SIZE);
+    } else if (hasMoreRemote && !loadingMore) {
+      onLoadMore(remoteTypesToLoad);
+    }
+  }, [hasMoreLoaded, hasMoreRemote, loadingMore, onLoadMore, remoteTypesToLoad]);
 
   // Infinite scroll: load more when sentinel enters viewport
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const recentTimelineScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
+    const root = view === "recent" ? recentTimelineScrollRef.current : null;
     if (!sentinel || !hasMore) return;
+    if (view === "recent" && !root) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setVisibleCount((c) => c + PAGE_SIZE);
+          handleLoadMore();
         }
       },
-      { rootMargin: "200px" }
+      { root, rootMargin: view === "recent" ? "120px" : "200px" }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, filtered]);
+  }, [hasMore, handleLoadMore, view]);
 
   return (
     <div className="browse-container">
@@ -181,9 +267,9 @@ export function EventBrowser({
               onClick={onRefresh}
               disabled={loading}
               className="browse-refresh-btn"
-              title="Rescan teslacam folder"
+              title="Reload first event pages"
             >
-              {loading ? "Scanning..." : "Refresh"}
+              {loading ? "Loading..." : "Refresh"}
             </button>
           </div>
         </div>
@@ -227,16 +313,6 @@ export function EventBrowser({
                   </button>
                 ))}
               </div>
-              <button
-                onClick={() => {
-                  setSortOrder((s) => (s === "newest" ? "oldest" : "newest"));
-                  setVisibleCount(PAGE_SIZE);
-                }}
-                className="browse-sort-btn"
-                title={`Sort by ${sortOrder === "newest" ? "oldest" : "newest"} first`}
-              >
-                {sortOrder === "newest" ? "Newest" : "Oldest"} &darr;
-              </button>
               <div className="browse-search-wrapper">
                 <input
                   type="text"
@@ -269,11 +345,36 @@ export function EventBrowser({
             <div className="browse-spinner" />
             <p>Loading events...</p>
             <p className="browse-loading-hint">
-              First load may take a few minutes if files are on a cloud drive
+              Loading the first Drive pages
             </p>
           </div>
         ) : view === "recent" ? (
-          <Timeline events={events} onSelectEvent={onSelectEvent} />
+          <div className="recent-view">
+            <div className="recent-scan-status" aria-live="polite">
+              <span className={`recent-scan-dot ${loadingMore ? "active" : ""}`} />
+              <span>{recentScanLabel}</span>
+              <span className="recent-scan-frontier">
+                Scanned back to {recentScan.frontierLabel}
+              </span>
+            </div>
+            <Timeline
+              events={recentScan.timelineEvents}
+              onSelectEvent={onSelectEvent}
+              scrollRef={recentTimelineScrollRef}
+              footer={hasMorePages.RecentClips ? (
+                <div className="browse-load-more browse-load-more--passive" ref={sentinelRef}>
+                  <button
+                    type="button"
+                    className="browse-load-more-hint"
+                    disabled={loadingMore}
+                    onClick={handleLoadMore}
+                  >
+                    {loadingMore ? "Loading older clips..." : "Load older clips"}
+                  </button>
+                </div>
+              ) : null}
+            />
+          </div>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
@@ -317,16 +418,23 @@ export function EventBrowser({
             </div>
             {hasMore && (
               <div className="browse-load-more" ref={sentinelRef}>
-                <span className="browse-load-more-hint">
-                  {filtered.length - visibleCount} more
-                </span>
+                <button
+                  type="button"
+                  className="browse-load-more-hint"
+                  disabled={loadingMore}
+                  onClick={handleLoadMore}
+                >
+                  {hasMoreLoaded
+                    ? `Show ${filtered.length - visibleCount} more events`
+                    : loadingMore ? "Loading..." : "Load more events"}
+                </button>
               </div>
             )}
           </>
         )}
       </div>
 
-      {status?.connected && (
+      {status && (
         <div className="browse-status-bar">
           <span>Server: {getApiBase()}</span>
           <span className="browse-status-sep">&middot;</span>
@@ -337,10 +445,10 @@ export function EventBrowser({
               <span className="browse-status-path">{status.storagePath}</span>
             </>
           )}
-          {status.eventCount != null && (
+          {loadedEventCount > 0 && (
             <>
               <span className="browse-status-sep">&middot;</span>
-              <span>{status.eventCount} events</span>
+              <span>{loadedEventCount} event{loadedEventCount !== 1 ? "s" : ""} loaded</span>
             </>
           )}
           <DebugPanelToggle />

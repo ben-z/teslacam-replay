@@ -1,7 +1,6 @@
 import type { DashcamEvent, TelemetryData } from "./types";
 
 const STORAGE_KEY = "teslacam-replay:api-url";
-const EVENTS_ETAG_KEY = "teslacam-replay:events-etag";
 
 function initApiBase(): string {
   const params = new URLSearchParams(window.location.search);
@@ -22,58 +21,35 @@ function initApiBase(): string {
 }
 
 const API_BASE = initApiBase();
-let eventsMemoryCache: DashcamEvent[] | null = null;
-let eventsEtag: string | null = (() => {
-  try {
-    return localStorage.getItem(EVENTS_ETAG_KEY);
-  } catch {
-    return null;
-  }
-})();
 
 export function getApiBase(): string {
   return API_BASE;
 }
 
-export function primeEventsCache(events: DashcamEvent[]): void {
-  eventsMemoryCache = events;
+export type EventPageType = DashcamEvent["type"];
+
+export interface EventPage {
+  type: EventPageType;
+  events: DashcamEvent[];
+  nextPageToken: string | null;
 }
 
-function storeEventsCache(events: DashcamEvent[], etag: string | null): DashcamEvent[] {
-  eventsMemoryCache = events;
-  if (etag) {
-    eventsEtag = etag;
-    try { localStorage.setItem(EVENTS_ETAG_KEY, etag); } catch {}
-  } else {
-    eventsEtag = null;
-    try { localStorage.removeItem(EVENTS_ETAG_KEY); } catch {}
-  }
-  return events;
+export async function fetchEventPage(
+  type: EventPageType,
+  pageToken?: string | null,
+  limit = 24
+): Promise<EventPage> {
+  const params = new URLSearchParams({ type, limit: String(limit) });
+  if (pageToken) params.set("pageToken", pageToken);
+  const res = await fetch(`${API_BASE}/events/page?${params.toString()}`);
+  if (!res.ok) throw new Error(`Failed to fetch ${type} page: ${res.status}`);
+  return res.json();
 }
 
-export async function fetchEvents(): Promise<DashcamEvent[]> {
-  const headers: HeadersInit = {};
-  if (eventsEtag) headers["If-None-Match"] = eventsEtag;
-
-  const res = await fetch(`${API_BASE}/events`, { headers });
-  if (res.status === 304) {
-    if (eventsMemoryCache) return eventsMemoryCache;
-
-    // The server still has the version identified by our persisted ETag, but
-    // this tab has no in-memory event data to pair with it. Retry once without
-    // the validator so the UI can rebuild its cache.
-    eventsEtag = null;
-    try { localStorage.removeItem(EVENTS_ETAG_KEY); } catch {}
-    return fetchEvents();
-  }
-  if (!res.ok) throw new Error(`Failed to fetch events: ${res.status}`);
-  return storeEventsCache(await res.json(), res.headers.get("ETag"));
-}
-
-export async function refreshEvents(): Promise<DashcamEvent[]> {
-  const res = await fetch(`${API_BASE}/refresh`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to refresh: ${res.status}`);
-  return storeEventsCache(await res.json(), res.headers.get("ETag"));
+export async function fetchEvent(type: string, id: string): Promise<DashcamEvent> {
+  const res = await fetch(`${API_BASE}/events/${type}/${id}`);
+  if (!res.ok) throw new Error(`Failed to fetch event: ${res.status}`);
+  return res.json();
 }
 
 export function thumbnailUrl(type: string, id: string): string {
@@ -96,38 +72,15 @@ export async function fetchTelemetry(
 }
 
 export type ServerStatus =
-  | { connected: false; setupStep: "oauth" | "folder" }
-  | {
-      connected: true;
-      storageBackend: string;
-      storagePath: string;
-      eventCount: number | null;
-      scanning: boolean;
-    };
+  {
+    storageBackend: string;
+    storagePath: string;
+  };
 
 export async function fetchStatus(): Promise<ServerStatus> {
   const res = await fetch(`${API_BASE}/status`);
   if (!res.ok) throw new Error(`Failed to fetch status: ${res.status}`);
   return res.json();
-}
-
-export async function fetchOAuthStartUrl(): Promise<string> {
-  const res = await fetch(`${API_BASE}/oauth/start`);
-  if (!res.ok) throw new Error(`Failed to start OAuth: ${res.status}`);
-  const data = await res.json();
-  return data.url;
-}
-
-export async function submitFolderUrl(folderUrl: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/oauth/select-folder`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ folderUrl }),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({ error: "Failed" }));
-    throw new Error(data.error || `Failed to select folder: ${res.status}`);
-  }
 }
 
 export interface CacheInfo {
