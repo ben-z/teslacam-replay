@@ -237,7 +237,7 @@ export function EventBrowser({
                 className={`browse-view-btn ${view === "recent" ? "active" : ""}`}
                 aria-pressed={view === "recent"}
               >
-                Recent ({counts.recent} session{counts.recent !== 1 ? "s" : ""})
+                Recent ({counts.recent})
               </button>
             )}
           </div>
