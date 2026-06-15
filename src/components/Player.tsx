@@ -783,7 +783,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
           <button onClick={onBack} className="player-back-btn" aria-label="Back to browse">
             &larr; Back
           </button>
-          <span className="player-header-title">No clips available</span>
+          <span className="player-header-title">Videos not available</span>
         </header>
         <div
           style={{
@@ -794,7 +794,7 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
             color: "var(--text-dim)",
           }}
         >
-          This event has no video clips.
+          Videos are not available yet. They may still be uploading.
         </div>
       </div>
     );
