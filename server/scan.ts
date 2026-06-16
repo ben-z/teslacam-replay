@@ -79,7 +79,9 @@ export async function scanEventFolder(
     segmentMap.get(timestamp)!.set(camera, file);
   }
 
-  if (segmentMap.size === 0) return null;
+  const thumbnail = files.find((file) => file.name === "thumb.png");
+
+  if (segmentMap.size === 0 && !eventJson && !thumbnail) return null;
 
   // Build clips array sorted by timestamp, with estimated durations
   const sorted = Array.from(segmentMap.entries())
@@ -91,8 +93,6 @@ export async function scanEventFolder(
     sourceByCamera: sourceByCamera(drive, cameraFiles),
     durationSec: estimateDuration(timestamp, sorted[i + 1]?.[0]),
   }));
-
-  const thumbnail = files.find((file) => file.name === "thumb.png");
 
   return {
     id: folder.name,

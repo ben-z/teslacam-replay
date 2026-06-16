@@ -108,7 +108,13 @@ function fixture(): MockFiles {
       camera: "front",
     }),
     "SavedClips/2025-06-01_18-17-49/thumb.png": "fake-png-data",
-    "SavedClips/2025-01-01_00-00-00/event.json": "{}",
+    "SavedClips/2025-01-01_00-00-00": null,
+    "SavedClips/2026-06-14_19-05-54/event.json": JSON.stringify({
+      timestamp: "2026-06-14T19:05:54",
+      city: "Redwood City",
+      reason: "user_interaction_dashcam_icon_tapped",
+    }),
+    "SavedClips/2026-06-14_19-05-54/thumb.png": "pending-video-thumb",
     "SentryClips/2025-11-08_16-41-34/event.json": JSON.stringify({
       timestamp: "2025-11-08T16:41:34",
       city: "Oakland",
@@ -197,6 +203,24 @@ describe("scanEventFolder", () => {
       "SavedClips",
       drive.entry("SavedClips/does-not-exist", true)
     )).resolves.toBeNull();
+  });
+
+  it("keeps metadata-only event folders visible while video files are pending", async () => {
+    const drive = createMockDrive(fixture());
+    const event = await scanEventFolder(
+      drive,
+      "SavedClips",
+      drive.entry("SavedClips/2026-06-14_19-05-54", true)
+    );
+
+    expect(event?.id).toBe("2026-06-14_19-05-54");
+    expect(event?.timestamp).toBe("2026-06-14T19:05:54");
+    expect(event?.city).toBe("Redwood City");
+    expect(event?.reason).toBe("user_interaction_dashcam_icon_tapped");
+    expect(event?.hasThumbnail).toBe(true);
+    expect(event?.clips).toEqual([]);
+    expect(event?.totalDurationSec).toBe(0);
+    expect(event?.cameraCount).toBe(0);
   });
 
   it("handles six-camera Sentry events", async () => {

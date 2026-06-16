@@ -82,6 +82,7 @@ function formatTimestamp(ts: string): string {
 }
 
 function formatDuration(seconds: number): string {
+  if (seconds <= 0) return "Pending";
   const m = Math.floor(seconds / 60);
   if (m >= 60) {
     const h = Math.floor(m / 60);
@@ -535,8 +536,14 @@ const EventCard = memo(function EventCard({
           </div>
         )}
         <div className="browse-card-meta">
-          {event.clips.length} segments &middot;{" "}
-          {cameraCount} cameras
+          {event.clips.length === 0 ? (
+            "Videos not available yet"
+          ) : (
+            <>
+              {event.clips.length} segments &middot;{" "}
+              {cameraCount} cameras
+            </>
+          )}
           {event.lat != null && event.lon != null && (
             <>
               {" "}&middot;{" "}
