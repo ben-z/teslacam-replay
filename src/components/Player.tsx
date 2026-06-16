@@ -776,30 +776,6 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
 
   const { label: badgeLabel, color: badgeColor } = BADGE_MAP[event.type];
 
-  if (allEventCameras.length === 0) {
-    return (
-      <div className="player-container">
-        <header className="player-header">
-          <button onClick={onBack} className="player-back-btn" aria-label="Back to browse">
-            &larr; Back
-          </button>
-          <span className="player-header-title">Videos not available</span>
-        </header>
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--text-dim)",
-          }}
-        >
-          Videos are not available yet. They may still be uploading.
-        </div>
-      </div>
-    );
-  }
-
   // Zoom/pan calculations for the player timeline
   const viewDuration = totalDuration / zoomLevel;
   const viewStart = Math.max(0, Math.min(viewCenter - viewDuration / 2, totalDuration - viewDuration));
@@ -893,6 +869,30 @@ export function Player({ event, onBack, onNavigate, hasPrev, hasNext, onTimeUpda
   const handleMinimapPointerUp = useCallback(() => {
     minimapDragRef.current = false;
   }, []);
+
+  if (allEventCameras.length === 0) {
+    return (
+      <div className="player-container">
+        <header className="player-header">
+          <button onClick={onBack} className="player-back-btn" aria-label="Back to browse">
+            &larr; Back
+          </button>
+          <span className="player-header-title">Videos not available</span>
+        </header>
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--text-dim)",
+          }}
+        >
+          Videos are not available yet. They may still be uploading.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="player-container" ref={containerRef}>
