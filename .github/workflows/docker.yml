@@ -51,9 +51,16 @@ jobs:
 
   build-app:
     needs: prepare
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.reference.outputs.image }}
+    strategy:
+      matrix:
+        include:
+          - architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -72,19 +79,22 @@ jobs:
         with:
           build-args: SOURCE_SHA=${{ needs.prepare.outputs.sha }}
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.APP_IMAGE_NAME }}:sha-${{ needs.prepare.outputs.sha }}
-      - id: reference
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: echo "image=$IMAGE_REGISTRY/$APP_IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.APP_IMAGE_NAME }}:sha-${{ needs.prepare.outputs.sha }}-${{ matrix.architecture }}
 
   build-gdrive:
     needs: prepare
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.reference.outputs.image }}
+    strategy:
+      matrix:
+        include:
+          - architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -110,16 +120,82 @@ jobs:
           build-args: SOURCE_SHA=${{ env.GDRIVE_SOURCE_SHA }}
           context: ./gdrive-source
           file: ./gdrive-source/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.GDRIVE_IMAGE_NAME }}:sha-${{ env.GDRIVE_SOURCE_SHA }}
-      - id: reference
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.GDRIVE_IMAGE_NAME }}:sha-${{ env.GDRIVE_SOURCE_SHA }}-${{ matrix.architecture }}
+
+  publish-app:
+    needs: [prepare, build-app]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779 # v3.3.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.11.1
+      - id: publish
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: echo "image=$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          tag="$IMAGE_REGISTRY/$APP_IMAGE_NAME:sha-$SOURCE_SHA"
+          docker buildx imagetools create \
+            --tag "$tag" \
+            "$tag-amd64" \
+            "$tag-arm64"
+          manifest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}')"
+          digest="$(jq -er '.digest' <<< "$manifest")"
+          platforms="$(jq -r '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | "\(.platform.os)/\(.platform.architecture)"] | unique | sort | join(",")' <<< "$manifest")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid app manifest digest: $digest" >&2
+            exit 1
+          fi
+          if [[ "$platforms" != "linux/amd64,linux/arm64" ]]; then
+            echo "App manifest has unexpected platforms: $platforms" >&2
+            exit 1
+          fi
+          echo "image=$IMAGE_REGISTRY/$APP_IMAGE_NAME@$digest" >> "$GITHUB_OUTPUT"
+
+  publish-gdrive:
+    needs: build-gdrive
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779 # v3.3.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.11.1
+      - id: publish
+        run: |
+          tag="$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME:sha-$GDRIVE_SOURCE_SHA"
+          docker buildx imagetools create \
+            --tag "$tag" \
+            "$tag-amd64" \
+            "$tag-arm64"
+          manifest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}')"
+          digest="$(jq -er '.digest' <<< "$manifest")"
+          platforms="$(jq -r '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | "\(.platform.os)/\(.platform.architecture)"] | unique | sort | join(",")' <<< "$manifest")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid gdrive manifest digest: $digest" >&2
+            exit 1
+          fi
+          if [[ "$platforms" != "linux/amd64,linux/arm64" ]]; then
+            echo "Gdrive manifest has unexpected platforms: $platforms" >&2
+            exit 1
+          fi
+          echo "image=$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME@$digest" >> "$GITHUB_OUTPUT"
 
   deploy:
-    needs: [prepare, build-app, build-gdrive]
+    needs: [prepare, publish-app, publish-gdrive]
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -147,8 +223,8 @@ jobs:
           admin: false
           use-kubelogin: true
       - env:
-          APP_IMAGE: ${{ needs.build-app.outputs.image }}
-          GDRIVE_IMAGE: ${{ needs.build-gdrive.outputs.image }}
+          APP_IMAGE: ${{ needs.publish-app.outputs.image }}
+          GDRIVE_IMAGE: ${{ needs.publish-gdrive.outputs.image }}
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           TESLACAM_KEY_VAULT_NAME: ${{ vars.TESLACAM_KEY_VAULT_NAME }}
