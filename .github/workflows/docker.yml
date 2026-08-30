@@ -72,7 +72,7 @@ jobs:
         with:
           build-args: SOURCE_SHA=${{ needs.prepare.outputs.sha }}
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE_REGISTRY }}/${{ env.APP_IMAGE_NAME }}:sha-${{ needs.prepare.outputs.sha }}
       - id: reference
@@ -110,7 +110,7 @@ jobs:
           build-args: SOURCE_SHA=${{ env.GDRIVE_SOURCE_SHA }}
           context: ./gdrive-source
           file: ./gdrive-source/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE_REGISTRY }}/${{ env.GDRIVE_IMAGE_NAME }}:sha-${{ env.GDRIVE_SOURCE_SHA }}
       - id: reference
