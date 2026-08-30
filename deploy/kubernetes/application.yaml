@@ -156,18 +156,6 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8765
-            initialDelaySeconds: 2
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8765
-            initialDelaySeconds: 20
-            periodSeconds: 30
           volumeMounts:
             - name: secrets
               mountPath: /mnt/secrets-store
