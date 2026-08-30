@@ -1,37 +1,157 @@
-name: Build Docker Image
+name: Build and Deploy
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [Checks]
+    types: [completed]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
+concurrency:
+  group: teslacam-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  APP_IMAGE_NAME: ben-z/teslacam-replay
+  GDRIVE_IMAGE_NAME: ben-z/teslacam-replay-gdrive-serve-lite
+  GDRIVE_SOURCE_SHA: 3143d06af5d5d324e5a5b3403f15912c93a6c553
 
 jobs:
-  build:
+  prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_REF" != refs/heads/rollback/* ]]; then
+              echo "Manual deployments must use main or rollback/*." >&2
+              exit 1
+            fi
+            source_sha="$DISPATCH_SHA"
+          else
+            source_sha="$AUTOMATIC_SHA"
+          fi
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source SHA: $source_sha" >&2
+            exit 1
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+  build-app:
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          registry: ghcr.io
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779 # v3.3.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@v5
-        id: meta
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.11.1
+      - uses: docker/build-push-action@91df6b874e498451163feb47610c87c4a218c1ee # v6.18.0
+        id: build
         with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=long
-            type=raw,value=latest
-
-      - uses: docker/build-push-action@v6
-        with:
+          build-args: SOURCE_SHA=${{ needs.prepare.outputs.sha }}
           context: .
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.APP_IMAGE_NAME }}:sha-${{ needs.prepare.outputs.sha }}
+      - id: reference
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "image=$IMAGE_REGISTRY/$APP_IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  build-gdrive:
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ben-z/gdrive-serve-lite
+          ref: ${{ env.GDRIVE_SOURCE_SHA }}
+          path: gdrive-source
+      - uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779 # v3.3.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.11.1
+      - run: cp deploy/gdrive-serve-lite.Dockerfile gdrive-source/Dockerfile
+      - uses: docker/build-push-action@91df6b874e498451163feb47610c87c4a218c1ee # v6.18.0
+        id: build
+        with:
+          build-args: SOURCE_SHA=${{ env.GDRIVE_SOURCE_SHA }}
+          context: ./gdrive-source
+          file: ./gdrive-source/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.GDRIVE_IMAGE_NAME }}:sha-${{ env.GDRIVE_SOURCE_SHA }}
+      - id: reference
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "image=$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [prepare, build-app, build-gdrive]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+        with:
+          version: v1.34.8
+      - uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
+        with:
+          kubelogin-version: v0.2.19
+      - uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        with:
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+          admin: false
+          use-kubelogin: true
+      - env:
+          APP_IMAGE: ${{ needs.build-app.outputs.image }}
+          GDRIVE_IMAGE: ${{ needs.build-gdrive.outputs.image }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          TESLACAM_KEY_VAULT_NAME: ${{ vars.TESLACAM_KEY_VAULT_NAME }}
+          TESLACAM_SECRET_IDENTITY_CLIENT_ID: ${{ vars.TESLACAM_SECRET_IDENTITY_CLIENT_ID }}
+          TESLACAM_URL: ${{ vars.TESLACAM_URL }}
+        run: ./deploy/deploy.sh

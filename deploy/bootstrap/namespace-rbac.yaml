@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: teslacam-replay
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.34
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.34
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: teslacam-replay-deployer
+  namespace: teslacam-replay
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services"]
+    verbs: ["create", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["events", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["secrets-store.csi.x-k8s.io"]
+    resources: ["secretproviderclasses"]
+    verbs: ["create", "get", "list", "patch", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: teslacam-replay-deployer
+  namespace: teslacam-replay
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: teslacam-replay-deployer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: __DEPLOYER_PRINCIPAL_ID__

@@ -114,6 +114,8 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 | `GDRIVE_BASE_URL` | No | Base URL for `gdrive-serve-lite`, including `--baseurl` if configured. Defaults to `http://127.0.0.1:8765` |
 | `GDRIVE_USER` | No | Basic Auth username when `gdrive-serve-lite` uses `--user` |
 | `GDRIVE_PASS` | No | Basic Auth password when `gdrive-serve-lite` uses `--pass` |
+| `BASIC_AUTH_USER` | No | HTTP Basic Auth username for the frontend and API; must be set with `BASIC_AUTH_PASSWORD` |
+| `BASIC_AUTH_PASSWORD` | No | HTTP Basic Auth password for the frontend and API; must be set with `BASIC_AUTH_USER` |
 | `GDRIVE_LIST_TIMEOUT_MS` | No | Timeout for each Drive-lite listing page (default: `120000`) |
 | `GDRIVE_METADATA_TIMEOUT_MS` | No | Timeout for small metadata reads such as `event.json` (default: `30000`) |
 | `GDRIVE_READ_TIMEOUT_MS` | No | Timeout for larger file proxy reads used by thumbnails/telemetry (default: `300000`) |
@@ -122,6 +124,9 @@ The server URL is saved to localStorage, so you only need the `?server=` paramet
 | `GDRIVE_EVENT_ORDER_BY` | No | Drive order for Saved/Sentry event folders (default: `name desc`) |
 | `PORT` | No | Server port (default: `3001`) |
 | `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
+
+The production Kubernetes deployment and release procedure are documented in
+[`deploy/README.md`](deploy/README.md).
 
 ## Dashcam Folder Structure
 
