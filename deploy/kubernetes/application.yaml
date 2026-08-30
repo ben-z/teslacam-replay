@@ -1,0 +1,223 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: teslacam-replay
+  namespace: teslacam-replay
+  annotations:
+    azure.workload.identity/client-id: __SECRET_IDENTITY_CLIENT_ID__
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: teslacam-replay
+  namespace: teslacam-replay
+spec:
+  provider: azure
+  parameters:
+    usePodIdentity: "false"
+    useVMManagedIdentity: "false"
+    clientID: __SECRET_IDENTITY_CLIENT_ID__
+    keyvaultName: __KEY_VAULT_NAME__
+    tenantId: __AZURE_TENANT_ID__
+    objects: |
+      array:
+        - |
+          objectName: teslacam-rclone-config
+          objectType: secret
+          objectAlias: rclone.conf
+        - |
+          objectName: teslacam-basic-auth-user
+          objectType: secret
+          objectAlias: basic-auth-user
+        - |
+          objectName: teslacam-basic-auth-password
+          objectType: secret
+          objectAlias: basic-auth-password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teslacam-replay
+  namespace: teslacam-replay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: teslacam-replay
+  template:
+    metadata:
+      labels:
+        app: teslacam-replay
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: teslacam-replay
+      nodeSelector:
+        kubernetes.azure.com/scalesetpriority: spot
+      tolerations:
+        - key: kubernetes.azure.com/scalesetpriority
+          operator: Equal
+          value: spot
+          effect: NoSchedule
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: teslacam-replay
+          image: __APP_IMAGE__
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export BASIC_AUTH_USER="$(cat /mnt/secrets-store/basic-auth-user)"
+              export BASIC_AUTH_PASSWORD="$(cat /mnt/secrets-store/basic-auth-password)"
+              until node -e 'fetch("http://127.0.0.1:8765/healthz").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'; do
+                echo "Waiting for gdrive-serve-lite"
+                sleep 2
+              done
+              exec node --import tsx/esm server/index.ts
+          env:
+            - name: CACHE_DIR
+              value: /cache
+            - name: GDRIVE_BASE_URL
+              value: http://127.0.0.1:8765
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            - name: SERVE_FRONTEND
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 3001
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: 1800m
+              memory: 3Gi
+              ephemeral-storage: 20Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 15
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+        - name: gdrive-serve-lite
+          image: __GDRIVE_IMAGE__
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          args:
+            - --remote
+            - gdrive-ro:/teslacam1
+            - --addr
+            - 127.0.0.1:8765
+            - --config
+            - /mnt/secrets-store/rclone.conf
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8765
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8765
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          volumeMounts:
+            - name: secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: 20Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: teslacam-replay
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teslacam-replay
+  namespace: teslacam-replay
+spec:
+  selector:
+    app: teslacam-replay
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3001
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: teslacam-replay
+  namespace: teslacam-replay
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: teslacam-replay.benzhang.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: teslacam-replay
+                port:
+                  number: 80

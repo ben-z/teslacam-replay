@@ -18,6 +18,7 @@ import { extractTelemetryFromBuffer, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { createGDriveLiteFromEnv, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
 import { HLS_CACHE_DIR } from "./paths.js";
+import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 
 const drive = createGDriveLiteFromEnv();
 
@@ -43,6 +44,32 @@ async function verifyDrive(): Promise<void> {
 await verifyDrive();
 
 const app = new Hono();
+const basicAuth = basicAuthConfigFromEnv();
+const appVersion = process.env.APP_VERSION || "dev";
+
+app.use("*", async (c, next) => {
+  if (!basicAuth || c.req.path === "/healthz" || c.req.path === "/api/version") {
+    return next();
+  }
+  if (isBasicAuthAuthorized(c.req.header("Authorization"), basicAuth)) {
+    return next();
+  }
+
+  c.header("WWW-Authenticate", 'Basic realm="TeslaCam Replay", charset="UTF-8"');
+  return c.text("Authentication required", 401);
+});
+
+app.get("/healthz", async (c) => {
+  try {
+    await drive.healthCheck();
+    return c.json({ status: "ok" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Drive health check failed";
+    return c.json({ status: "error", error: message }, 503);
+  }
+});
+
+app.get("/api/version", (c) => c.json({ version: appVersion }));
 
 // CORS: allow cross-origin requests so the frontend can be hosted separately
 // (e.g., GitHub Pages pointing at a self-hosted backend)
