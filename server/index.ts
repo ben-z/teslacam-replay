@@ -3,13 +3,13 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
+import { HTTPException } from "hono/http-exception";
 import { createReadStream } from "fs";
 import { readFile, stat, readdir, rename, rm } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
   scanEventFolder,
-  scanRecentClipsPage,
   getClipSource,
   type DashcamEvent,
   type EventType,
@@ -19,21 +19,23 @@ import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { createGDriveLiteFromEnv, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
 import { HLS_CACHE_DIR } from "./paths.js";
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
+import { RecentArchive } from "./recent-archive.js";
 
 const drive = createGDriveLiteFromEnv();
 
-async function verifyDrive(): Promise<void> {
+async function verifyDrive(): Promise<DriveEntry[]> {
   try {
     await drive.healthCheck();
-    const rootEntries = (await drive.listRoot()).files.map((entry) => entry.name);
+    const rootEntries = (await drive.listRoot()).files;
     const expected = ["SavedClips", "SentryClips", "RecentClips"];
-    const found = expected.filter((e) => rootEntries.includes(e));
+    const found = expected.filter((name) => rootEntries.some((entry) => entry.name === name));
     if (found.length === 0) {
       console.warn("Warning: No TeslaCam folders (SavedClips, SentryClips, RecentClips) found.");
       console.warn("Check that gdrive-serve-lite is serving the TeslaCam folder root.");
     } else {
       console.log(`Found TeslaCam folders: ${found.join(", ")}`);
     }
+    return rootEntries;
   } catch (err) {
     console.error("Error: Failed to access gdrive-serve-lite:", err instanceof Error ? err.message : err);
     console.error("Set GDRIVE_BASE_URL, GDRIVE_USER, and GDRIVE_PASS to match gdrive-serve-lite.");
@@ -41,7 +43,7 @@ async function verifyDrive(): Promise<void> {
   }
 }
 
-await verifyDrive();
+const recentArchive = new RecentArchive(drive, await verifyDrive());
 
 const app = new Hono();
 const basicAuth = basicAuthConfigFromEnv();
@@ -82,7 +84,6 @@ app.use("/api/*", compress());
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
 const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);
 const EVENT_FOLDER_ORDER_BY = process.env.GDRIVE_EVENT_ORDER_BY ?? "name desc";
-const RECENT_FILE_PAGE_SIZE = 1000;
 const EVENT_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
 
 const eventIndex = new Map<string, DashcamEvent>();
@@ -196,21 +197,13 @@ async function getEventPage(
   pageToken: string | undefined,
   limit: number
 ): Promise<{ events: DashcamEvent[]; nextPageToken?: string }> {
-  const folder = await getTypeFolder(type);
-
   if (type === "RecentClips") {
-    const page = await drive.listFolderPage(drive.folderRef(folder), {
-      type: "files",
-      pageToken,
-      pageSize: RECENT_FILE_PAGE_SIZE,
-      limit: RECENT_FILE_PAGE_SIZE,
-    });
-    const events = (await scanRecentClipsPage(drive, page.files))
-      .sort((a, b) => b.id.localeCompare(a.id));
-    rememberEvents(events);
-    return { events, nextPageToken: page.nextPageToken };
+    const page = await recentArchive.page(pageToken);
+    rememberEvents(page.events);
+    return page;
   }
 
+  const folder = await getTypeFolder(type);
   const page = await drive.listFolderPage(drive.folderRef(folder), {
     type: "folders",
     pageToken,
@@ -249,36 +242,11 @@ async function findEvent(type: string, id: string): Promise<DashcamEvent | null>
   }
 
   if (type === "RecentClips") {
-    try {
-      const folder = await drive.resolvePath(`/RecentClips/${id.slice(0, 10)}`, "folder");
-      const events = await scanRecentClipsPage(drive, [folder]);
-      rememberEvents(events);
-      return events.find((event) => event.id === id) ?? null;
-    } catch {
-      return null;
-    }
+    const event = await recentArchive.findEvent(id);
+    if (event) rememberEvents([event]);
+    return event;
   }
 
-  return null;
-}
-
-async function findRecentClipSource(
-  segment: string,
-  camera: string
-): Promise<DriveFileSource | null> {
-  const candidates = [
-    `/RecentClips/${segment}-${camera}.mp4`,
-    `/RecentClips/${segment.slice(0, 10)}/${segment}-${camera}.mp4`,
-  ];
-
-  for (const filePath of candidates) {
-    try {
-      const file = await drive.resolvePath(filePath, "file");
-      return drive.fileSource(file);
-    } catch {
-      // Try the alternate RecentClips layout.
-    }
-  }
   return null;
 }
 
@@ -291,7 +259,7 @@ async function findClipSource(
   const indexed = eventIndex.get(eventKey(type, eventId));
   const indexedSource = indexed ? getClipSource(indexed, segment, camera) : null;
   if (indexedSource) return indexedSource;
-  if (type === "RecentClips") return findRecentClipSource(segment, camera);
+  if (type === "RecentClips") return recentArchive.findClipSource(segment, camera);
 
   const event = await findEvent(type, eventId);
   return event ? getClipSource(event, segment, camera) ?? null : null;
@@ -327,6 +295,7 @@ app.get("/api/events/page", async (c) => {
       nextPageToken: page.nextPageToken ?? null,
     });
   } catch (err) {
+    if (err instanceof HTTPException) throw err;
     const msg = err instanceof Error ? err.message : "Failed to load event page";
     return c.json({ error: msg }, 500);
   }

@@ -62,6 +62,8 @@ export interface DriveListPageOptions {
   orderBy?: string;
 }
 
+export class DriveNotFoundError extends Error {}
+
 export function createGDriveLiteFromEnv(): GDriveLiteClient {
   return new GDriveLiteClient({
     baseUrl: process.env.GDRIVE_BASE_URL || DEFAULT_BASE_URL,
@@ -131,6 +133,7 @@ export class GDriveLiteClient {
       signal: AbortSignal.timeout(this.metadataTimeoutMs),
     });
     if (!res.ok) {
+      if (res.status === 404) throw new DriveNotFoundError(`Drive path not found: ${path}`);
       throw new Error(`Failed to resolve Drive path ${path}: ${res.status}`);
     }
     const data = await res.json() as ResolveResponse;
