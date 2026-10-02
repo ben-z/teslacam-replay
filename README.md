@@ -130,7 +130,7 @@ The production Kubernetes deployment and release procedure are documented in
 
 ## Dashcam Folder Structure
 
-TeslaCam Replay expects the standard Tesla dashcam folder layout:
+TeslaCam Replay reads the standard Tesla dashcam folders and TeslaUSB archives:
 
 ```
 TeslaCam/
@@ -143,10 +143,18 @@ TeslaCam/
 ├── SentryClips/
 │   └── 2026-01-15_14-20-00/
 │       └── ...
-└── RecentClips/
-    └── 2026-01-15_10-30-00-front.mp4
-    └── ...
+├── RecentClips/
+│   ├── 2026-01-15_10-30-00-front.mp4
+│   └── 2026-01-16/
+│       └── 2026-01-16_10-30-00-front.mp4
+└── RecentClips-before-2026-01-16/
+    └── 2026-01-14_10-30-00-front.mp4
 ```
+
+Recent footage can be stored directly in `RecentClips` or in its `YYYY-MM-DD`
+subfolders. Preserved archives named `RecentClips-before-YYYY-MM-DD` are included
+after the current archive. Browsing pages each folder separately and ignores the
+`metadata` subfolder. These roots are discovered when the server starts.
 
 ## Related
 
