@@ -192,8 +192,6 @@ kind: Ingress
 metadata:
   name: teslacam-replay-private
   namespace: teslacam-replay
-  annotations:
-    private-ingress.unicorns.dev/publish-dns: "true"
 spec:
   ingressClassName: tailnet
   rules:

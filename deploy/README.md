@@ -14,7 +14,7 @@ and all footage APIs require HTTP Basic Auth.
 Run `deploy/bootstrap/bootstrap.sh` as an Azure and GitHub repository
 administrator, with `TAILSCALE_API_TOKEN` set to a bootstrap access token
 with the `federated_keys` scope and `TAILSCALE_CI_TAG` set to
-`tag:unicorns-ci-teslacam-replay`. It creates the Azure deployment/workload
+`tag:unicorns-private-ci`. It creates the Azure deployment/workload
 identities, dedicated Key Vault, namespace RBAC, exact GitHub production
 Tailscale identity, and GitHub `production` environment variables.
 
@@ -44,15 +44,17 @@ rm -f -- "$task_password_file"
 
 ## Routing
 
-The app declares its hostname and backend on an Ingress with class `tailnet`
-and annotation `private-ingress.unicorns.dev/publish-dns: "true"`. Shared
-ExternalDNS manages a DNS-only Cloudflare A record pointing to the private
-gateway's Tailscale address. The shared gateway manages automatic HTTPS.
+The app declares its hostname and backend on an Ingress with class `tailnet`.
+Shared infrastructure manages a DNS-only Cloudflare wildcard A record for
+`*.benzhang.dev` pointing to the private gateway's Tailscale address. The shared
+gateway manages automatic HTTPS. Apps need no individual DNS registration.
 
-For a migration canary, apply `teslacam-replay-private` without the DNS
-annotation and verify the existing hostname with `curl --resolve`. Once its
-status advertises the private address and playback passes, enable the DNS
-annotation. Remove the old public Ingress after private DNS and access pass.
+For a migration canary, apply `teslacam-replay-private` and verify the existing
+hostname with `curl --resolve`. Once its status advertises the private address
+and playback passes, remove the hostname's old explicit DNS records so the
+wildcard applies. Remove the old public Ingress after private DNS and access
+pass. Existing explicit records for other apps continue to take precedence
+over the wildcard.
 
 ## Release
 
