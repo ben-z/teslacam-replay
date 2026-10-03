@@ -101,6 +101,60 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(self.api_writes, [])
         self.assertEqual(self.variable_writes, [])
 
+    def test_null_key_list_supports_first_registration(self):
+        original = self.api
+
+        def null_empty_list(config, method, path, body):
+            if method == "GET" and path.endswith("?all=true"):
+                return {"keys": None}
+            return original(config, method, path, body)
+
+        with patch.object(tailscale, "api", side_effect=null_empty_list):
+            tailscale.reconcile(self.config)
+        self.assertEqual(self.api_writes, [("POST", tailscale.KEYS_PATH, self.desired)])
+        self.assertEqual(self.variables["TAILSCALE_CLIENT_ID"], "test-client")
+
+    def test_null_key_list_does_not_prove_federated_write_permission(self):
+        attempts = []
+
+        def denied_registration(config, method, path, body):
+            if method == "GET" and path.endswith("?all=true"):
+                return {"keys": None}
+            attempts.append((method, path, body))
+            raise HTTPError("https://api.tailscale.com/api/v2" + path, 403, "Forbidden", {}, None)
+
+        with patch.object(tailscale, "api", side_effect=denied_registration):
+            with self.assertRaises(HTTPError) as caught:
+                tailscale.reconcile(self.config)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(attempts, [("POST", tailscale.KEYS_PATH, self.desired)])
+        self.assertEqual(self.variable_writes, [])
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_null_key_list_does_not_replace_saved_identity(self):
+        self.keys["test-client"] = copy.deepcopy(self.identity)
+        self.variables["TAILSCALE_CLIENT_ID"] = "test-client"
+        original = self.api
+
+        def hidden_identity_list(config, method, path, body):
+            if method == "GET" and path.endswith("?all=true"):
+                return {"keys": None}
+            return original(config, method, path, body)
+
+        with patch.object(tailscale, "api", side_effect=hidden_identity_list):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                tailscale.reconcile(self.config)
+        self.assertEqual(self.api_writes, [])
+        self.assertEqual(self.variable_writes, [])
+
+    def test_malformed_key_lists_fail_before_writes(self):
+        for listing in (None, [], {}, {"keys": {}}, {"keys": ""}, {"keys": False}):
+            with self.subTest(listing=listing), patch.object(tailscale, "api", return_value=listing):
+                with self.assertRaisesRegex(ValueError, "Tailscale key listing"):
+                    tailscale.reconcile(self.config)
+                self.assertEqual(self.api_writes, [])
+                self.assertEqual(self.variable_writes, [])
+
     def test_mixed_key_listing_does_not_read_non_federated_details(self):
         for key_type in ("auth", "client", "api"):
             self.keys[key_type] = {"id": key_type, "keyType": key_type}
@@ -230,6 +284,14 @@ class FederationTests(unittest.TestCase):
 
 
 class InputTests(unittest.TestCase):
+    def test_access_token_is_opaque(self):
+        with patch.dict(os.environ, {
+            "TAILSCALE_API_TOKEN": "opaque-OAuth-access-token", "TAILSCALE_CI_TAG": "tag:ci"
+        }, clear=True):
+            config = tailscale.load_config()
+        self.assertEqual(config.api_token, "opaque-OAuth-access-token")
+        self.assertNotIn(config.api_token, repr(config))
+
     def test_missing_inputs_fail(self):
         for environment in ({}, {"TAILSCALE_API_TOKEN": "token"}, {"TAILSCALE_CI_TAG": "tag:ci"}):
             with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):

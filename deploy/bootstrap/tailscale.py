@@ -104,7 +104,15 @@ def reconcile(config):
         )
     }
     matches = []
-    for key in api(config, "GET", KEYS_PATH + "?all=true", None)["keys"]:
+    listing = api(config, "GET", KEYS_PATH + "?all=true", None)
+    if not isinstance(listing, dict) or "keys" not in listing:
+        raise ValueError("Tailscale key listing must be an object with a keys field")
+    keys = listing["keys"]
+    if keys is None:
+        keys = []
+    elif not isinstance(keys, list):
+        raise ValueError("Tailscale key listing keys field must be an array or null")
+    for key in keys:
         if key["keyType"] != "federated":
             continue
         identity = api(config, "GET", KEYS_PATH + "/" + quote(key["id"], safe=""), None)
