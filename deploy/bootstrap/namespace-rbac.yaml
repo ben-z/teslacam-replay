@@ -3,6 +3,7 @@ kind: Namespace
 metadata:
   name: teslacam-replay
   labels:
+    unicorns.dev/satellite: "true"
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.34
     pod-security.kubernetes.io/enforce: restricted

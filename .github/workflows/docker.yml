@@ -5,6 +5,19 @@ on:
     workflows: [Checks]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      rollback_app_image:
+        description: Previously deployed app image digest
+        type: string
+      rollback_gdrive_image:
+        description: Previously deployed Drive sidecar image digest
+        type: string
+      rollback_source_sha:
+        description: Full source SHA of the rollback app image
+        type: string
+
+permissions:
+  contents: read
 
 concurrency:
   group: teslacam-production
@@ -27,30 +40,52 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      rollback: ${{ steps.source.outputs.rollback }}
+      app_image: ${{ steps.source.outputs.app_image }}
+      gdrive_image: ${{ steps.source.outputs.gdrive_image }}
     steps:
       - id: source
         env:
           EVENT_NAME: ${{ github.event_name }}
           AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
           DISPATCH_SHA: ${{ github.sha }}
+          ROLLBACK_APP_IMAGE: ${{ inputs.rollback_app_image }}
+          ROLLBACK_GDRIVE_IMAGE: ${{ inputs.rollback_gdrive_image }}
+          ROLLBACK_SOURCE_SHA: ${{ inputs.rollback_source_sha }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_REF" != refs/heads/rollback/* ]]; then
-              echo "Manual deployments must use main or rollback/*." >&2
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "Deployments and image rollbacks must use the main workflow." >&2
               exit 1
             fi
             source_sha="$DISPATCH_SHA"
           else
             source_sha="$AUTOMATIC_SHA"
           fi
+          rollback=false
+          if [[ -n "$ROLLBACK_APP_IMAGE$ROLLBACK_GDRIVE_IMAGE$ROLLBACK_SOURCE_SHA" ]]; then
+            if [[ "$EVENT_NAME" != "workflow_dispatch" ||
+                  ! "$ROLLBACK_APP_IMAGE" =~ ^ghcr\.io/ben-z/teslacam-replay@sha256:[0-9a-f]{64}$ ||
+                  ! "$ROLLBACK_GDRIVE_IMAGE" =~ ^ghcr\.io/ben-z/teslacam-replay-gdrive-serve-lite@sha256:[0-9a-f]{64}$ ||
+                  ! "$ROLLBACK_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Rollback requires both immutable image digests and their full source SHA." >&2
+              exit 1
+            fi
+            source_sha="$ROLLBACK_SOURCE_SHA"
+            rollback=true
+          fi
           if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Invalid source SHA: $source_sha" >&2
             exit 1
           fi
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "rollback=$rollback" >> "$GITHUB_OUTPUT"
+          echo "app_image=$ROLLBACK_APP_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "gdrive_image=$ROLLBACK_GDRIVE_IMAGE" >> "$GITHUB_OUTPUT"
 
   build-app:
     needs: prepare
+    if: needs.prepare.outputs.rollback == 'false'
     strategy:
       matrix:
         include:
@@ -85,6 +120,7 @@ jobs:
 
   build-gdrive:
     needs: prepare
+    if: needs.prepare.outputs.rollback == 'false'
     strategy:
       matrix:
         include:
@@ -126,6 +162,9 @@ jobs:
 
   publish-app:
     needs: [prepare, build-app]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' &&
+      (needs.prepare.outputs.rollback == 'true' || needs.build-app.result == 'success')
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.publish.outputs.image }}
@@ -141,12 +180,17 @@ jobs:
       - id: publish
         env:
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          ROLLBACK_IMAGE: ${{ needs.prepare.outputs.app_image }}
         run: |
-          tag="$IMAGE_REGISTRY/$APP_IMAGE_NAME:sha-$SOURCE_SHA"
-          docker buildx imagetools create \
-            --tag "$tag" \
-            "$tag-amd64" \
-            "$tag-arm64"
+          if [[ -n "$ROLLBACK_IMAGE" ]]; then
+            tag="$ROLLBACK_IMAGE"
+          else
+            tag="$IMAGE_REGISTRY/$APP_IMAGE_NAME:sha-$SOURCE_SHA"
+            docker buildx imagetools create \
+              --tag "$tag" \
+              "$tag-amd64" \
+              "$tag-arm64"
+          fi
           manifest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}')"
           digest="$(jq -er '.digest' <<< "$manifest")"
           platforms="$(jq -r '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | "\(.platform.os)/\(.platform.architecture)"] | unique | sort | join(",")' <<< "$manifest")"
@@ -158,10 +202,20 @@ jobs:
             echo "App manifest has unexpected platforms: $platforms" >&2
             exit 1
           fi
+          for image_digest in $(jq -r '.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | .digest' <<< "$manifest"); do
+            image_config="$(docker buildx imagetools inspect "$IMAGE_REGISTRY/$APP_IMAGE_NAME@$image_digest" --format '{{json .Image}}')"
+            if ! jq -e --arg sha "$SOURCE_SHA" '.config.Labels["org.opencontainers.image.revision"] == $sha' <<< "$image_config" >/dev/null; then
+              echo "App image revision does not match the requested source SHA." >&2
+              exit 1
+            fi
+          done
           echo "image=$IMAGE_REGISTRY/$APP_IMAGE_NAME@$digest" >> "$GITHUB_OUTPUT"
 
   publish-gdrive:
-    needs: build-gdrive
+    needs: [prepare, build-gdrive]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' &&
+      (needs.prepare.outputs.rollback == 'true' || needs.build-gdrive.result == 'success')
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.publish.outputs.image }}
@@ -175,12 +229,18 @@ jobs:
           password: ${{ github.token }}
       - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.11.1
       - id: publish
+        env:
+          ROLLBACK_IMAGE: ${{ needs.prepare.outputs.gdrive_image }}
         run: |
-          tag="$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME:sha-$GDRIVE_SOURCE_SHA"
-          docker buildx imagetools create \
-            --tag "$tag" \
-            "$tag-amd64" \
-            "$tag-arm64"
+          if [[ -n "$ROLLBACK_IMAGE" ]]; then
+            tag="$ROLLBACK_IMAGE"
+          else
+            tag="$IMAGE_REGISTRY/$GDRIVE_IMAGE_NAME:sha-$GDRIVE_SOURCE_SHA"
+            docker buildx imagetools create \
+              --tag "$tag" \
+              "$tag-amd64" \
+              "$tag-arm64"
+          fi
           manifest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}')"
           digest="$(jq -er '.digest' <<< "$manifest")"
           platforms="$(jq -r '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | "\(.platform.os)/\(.platform.architecture)"] | unique | sort | join(",")' <<< "$manifest")"
@@ -196,6 +256,9 @@ jobs:
 
   deploy:
     needs: [prepare, publish-app, publish-gdrive]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success' &&
+      needs.publish-app.result == 'success' && needs.publish-gdrive.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -204,7 +267,23 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          ref: ${{ github.sha }}
+      - name: Check private deployment identity
+        env:
+          TAILSCALE_CLIENT_ID: ${{ vars.TAILSCALE_CLIENT_ID }}
+          TAILSCALE_AUDIENCE: ${{ vars.TAILSCALE_AUDIENCE }}
+          TAILSCALE_CI_TAG: ${{ vars.TAILSCALE_CI_TAG }}
+        run: |
+          : "${TAILSCALE_CLIENT_ID:?Missing production TAILSCALE_CLIENT_ID}"
+          : "${TAILSCALE_AUDIENCE:?Missing production TAILSCALE_AUDIENCE}"
+          : "${TAILSCALE_CI_TAG:?Missing production TAILSCALE_CI_TAG}"
+      - uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TAILSCALE_CLIENT_ID }}
+          audience: ${{ vars.TAILSCALE_AUDIENCE }}
+          tags: ${{ vars.TAILSCALE_CI_TAG }}
+          version: 1.102.5
+          args: --accept-dns=false --accept-routes=false
       - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -212,7 +291,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
         with:
-          version: v1.34.8
+          version: v1.35.7
       - uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.2
         with:
           kubelogin-version: v0.2.19

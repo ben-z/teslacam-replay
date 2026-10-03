@@ -11,12 +11,14 @@ readonly GITHUB_ENVIRONMENT="production"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 
-for task_command in az gh jq sed; do
+for task_command in az gh jq sed python3; do
   if ! command -v "$task_command" >/dev/null 2>&1; then
     echo "Missing required command: $task_command" >&2
     exit 1
   fi
 done
+
+python3 "$SCRIPT_DIR/tailscale.py" --check
 
 if ! az bicep version >/dev/null 2>&1; then
   echo "Missing Azure Bicep CLI. Run: az bicep install" >&2
@@ -29,6 +31,54 @@ if [[ "$task_repo_admin" != "true" ]]; then
   echo "GitHub authentication must have administrator access to $GITHUB_REPOSITORY." >&2
   exit 1
 fi
+
+gh api --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT" \
+  --input - <<'JSON' >/dev/null
+{
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  }
+}
+JSON
+
+ensure_deployment_branch_policy() {
+  local task_pattern="$1"
+  local task_count
+  task_count="$(gh api \
+    "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
+    --jq "[.branch_policies[] | select(.name == \"$task_pattern\" and .type == \"branch\")] | length")"
+  if [[ "$task_count" == "0" ]]; then
+    gh api --method POST \
+      "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
+      -f name="$task_pattern" -f type=branch --silent
+  elif [[ "$task_count" != "1" ]]; then
+    echo "Expected exactly one deployment policy for $task_pattern." >&2
+    exit 1
+  fi
+}
+
+ensure_deployment_branch_policy main
+task_rollback_policy_ids="$(gh api \
+  "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
+  --jq '.branch_policies[] | select(.name == "rollback/*" and .type == "branch") | .id')"
+for task_policy_id in $task_rollback_policy_ids; do
+  gh api --method DELETE \
+    "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies/$task_policy_id" \
+    --silent
+done
+task_main_policy_count="$(gh api \
+  "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
+  --jq '[.branch_policies[] | select(.name != "main" or .type != "branch")] | length')"
+if [[ "$task_main_policy_count" != "0" ]]; then
+  echo "Production must allow only the main deployment workflow." >&2
+  exit 1
+fi
+
+
+python3 "$SCRIPT_DIR/tailscale.py"
 
 task_subscription_id="$(az account show --query id -o tsv)"
 task_tenant_id="$(az account show --query tenantId -o tsv)"
@@ -81,36 +131,6 @@ az aks command invoke \
   --query logs \
   -o tsv
 
-gh api --method PUT \
-  -H "Accept: application/vnd.github+json" \
-  "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT" \
-  --input - <<'JSON' >/dev/null
-{
-  "deployment_branch_policy": {
-    "protected_branches": false,
-    "custom_branch_policies": true
-  }
-}
-JSON
-
-ensure_deployment_branch_policy() {
-  local task_pattern="$1"
-  local task_count
-  task_count="$(gh api \
-    "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
-    --jq "[.branch_policies[] | select(.name == \"$task_pattern\" and .type == \"branch\")] | length")"
-  if [[ "$task_count" == "0" ]]; then
-    gh api --method POST \
-      "repos/$GITHUB_REPOSITORY/environments/$GITHUB_ENVIRONMENT/deployment-branch-policies" \
-      -f name="$task_pattern" -f type=branch --silent
-  elif [[ "$task_count" != "1" ]]; then
-    echo "Expected exactly one deployment policy for $task_pattern." >&2
-    exit 1
-  fi
-}
-
-ensure_deployment_branch_policy main
-ensure_deployment_branch_policy 'rollback/*'
 
 set_environment_variable() {
   gh variable set "$1" --repo "$GITHUB_REPOSITORY" --env "$GITHUB_ENVIRONMENT" --body "$2"
@@ -124,6 +144,7 @@ set_environment_variable AZURE_AKS_CLUSTER_NAME "$AZURE_AKS_CLUSTER_NAME"
 set_environment_variable TESLACAM_KEY_VAULT_NAME "$task_key_vault_name"
 set_environment_variable TESLACAM_SECRET_IDENTITY_CLIENT_ID "$task_secret_identity_client_id"
 set_environment_variable TESLACAM_URL "$APP_URL"
+
 
 echo "TeslaCam deployment identity, namespace RBAC, Key Vault, and GitHub environment are configured."
 echo "Key Vault: $task_key_vault_name"

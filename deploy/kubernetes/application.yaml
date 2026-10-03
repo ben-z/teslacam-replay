@@ -190,14 +190,10 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: teslacam-replay
+  name: teslacam-replay-private
   namespace: teslacam-replay
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
 spec:
-  ingressClassName: nginx
+  ingressClassName: tailnet
   rules:
     - host: teslacam-replay.benzhang.dev
       http:
