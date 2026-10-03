@@ -24,3 +24,4 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run build
       - run: bash -n deploy/deploy.sh deploy/bootstrap/bootstrap.sh
+      - run: python3 -m unittest discover -s deploy/bootstrap -p 'test_*.py'
