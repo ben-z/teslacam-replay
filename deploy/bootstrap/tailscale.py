@@ -93,16 +93,7 @@ def validate_owner(identity, desired):
             raise ValueError(f"Tailscale identity has invalid {name}")
 
 
-def reconcile(config):
-    repository = json.loads(gh("api", f"repos/{REPOSITORY}"))
-    desired = desired_identity(config, repository)
-    variables = {
-        item["name"]: item["value"]
-        for item in json.loads(
-            gh("variable", "list", "--repo", REPOSITORY, "--env", ENVIRONMENT,
-               "--json", "name,value")
-        )
-    }
+def matching_identities(config, desired):
     matches = []
     listing = api(config, "GET", KEYS_PATH + "?all=true", None)
     if not isinstance(listing, dict) or "keys" not in listing:
@@ -123,6 +114,20 @@ def reconcile(config):
             or (identity["issuer"] == desired["issuer"] and identity["subject"] == desired["subject"])
         ):
             matches.append(identity)
+    return matches
+
+
+def reconcile(config):
+    repository = json.loads(gh("api", f"repos/{REPOSITORY}"))
+    desired = desired_identity(config, repository)
+    variables = {
+        item["name"]: item["value"]
+        for item in json.loads(
+            gh("variable", "list", "--repo", REPOSITORY, "--env", ENVIRONMENT,
+               "--json", "name,value")
+        )
+    }
+    matches = matching_identities(config, desired)
     if len(matches) > 1:
         raise ValueError("Multiple Tailscale identities match TeslaCam production CI")
     saved_id = variables.get("TAILSCALE_CLIENT_ID")
@@ -142,7 +147,13 @@ def reconcile(config):
         identity = api(config, "POST", KEYS_PATH, desired)
 
     validate_owner(identity, desired)
-    identity = api(config, "GET", KEYS_PATH + "/" + quote(identity["id"], safe=""), None)
+    confirmed = matching_identities(config, desired)
+    if len(confirmed) != 1 or confirmed[0]["id"] != identity["id"]:
+        raise ValueError(
+            "Tailscale production identity changed during bootstrap; "
+            "run one bootstrap at a time and resolve duplicate identities before retrying"
+        )
+    identity = confirmed[0]
     validate_owner(identity, desired)
     if any(sorted(identity[name]) != sorted(desired[name]) for name in ("scopes", "tags")):
         raise ValueError("Tailscale did not apply the requested scopes and tags")

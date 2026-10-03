@@ -105,7 +105,7 @@ class FederationTests(unittest.TestCase):
         original = self.api
 
         def null_empty_list(config, method, path, body):
-            if method == "GET" and path.endswith("?all=true"):
+            if method == "GET" and path.endswith("?all=true") and not self.keys:
                 return {"keys": None}
             return original(config, method, path, body)
 
@@ -113,6 +113,39 @@ class FederationTests(unittest.TestCase):
             tailscale.reconcile(self.config)
         self.assertEqual(self.api_writes, [("POST", tailscale.KEYS_PATH, self.desired)])
         self.assertEqual(self.variables["TAILSCALE_CLIENT_ID"], "test-client")
+
+    def test_concurrent_registration_fails_before_publishing_variables(self):
+        original = self.api
+
+        def concurrent_registration(config, method, path, body):
+            result = original(config, method, path, body)
+            if method == "POST":
+                self.keys["other-client"] = {
+                    **self.identity, "id": "other-client",
+                    "audience": "api.tailscale.com/other-client",
+                }
+            return result
+
+        with patch.object(tailscale, "api", side_effect=concurrent_registration):
+            with self.assertRaisesRegex(ValueError, "one bootstrap at a time"):
+                tailscale.reconcile(self.config)
+        self.assertEqual(self.variable_writes, [])
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_identity_disappearing_after_creation_does_not_publish_variables(self):
+        original = self.api
+
+        def disappearing_identity(config, method, path, body):
+            result = original(config, method, path, body)
+            if method == "POST":
+                self.keys.clear()
+            return result
+
+        with patch.object(tailscale, "api", side_effect=disappearing_identity):
+            with self.assertRaisesRegex(ValueError, "changed during bootstrap"):
+                tailscale.reconcile(self.config)
+        self.assertEqual(self.variable_writes, [])
+        self.assertEqual(self.output.getvalue(), "")
 
     def test_null_key_list_does_not_prove_federated_write_permission(self):
         attempts = []

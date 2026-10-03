@@ -18,6 +18,10 @@ with the `federated_keys` scope and `TAILSCALE_CI_TAG` set to
 identities, dedicated Key Vault, namespace RBAC, exact GitHub production
 Tailscale identity, and GitHub `production` environment variables.
 
+Run one bootstrap at a time for this repository; concurrent registration is
+unsupported. The helper checks for duplicate federated identities before
+publishing identity variables.
+
 Shared infrastructure must authorize the CI tag to reach
 `svc:unicorns-private` on TCP 443. The workflow joins Tailscale using GitHub OIDC;
 it does not require a stored Tailscale auth key or tailnet DNS.
