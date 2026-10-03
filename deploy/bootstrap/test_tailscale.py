@@ -203,6 +203,29 @@ class FederationTests(unittest.TestCase):
         self.assertEqual(len(self.api_writes), 1)
         self.assertEqual(self.variables["TAILSCALE_CLIENT_ID"], "test-client")
 
+    def test_other_repository_with_shared_tag_remains_independent(self):
+        foreign = {
+            **self.identity,
+            "id": "other-client",
+            "audience": "api.tailscale.com/other-client",
+            "description": "Another application production CI",
+            "subject": "repo:ben-z/another-app:environment:production",
+            "customClaimRules": {
+                "repository": "ben-z/another-app", "repository_id": "789",
+                "repository_owner_id": "456",
+            },
+        }
+        self.keys["other-client"] = copy.deepcopy(foreign)
+        tailscale.reconcile(self.config)
+        self.assertEqual(self.keys["other-client"], foreign)
+        self.assertEqual(self.api_writes, [("POST", tailscale.KEYS_PATH, self.desired)])
+        self.assertEqual(self.variables["TAILSCALE_CLIENT_ID"], "test-client")
+        self.api_writes.clear()
+        self.variable_writes.clear()
+        tailscale.reconcile(self.config)
+        self.assertEqual(self.api_writes, [])
+        self.assertEqual(self.variable_writes, [])
+
     def test_missing_key_type_is_a_schema_error(self):
         with patch.object(tailscale, "api", return_value={"keys": [{"id": "unknown"}]}):
             with self.assertRaisesRegex(KeyError, "keyType"):
