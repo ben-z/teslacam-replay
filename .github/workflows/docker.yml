@@ -282,7 +282,7 @@ jobs:
           oauth-client-id: ${{ vars.TAILSCALE_CLIENT_ID }}
           audience: ${{ vars.TAILSCALE_AUDIENCE }}
           tags: ${{ vars.TAILSCALE_CI_TAG }}
-          version: 1.102.5
+          version: 1.102.4
           args: --accept-dns=false --accept-routes=false
       - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
