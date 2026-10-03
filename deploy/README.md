@@ -47,7 +47,7 @@ rm -f -- "$task_password_file"
 The app declares its hostname and backend on an Ingress with class `tailnet`
 and annotation `private-ingress.unicorns.dev/publish-dns: "true"`. Shared
 ExternalDNS manages a DNS-only Cloudflare A record pointing to the private
-gateway's Tailscale address. Shared cert-manager renews the wildcard certificate.
+gateway's Tailscale address. The shared gateway manages automatic HTTPS.
 
 For a migration canary, apply `teslacam-replay-private` without the DNS
 annotation and verify the existing hostname with `curl --resolve`. Once its
