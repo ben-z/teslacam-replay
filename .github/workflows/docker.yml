@@ -285,6 +285,7 @@ jobs:
           version: 1.102.4
           args: --accept-dns=false
       - name: Restrict Tailscale routing
+        shell: bash
         run: |
           sudo tailscale set --accept-routes=false
           sudo tailscale debug prefs | jq -e '.RouteAll == false and .CorpDNS == false' >/dev/null
