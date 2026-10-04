@@ -25,14 +25,6 @@ spec:
           objectName: teslacam-rclone-config
           objectType: secret
           objectAlias: rclone.conf
-        - |
-          objectName: teslacam-basic-auth-user
-          objectType: secret
-          objectAlias: basic-auth-user
-        - |
-          objectName: teslacam-basic-auth-password
-          objectType: secret
-          objectAlias: basic-auth-password
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,14 +74,14 @@ spec:
           args:
             - |
               set -eu
-              export BASIC_AUTH_USER="$(cat /mnt/secrets-store/basic-auth-user)"
-              export BASIC_AUTH_PASSWORD="$(cat /mnt/secrets-store/basic-auth-password)"
               until node -e 'fetch("http://127.0.0.1:8765/healthz").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'; do
                 echo "Waiting for gdrive-serve-lite"
                 sleep 2
               done
               exec node --import tsx/esm server/index.ts
           env:
+            - name: APP_ORIGIN
+              value: "__APP_ORIGIN__"
             - name: CACHE_DIR
               value: /cache
             - name: GDRIVE_BASE_URL

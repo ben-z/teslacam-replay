@@ -21,6 +21,7 @@ ENV NODE_ENV=production
 ENV SERVE_FRONTEND=true
 ENV APP_VERSION=$SOURCE_SHA
 LABEL org.opencontainers.image.revision=$SOURCE_SHA
+LABEL dev.benzhang.teslacam-replay.origin-policy="same-origin"
 EXPOSE 3001
 
 CMD ["node", "--import", "tsx/esm", "server/index.ts"]

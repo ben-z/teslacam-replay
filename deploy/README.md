@@ -6,8 +6,12 @@ workflow. The production pod contains the app and a loopback-only
 `3143d06af5d5d324e5a5b3403f15912c93a6c553`.
 
 The app is served over Tailscale at `https://teslacam-replay.benzhang.dev`
-with trusted HTTPS. Health and version probes are unauthenticated; the frontend
-and all footage APIs require HTTP Basic Auth.
+with trusted HTTPS. Tailscale grants control access to the frontend and footage
+APIs; anyone permitted to reach the private gateway can use the app without a
+password.
+Trusted AKS workloads can also reach the app's ClusterIP service.
+The deployment sets `APP_ORIGIN` to the app's HTTPS origin. Browser requests
+from other origins cannot read footage or invoke API actions.
 
 ## One-time bootstrap
 
@@ -26,24 +30,12 @@ Shared infrastructure must authorize the CI tag to reach
 `svc:unicorns-private` on TCP 443. The workflow joins Tailscale using GitHub OIDC;
 it does not require a stored Tailscale auth key or tailnet DNS.
 
-Populate these required Key Vault secrets before deploying:
+Populate the required Key Vault secret before deploying:
 
 ```sh
 az keyvault secret set --vault-name VAULT_NAME \
   --name teslacam-rclone-config \
   --file /path/to/rclone.conf
-
-az keyvault secret set --vault-name VAULT_NAME \
-  --name teslacam-basic-auth-user \
-  --value ben
-
-task_password_file="$(mktemp)"
-chmod 600 "$task_password_file"
-openssl rand -hex 24 -out "$task_password_file"
-az keyvault secret set --vault-name VAULT_NAME \
-  --name teslacam-basic-auth-password \
-  --file "$task_password_file"
-rm -f -- "$task_password_file"
 ```
 
 ## Routing
@@ -65,12 +57,16 @@ over the wildcard.
 Merging to `main` runs checks, builds both images, pins their registry digests,
 and deploys through GitHub OIDC. Verification waits for rollout, checks that
 DNS resolves only to the advertised Tailscale IP, verifies trusted HTTPS and
-the exact source SHA through that IP, and confirms unauthenticated footage
-access is rejected.
+the exact source SHA through that IP, and confirms the frontend and API are
+accessible without a password. It also checks the same-origin resource policy
+and rejects API access from another browser origin.
 
 For rollback, dispatch the current `main` workflow with the previously deployed
 immutable images and application SHA. This uses the current routing and
-deployment configuration without rebuilding the images:
+deployment configuration without rebuilding the images.
+
+Rollback app images must support the hosted same-origin API policy. The
+workflow checks this capability on both architectures before deployment.
 
 ```sh
 gh workflow run docker.yml --ref main \

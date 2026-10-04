@@ -21,6 +21,14 @@ import { HLS_CACHE_DIR } from "./paths.js";
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 import { RecentArchive } from "./recent-archive.js";
 
+const appOrigin = process.env.APP_ORIGIN;
+if (appOrigin !== undefined) {
+  const url = new URL(appOrigin);
+  if (!["http:", "https:"].includes(url.protocol) || url.origin !== appOrigin) {
+    throw new Error("APP_ORIGIN must be an HTTP(S) origin without credentials, path, query, or fragment.");
+  }
+}
+
 const drive = createGDriveLiteFromEnv();
 
 async function verifyDrive(): Promise<DriveEntry[]> {
@@ -73,12 +81,24 @@ app.get("/healthz", async (c) => {
 
 app.get("/api/version", (c) => c.json({ version: appVersion }));
 
-// CORS: allow cross-origin requests so the frontend can be hosted separately
-// (e.g., GitHub Pages pointing at a self-hosted backend)
-app.use("/api/*", cors({
-  origin: "*",
-  allowHeaders: ["Content-Type"],
-}));
+if (appOrigin !== undefined) {
+  app.use("/api/*", async (c, next) => {
+    c.header("Cross-Origin-Resource-Policy", "same-origin");
+    c.header("Vary", "Origin, Sec-Fetch-Site");
+    const origin = c.req.header("Origin");
+    const site = c.req.header("Sec-Fetch-Site");
+    if ((origin !== undefined && origin !== appOrigin) || site === "cross-site" || site === "same-site") {
+      return c.text("Cross-origin API access is forbidden", 403);
+    }
+    return next();
+  });
+} else {
+  // Separate frontend hosting requires cross-origin API access.
+  app.use("/api/*", cors({
+    origin: "*",
+    allowHeaders: ["Content-Type"],
+  }));
+}
 app.use("/api/*", compress());
 
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
