@@ -85,6 +85,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   vi.stubEnv("GDRIVE_BASE_URL", "http://drive.test");
+  vi.stubEnv("APP_ORIGIN", undefined);
   for (const name of ["GDRIVE_USER", "GDRIVE_PASS", "BASIC_AUTH_USER", "BASIC_AUTH_PASSWORD", "SERVE_FRONTEND"]) {
     vi.stubEnv(name, "");
   }
@@ -114,9 +115,9 @@ async function start(): Promise<void> {
   await import("./index.js");
 }
 
-async function request(route: string): Promise<Response> {
+async function request(route: string, init?: RequestInit): Promise<Response> {
   const handler = serve.mock.calls[0][0].fetch as (request: Request) => Promise<Response>;
-  return handler(new Request(`http://app.test${route}`));
+  return handler(new Request(`http://app.test${route}`, init));
 }
 
 async function page(token?: string) {
@@ -268,5 +269,74 @@ describe("RecentClips archive API", () => {
     const response = await request(`/api/events/page?type=RecentClips&pageToken=${token}`);
     expect(response.status).toBe(400);
     expect(provider.listsFor("Private")).toHaveLength(0);
+  });
+});
+
+describe("hosted API origin policy", () => {
+  const origin = "https://teslacam-replay.example.com";
+
+  it.each<Record<string, string>>([
+    {},
+    { "Sec-Fetch-Site": "none" },
+    { "Sec-Fetch-Site": "same-origin" },
+    { Origin: origin, "Sec-Fetch-Site": "same-origin" },
+  ])("allows direct and same-origin requests without credentials: %j", async (headers) => {
+    vi.stubEnv("APP_ORIGIN", origin);
+    await start();
+    const response = await request("/api/status", { headers });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ storageBackend: "gdrive-serve-lite" });
+    expect(response.headers.get("WWW-Authenticate")).toBeNull();
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+  });
+
+  it.each<Record<string, string>>([
+    { Origin: "https://untrusted.example.com" },
+    { Origin: "null" },
+    { "Sec-Fetch-Site": "cross-site" },
+    { "Sec-Fetch-Site": "same-site" },
+  ])("rejects cross-origin reads and actions before handlers run: %j", async (headers) => {
+    vi.stubEnv("APP_ORIGIN", origin);
+    await start();
+    const requestsBefore = provider.requests.length;
+    for (const [route, method] of [
+      ["/api/events/page?type=RecentClips", "GET"],
+      ["/api/debug/caches/telemetry/clear", "POST"],
+    ]) {
+      const response = await request(route, { method, headers });
+      expect(response.status).toBe(403);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+      expect(response.headers.get("Vary")).toBe("Origin, Sec-Fetch-Site");
+    }
+    expect(provider.requests).toHaveLength(requestsBefore);
+  });
+
+  it("allows same-origin API actions", async () => {
+    vi.stubEnv("APP_ORIGIN", origin);
+    await start();
+    const response = await request("/api/debug/caches/telemetry/clear", {
+      method: "POST",
+      headers: { Origin: origin, "Sec-Fetch-Site": "same-origin" },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it("allows a separate frontend when APP_ORIGIN is unset", async () => {
+    await start();
+    const response = await request("/api/status", { headers: { Origin: "https://frontend.example.com" } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
+  it.each([
+    "", "null", "ftp://app.test", "https://app.test/", "https://user:password@app.test",
+    "https://app.test/path", "https://app.test?query", "https://app.test#fragment",
+  ])("fails startup with an invalid APP_ORIGIN: %s", async (value) => {
+    vi.stubEnv("APP_ORIGIN", value);
+    await expect(start()).rejects.toThrow();
+    expect(serve).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
   });
 });

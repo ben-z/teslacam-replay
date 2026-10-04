@@ -74,6 +74,7 @@ sed \
   -e "s|__AZURE_TENANT_ID__|$AZURE_TENANT_ID|g" \
   -e "s|__KEY_VAULT_NAME__|$TESLACAM_KEY_VAULT_NAME|g" \
   -e "s|__SECRET_IDENTITY_CLIENT_ID__|$TESLACAM_SECRET_IDENTITY_CLIENT_ID|g" \
+  -e "s|__APP_ORIGIN__|$TESLACAM_URL|g" \
   "$MANIFEST" > "$task_rendered_manifest"
 
 if grep -q '__[A-Z_]*__' "$task_rendered_manifest"; then
@@ -162,7 +163,7 @@ if [[ "$task_dns_ready" != true ]]; then
   exit 1
 fi
 
-task_curl=(curl --noproxy "$task_hostname" --connect-timeout 5 --max-time 15
+task_curl=(curl --disable --noproxy "$task_hostname" --connect-timeout 5 --max-time 15
   --retry 6 --retry-delay 5 --retry-all-errors --silent --show-error)
 require_private_peer() {
   if [[ "$1" != "$task_private_ip" ]]; then
@@ -185,12 +186,29 @@ if [[ "$task_live_version" != "$SOURCE_SHA" ]]; then
   exit 1
 fi
 
-task_unauthorized_response="$("${task_curl[@]}" --output /dev/null \
+task_frontend_response="$("${task_curl[@]}" --fail --output "$task_temp_dir/frontend.html" \
+  --write-out '%{http_code} %{remote_ip}' "$TESLACAM_URL/")"
+read -r task_frontend_status task_frontend_ip <<<"$task_frontend_response"
+require_private_peer "$task_frontend_ip"
+if [[ "$task_frontend_status" != "200" ]] || ! grep -Fq '<div id="root"></div>' "$task_temp_dir/frontend.html"; then
+  echo "Expected the frontend to load without a password, got HTTP $task_frontend_status." >&2
+  exit 1
+fi
+
+task_api_ip="$("${task_curl[@]}" --fail \
+  --dump-header "$task_temp_dir/status.headers" \
+  --output "$task_temp_dir/status.json" --write-out '%{remote_ip}' "$TESLACAM_URL/api/status")"
+require_private_peer "$task_api_ip"
+jq -e '.storageBackend == "gdrive-serve-lite"' "$task_temp_dir/status.json" >/dev/null
+grep -Fiq 'Cross-Origin-Resource-Policy: same-origin' "$task_temp_dir/status.headers"
+
+task_foreign_response="$("${task_curl[@]}" --output /dev/null \
+  --header 'Origin: https://untrusted.example.com' \
   --write-out '%{http_code} %{remote_ip}' "$TESLACAM_URL/api/status")"
-read -r task_unauthorized_status task_unauthorized_ip <<<"$task_unauthorized_response"
-require_private_peer "$task_unauthorized_ip"
-if [[ "$task_unauthorized_status" != "401" ]]; then
-  echo "Expected unauthenticated API access to return 401, got $task_unauthorized_status." >&2
+read -r task_foreign_status task_foreign_ip <<<"$task_foreign_response"
+require_private_peer "$task_foreign_ip"
+if [[ "$task_foreign_status" != "403" ]]; then
+  echo "Expected cross-origin API access to return 403, got $task_foreign_status." >&2
   exit 1
 fi
 
