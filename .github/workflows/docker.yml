@@ -208,8 +208,8 @@ jobs:
               echo "App image revision does not match the requested source SHA." >&2
               exit 1
             fi
-            if ! jq -e '.config.Labels["dev.benzhang.teslacam-replay.origin-policy"] == "same-origin"' <<< "$image_config" >/dev/null; then
-              echo "App image must support the hosted same-origin API policy." >&2
+            if ! jq -e '.config.Labels["dev.benzhang.teslacam-replay.origin-policy"] == "2"' <<< "$image_config" >/dev/null; then
+              echo "App image must support the hosted same-origin API and media policy." >&2
               exit 1
             fi
           done
