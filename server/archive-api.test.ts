@@ -323,6 +323,35 @@ describe("hosted API origin policy", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
+  it.each([
+    ["/api/events/SavedClips/2026-10-02_10-00-00/thumbnail", "image/png", "thumbnail bytes"],
+    ["/api/hls/SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00/front/stream.m3u8", "application/vnd.apple.mpegurl", "#EXTM3U\n#EXT-X-ENDLIST\n"],
+    ["/api/hls/SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00/front/chunk_000.ts", "video/mp2t", "segment bytes"],
+  ])("preserves origin policy headers and streamed bytes for %s", async (route, contentType, body) => {
+    vi.stubEnv("APP_ORIGIN", origin);
+    provider.add("SavedClips", true);
+    provider.add("SavedClips/2026-10-02_10-00-00", true);
+    provider.add("SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00-front.mp4");
+    const thumbnail = provider.add("SavedClips/2026-10-02_10-00-00/thumb.png");
+    thumbnail.mimeType = "image/png";
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === `/file/${thumbnail.id}/thumb.png`) {
+        return new Response("thumbnail bytes", { headers: { "Content-Type": "image/png" } });
+      }
+      return provider.fetch(input);
+    });
+    await writeFile(path.join(testDirectory, "chunk_000.ts"), "segment bytes");
+    await start();
+    const response = await request(route, { headers: { Origin: origin, "Sec-Fetch-Site": "same-origin" } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+    expect(response.headers.get("Vary")).toBe("Origin, Sec-Fetch-Site");
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Content-Type")).toBe(contentType);
+    expect(await response.text()).toBe(body);
+  });
+
   it("allows a separate frontend when APP_ORIGIN is unset", async () => {
     await start();
     const response = await request("/api/status", { headers: { Origin: "https://frontend.example.com" } });

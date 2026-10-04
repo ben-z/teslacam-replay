@@ -83,8 +83,8 @@ app.get("/api/version", (c) => c.json({ version: appVersion }));
 
 if (appOrigin !== undefined) {
   app.use("/api/*", async (c, next) => {
-    c.header("Cross-Origin-Resource-Policy", "same-origin");
-    c.header("Vary", "Origin, Sec-Fetch-Site");
+    c.res.headers.set("Cross-Origin-Resource-Policy", "same-origin");
+    c.res.headers.set("Vary", "Origin, Sec-Fetch-Site");
     const origin = c.req.header("Origin");
     const site = c.req.header("Sec-Fetch-Site");
     if ((origin !== undefined && origin !== appOrigin) || site === "cross-site" || site === "same-site") {
