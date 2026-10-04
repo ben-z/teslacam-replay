@@ -46,7 +46,7 @@ spec:
     spec:
       serviceAccountName: teslacam-replay
       nodeSelector:
-        kubernetes.azure.com/mode: user
+        unicorns.dev/workload: applications
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
