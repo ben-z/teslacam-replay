@@ -1261,7 +1261,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
               {bufferingCameras.has(cam) && !videoErrors.has(cam) && (
                 <span className="player-video-buffering" role="status">{initialLoading ? "Loading" : "Buffering"} {CAMERA_LABELS[cam]}...</span>
               )}
-              {(endedCameras.has(cam) || atCompletedEnd) && !videoErrors.has(cam) && (
+              {!inRecordingGap && (endedCameras.has(cam) || atCompletedEnd) && !videoErrors.has(cam) && (
                 <span className="player-video-ended">End of clip</span>
               )}
               {videoErrors.has(cam) && (
