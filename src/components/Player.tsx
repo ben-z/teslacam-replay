@@ -700,7 +700,11 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       setPlayerError(null);
       const atLastSegment = segmentIdxRef.current === event.clips.length - 1;
       const playable = participantCamerasRef.current.filter((camera) => !videoErrorsRef.current.has(camera));
-      const atAvailableEnd = hasReachedPlaybackEnd(playable.map((camera) => ({ ended: Boolean(videoElsRef.current.get(camera)?.ended) })));
+      const segmentStart = segmentOffsetsRef.current[segmentIdxRef.current];
+      const timestamp = event.clips[segmentIdxRef.current]?.timestamp;
+      const completedEnd = playbackBoundary(segmentStart, null, playable.map((camera) => completedDurationsRef.current[timestamp]?.[camera]));
+      const atAvailableEnd = hasReachedPlaybackEnd(playable.map((camera) => ({ ended: Boolean(videoElsRef.current.get(camera)?.ended) })))
+        || (completedEnd !== null && displayTimeRef.current >= completedEnd);
       if (atLastSegment && atAvailableEnd) seekTo(0);
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -711,7 +715,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       });
       notifyTimeUpdate(displayTimeRef.current, true, true);
     }
-  }, [event.clips.length, seekTo, notifyTimeUpdate, playCamera]);
+  }, [event.clips, seekTo, notifyTimeUpdate, playCamera]);
 
   useEffect(() => {
     if (finalDurationKnown && displayTimeRef.current > totalDuration) {
