@@ -19,8 +19,10 @@ export async function fetchEventPage(
   const params = new URLSearchParams({ type, limit: String(limit) });
   if (pageToken) params.set("pageToken", pageToken);
   const res = await fetch(`${API_BASE}/events/page?${params.toString()}`);
-  if (!res.ok) throw new Error(`Failed to fetch ${type} page: ${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Recordings could not be loaded (HTTP ${res.status}).`);
+  const page: EventPage = await res.json();
+  if (page.type !== type) throw new Error(`Expected ${type} recordings, received ${page.type}.`);
+  return page;
 }
 
 export async function fetchEvent(type: string, id: string, refresh: boolean): Promise<DashcamEvent> {

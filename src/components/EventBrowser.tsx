@@ -11,13 +11,12 @@ import "./EventBrowser.css";
 
 interface Props {
   events: DashcamEvent[];
-  loading: boolean;
-  loadingMore: boolean;
-  error: string | null;
+  pendingTypes: EventPageType[];
+  errorsByType: Partial<Record<EventPageType, string>>;
   hasMore: Record<EventPageType, boolean>;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
-  onRetry: () => void;
+  onRetry: (type: EventPageType) => void;
   onLoadMore: (types: EventPageType[]) => void;
 }
 
@@ -25,6 +24,7 @@ type FilterType = "all" | EventPageType;
 type ViewType = "events" | "timeline";
 
 const PAGE_SIZE = 48;
+const SOURCE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   weekday: "short",
   month: "short",
@@ -65,9 +65,8 @@ function dateKey(ts: string): string {
 
 export function EventBrowser({
   events,
-  loading,
-  loadingMore,
-  error,
+  pendingTypes,
+  errorsByType,
   hasMore: hasMorePages,
   onSelectEvent,
   onRefresh,
@@ -79,6 +78,8 @@ export function EventBrowser({
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const pending = pendingTypes.length > 0;
+  const failedTypes = SOURCE_TYPES.filter((type) => errorsByType[type] !== undefined);
 
   // Debounce search input
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -129,13 +130,14 @@ export function EventBrowser({
   const visible = filtered.slice(0, visibleCount);
   const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
-    if (view === "timeline" || filter === "all") return ["SavedClips", "SentryClips", "RecentClips"];
+    if (view === "timeline" || filter === "all") return SOURCE_TYPES;
     return [filter];
   }, [filter, view]);
   const remoteTypesToLoad = useMemo(
-    () => pageTypesToLoad.filter((type) => hasMorePages[type]),
-    [hasMorePages, pageTypesToLoad]
+    () => pageTypesToLoad.filter((type) => hasMorePages[type] && errorsByType[type] === undefined),
+    [hasMorePages, pageTypesToLoad, errorsByType]
   );
+  const scopeIncomplete = pageTypesToLoad.some((type) => pendingTypes.includes(type) || errorsByType[type] !== undefined);
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
@@ -150,30 +152,23 @@ export function EventBrowser({
   const handleLoadMore = useCallback(() => {
     if (hasMoreLoaded) {
       setVisibleCount((c) => c + PAGE_SIZE);
-    } else if (hasMoreRemote && !loadingMore) {
+    } else if (hasMoreRemote && !pending) {
       onLoadMore(remoteTypesToLoad);
     }
-  }, [hasMoreLoaded, hasMoreRemote, loadingMore, onLoadMore, remoteTypesToLoad]);
+  }, [hasMoreLoaded, hasMoreRemote, pending, onLoadMore, remoteTypesToLoad]);
 
-  // Infinite scroll: load more when sentinel enters viewport
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  const recentTimelineScrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const root = view === "timeline" ? recentTimelineScrollRef.current : null;
-    if (!sentinel || !hasMore || (view === "events" && search.trim()) || error) return;
-    if (view === "timeline" && !root) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          handleLoadMore();
-        }
-      },
-      { root, rootMargin: view === "timeline" ? "120px" : "200px" }
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMore, handleLoadMore, view, search, error]);
+  const timelineFooter = hasMoreRemote ? (
+    <div className="browse-load-more browse-load-more--passive">
+      <button
+        type="button"
+        className="browse-load-more-hint"
+        disabled={pending}
+        onClick={handleLoadMore}
+      >
+        Load older recordings
+      </button>
+    </div>
+  ) : null;
 
   return (
     <div className="browse-container">
@@ -183,11 +178,11 @@ export function EventBrowser({
           <div className="browse-header-actions">
             <button
               onClick={onRefresh}
-              disabled={loading || loadingMore}
+              disabled={pending}
               className="browse-refresh-btn"
               title="Refresh recordings"
             >
-              {loading || loadingMore ? "Loading…" : "Refresh"}
+              Refresh
             </button>
           </div>
         </div>
@@ -257,10 +252,23 @@ export function EventBrowser({
       </header>
 
       <div className="browse-content">
-        {error && <div className="browse-error" role="alert">{error} <button onClick={onRetry} disabled={loading || loadingMore}>Retry</button></div>}
+        {pending && (
+          <p className="browse-scope" role="status">
+            Loading {pendingTypes.map((type) => BADGE_STYLES[type].label).join(", ")} recordings…
+          </p>
+        )}
+        {failedTypes.map((type) => (
+          <div className="browse-error" role="alert" key={type}>
+            {BADGE_STYLES[type].label}: {errorsByType[type]}
+            {events.some((event) => event.type === type) && (
+              <> Previously loaded {BADGE_STYLES[type].label} recordings are still shown.</>
+            )}
+            {" "}<button onClick={() => onRetry(type)} disabled={pending}>Retry {BADGE_STYLES[type].label}</button>
+          </div>
+        ))}
         {view === "events" && (
           <p className="browse-scope" aria-live="polite">
-            {loading ? "Loading recordings…" : scopeSummary}
+            {scopeSummary}
             {search.trim() && oldestLoadedDate && (
               <> · Loaded dates: {oldestLoadedDate}{oldestLoadedDate !== newestLoadedDate && `–${newestLoadedDate}`}</>
             )}
@@ -268,46 +276,25 @@ export function EventBrowser({
           </p>
         )}
 
-        {loading && events.length === 0 ? (
-          <div className="browse-loading">
-            <div className="browse-spinner" />
-            <p>Loading recordings...</p>
-            <p className="browse-loading-hint">
-              Loading recordings
-            </p>
-          </div>
-        ) : view === "timeline" ? (
+        {view === "timeline" ? (
           <div className="recent-view">
-            {!error && (
+            {!scopeIncomplete && (
               <div className="recent-scan-status" aria-live="polite">
-                <span className={`recent-scan-dot ${loadingMore ? "active" : ""}`} />
-                <span>{loadingMore ? "Loading recordings…" : timelineAvailability}</span>
+                <span className="recent-scan-dot" />
+                <span>{timelineAvailability}</span>
               </div>
             )}
-            <Timeline
-              events={events}
-              onSelectEvent={onSelectEvent}
-              scrollRef={recentTimelineScrollRef}
-              footer={hasMoreRemote ? (
-                <>
-                  <div className="browse-load-more browse-load-more--passive">
-                    <button
-                      type="button"
-                      className="browse-load-more-hint"
-                      disabled={loadingMore}
-                      onClick={handleLoadMore}
-                    >
-                      {loadingMore ? "Loading recordings…" : "Load older recordings"}
-                    </button>
-                  </div>
-                  <div className="browse-load-more-sentinel" ref={sentinelRef} aria-hidden="true" />
-                </>
-              ) : null}
-            />
+            {!scopeIncomplete || events.some((event) => event.clips.length > 0) ? (
+              <Timeline
+                events={events}
+                onSelectEvent={onSelectEvent}
+                footer={timelineFooter}
+              />
+            ) : timelineFooter}
           </div>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
-            {search.trim() || filter !== "all" ? (
+            {!scopeIncomplete && (search.trim() || filter !== "all" ? (
               <>
                 <p>No loaded recordings match your filters</p>
                 <button
@@ -319,10 +306,10 @@ export function EventBrowser({
               </>
             ) : (
               <p>No recordings in the loaded pages</p>
-            )}
+            ))}
             {hasMoreRemote && (
-              <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={loadingMore}>
-                {loadingMore ? "Loading recordings…" : "Load older recordings"}
+              <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={pending}>
+                Load older recordings
               </button>
             )}
           </div>
@@ -352,16 +339,16 @@ export function EventBrowser({
               })}
             </div>
             {hasMore && (
-              <div className="browse-load-more" ref={sentinelRef}>
+              <div className="browse-load-more">
                 <button
                   type="button"
                   className="browse-load-more-hint"
-                  disabled={loadingMore}
+                  disabled={pending && !hasMoreLoaded}
                   onClick={handleLoadMore}
                 >
                   {hasMoreLoaded
                     ? `Show ${filtered.length - visibleCount} more recordings`
-                    : loadingMore ? "Loading recordings…" : "Load more recordings"}
+                    : "Load more recordings"}
                 </button>
               </div>
             )}

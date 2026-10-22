@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, useCallback, type ReactNode, type Ref } from "react";
+import { memo, useMemo, useState, useCallback, type ReactNode } from "react";
 import type { DashcamEvent } from "../types";
 import { recordingWallTimeMs } from "../playback";
 import "./Timeline.css";
@@ -7,7 +7,6 @@ interface Props {
   events: DashcamEvent[];
   onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[]) => void;
   footer?: ReactNode;
-  scrollRef?: Ref<HTMLDivElement>;
 }
 
 interface DayData {
@@ -63,7 +62,7 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent, footer, scrollRef }: Props) {
+export function Timeline({ events, onSelectEvent, footer }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const sessionList = useMemo(
@@ -153,7 +152,7 @@ export function Timeline({ events, onSelectEvent, footer, scrollRef }: Props) {
     return (
       <div className="timeline">
         <div className="timeline-overview">
-          <div className="timeline-scroll" ref={scrollRef}>
+          <div className="timeline-scroll">
             <div className="timeline-empty">No recorded video in the loaded pages</div>
             {footer}
           </div>
@@ -191,7 +190,7 @@ export function Timeline({ events, onSelectEvent, footer, scrollRef }: Props) {
           </div>
         </div>
 
-        <div className="timeline-scroll" ref={scrollRef}>
+        <div className="timeline-scroll">
           {days.map((day) => (
             <TimelineDayRow
               key={day.dateStr}
