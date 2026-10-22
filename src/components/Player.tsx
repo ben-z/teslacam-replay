@@ -85,7 +85,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   const [viewCenter, setViewCenter] = useState(0);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const shortcutsCloseRef = useRef<HTMLButtonElement>(null);
-  const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showTelemetry, setShowTelemetry] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const eventKey = `${event.type}/${event.id}`;
@@ -887,7 +887,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           toggleMute();
           break;
         case "t":
-          if (telemetryAvailable !== false) setShowTelemetry((s) => !s);
+          setShowTelemetry((s) => !s);
           break;
         case "1": case "2": case "3": case "4": case "5": case "6": {
           const idx = parseInt(e.key) - 1;
@@ -901,7 +901,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
     };
     window.addEventListener("keydown", handle);
     return () => window.removeEventListener("keydown", handle);
-  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts, toggleFullscreen, telemetryAvailable]);
+  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts, toggleFullscreen]);
 
   // Compute cell position based on layout
   // Uses allEventCameras index for stable grid positions (prevents layout shift on segment change)
@@ -1076,9 +1076,9 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           {badgeLabel}
         </span>
         <span className="player-header-title">
-          {event.city || event.id}
-          <span className="player-header-date" title="Recorded local time">
-            {" "}&middot;{" "}
+          {event.city}
+          <span className={event.city ? "player-header-date" : undefined} title="Recorded local time">
+            {event.city && <> &middot; </>}
             {headerDateDisplay}
           </span>
         </span>
@@ -1115,13 +1115,12 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
             ))}
           </div>
           <button
-            className={`player-view-btn ${showTelemetry && telemetryAvailable !== false ? "active" : ""}`}
-            aria-pressed={showTelemetry && telemetryAvailable !== false}
-            disabled={telemetryAvailable === false}
-            title={telemetryAvailable === false ? "No driving data in this clip" : "Show driving data (T)"}
+            className={`player-view-btn ${showTelemetry ? "active" : ""}`}
+            aria-pressed={showTelemetry}
+            title={`${showTelemetry ? "Hide" : "Show"} driving data (T)`}
             onClick={() => setShowTelemetry((visible) => !visible)}
           >
-            {telemetryAvailable === false ? "No driving data" : "Driving data"}
+            Driving data
           </button>
           <button
             className={`player-view-btn ${isFullscreen ? "active" : ""}`}
@@ -1170,7 +1169,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
       {/* Header */}
       {header}
 
-      {telemetryError && <p className="player-media-status" role="alert">Telemetry could not be loaded: {telemetryError}</p>}
+      {showTelemetry && telemetryAvailable === false && <p className="player-media-status" role="status">No driving data in this clip.</p>}
+      {telemetryError && <p className="player-media-status" role="alert">Driving data could not be loaded: {telemetryError}</p>}
       {playerError && <p className="player-media-status" role="alert">{playerError}</p>}
       {allCamerasFailed && (
         <p className="player-media-status" role="alert">{layout === "focus" ? "This camera failed to load. Retry it or choose another camera." : "All cameras failed to load for this segment. Retry a camera to try again."}</p>

@@ -410,7 +410,7 @@ const EventCard = memo(function EventCard({
   return (
     <article className="browse-card">
       <button onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${event.city ? ` in ${event.city}` : ""}`}>
-        <div className="browse-card-thumb">
+        <div className={`browse-card-thumb${thumbState === "error" ? " browse-card-thumb--empty" : ""}`}>
           {event.hasThumbnail && thumbState !== "error" ? (
             <>
               {thumbState === "loading" && <div className="browse-card-shimmer" />}
