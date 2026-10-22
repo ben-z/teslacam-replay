@@ -57,7 +57,8 @@ function parseHash(): { type: string; id: string } | null {
 const PAGE_LOAD_LIMIT = 24;
 const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
 type PageTokens = Record<EventPageType, string | null>;
-type PageLoadError = { message: string; types: EventPageType[]; reset: boolean };
+type PageRequest = { type: EventPageType; pageToken: string | null };
+type PageLoadError = { message: string; pageToken: string | null };
 const EMPTY_PAGE_TOKENS: PageTokens = {
   SavedClips: null,
   SentryClips: null,
@@ -66,13 +67,11 @@ const EMPTY_PAGE_TOKENS: PageTokens = {
 
 export function App() {
   const [events, setEvents] = useState<DashcamEvent[]>([]);
-  const [loading, setLoading] = useState(events.length === 0);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [pendingTypes, setPendingTypes] = useState<EventPageType[]>(PAGE_TYPES);
   const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
-  const [error, setError] = useState<PageLoadError | null>(null);
+  const [pageErrors, setPageErrors] = useState<Partial<Record<EventPageType, PageLoadError>>>({});
   const [eventError, setEventError] = useState<string | null>(null);
   const routeRequest = useRef(0);
-  const pageRequest = useRef(0);
   const browseRequested = useRef(false);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
@@ -102,10 +101,6 @@ export function App() {
 
   const loadRoute = useCallback(async (route: { type: string; id: string }, refresh: boolean) => {
     const request = ++routeRequest.current;
-    pageRequest.current++;
-    setLoading(false);
-    setLoadingMore(false);
-    pageLoadingRef.current = false;
     setView("player");
     setSelectedEvent(null);
     setEventError(null);
@@ -128,52 +123,50 @@ export function App() {
     }
   }, [selectEvent]);
 
-  const loadPages = useCallback(async (
-    types: EventPageType[],
-    reset: boolean
-  ) => {
-    const request = ++pageRequest.current;
-    setError(null);
+  const loadPages = useCallback(async (pages: PageRequest[]) => {
+    if (pageLoadingRef.current) return;
+    const catalogAtStart = eventsRef.current;
     pageLoadingRef.current = true;
-    setLoading(reset);
-    setLoadingMore(!reset);
+    setPendingTypes(pages.map(({ type }) => type));
+    setPageErrors((previous) => {
+      const errors = { ...previous };
+      for (const { type } of pages) delete errors[type];
+      return errors;
+    });
     try {
-      const tokenSource = reset ? EMPTY_PAGE_TOKENS : nextPageTokensRef.current;
-      const results = await Promise.all(
-        types.map((type) => fetchEventPage(type, tokenSource[type], PAGE_LOAD_LIMIT))
-      );
-
-      if (request !== pageRequest.current) return;
-      const tokenUpdates: Partial<PageTokens> = {};
-      for (const result of results) {
-        tokenUpdates[result.type] = result.nextPageToken;
-      }
-      const incoming = results.flatMap((result) => result.events);
-      const merged = mergeEvents(reset ? [] : eventsRef.current, incoming);
-      const nextTokens = reset
-        ? { ...EMPTY_PAGE_TOKENS, ...tokenUpdates }
-        : { ...nextPageTokensRef.current, ...tokenUpdates };
-      nextPageTokensRef.current = nextTokens;
-      setNextPageTokens(nextTokens);
-      setEvents(merged);
-      eventsRef.current = merged;
-    } catch (err) {
-      if (request === pageRequest.current) {
-        setError({ message: err instanceof Error ? err.message : String(err), types, reset });
-      }
+      await Promise.all(pages.map(async ({ type, pageToken }) => {
+        try {
+          const result = await fetchEventPage(type, pageToken, PAGE_LOAD_LIMIT);
+          // Recording details loaded after this page began remain authoritative.
+          const updatedRecordings = eventsRef.current.filter((event) =>
+            event.type === type && !catalogAtStart.includes(event));
+          const previous = pageToken === null
+            ? eventsRef.current.filter((event) => event.type !== type)
+            : eventsRef.current;
+          const merged = updatedRecordings.reduce(replaceEventSnapshot, mergeEvents(previous, result.events));
+          const nextTokens = { ...nextPageTokensRef.current, [type]: result.nextPageToken };
+          eventsRef.current = merged;
+          nextPageTokensRef.current = nextTokens;
+          setEvents(merged);
+          setNextPageTokens(nextTokens);
+        } catch (err) {
+          setPageErrors((previous) => ({
+            ...previous,
+            [type]: { message: err instanceof Error ? err.message : String(err), pageToken },
+          }));
+        } finally {
+          setPendingTypes((previous) => previous.filter((pending) => pending !== type));
+        }
+      }));
     } finally {
-      if (request === pageRequest.current) {
-        pageLoadingRef.current = false;
-        setLoading(false);
-        setLoadingMore(false);
-      }
+      pageLoadingRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     if (view === "browse" && !browseRequested.current) {
       browseRequested.current = true;
-      void loadPages(PAGE_TYPES, true);
+      void loadPages(PAGE_TYPES.map((type) => ({ type, pageToken: null })));
     }
   }, [view, loadPages]);
 
@@ -199,19 +192,20 @@ export function App() {
   const handleRefresh = async () => {
     if (pageLoadingRef.current) return;
     setBrowseList([]);
-    await loadPages(PAGE_TYPES, true);
+    await loadPages(PAGE_TYPES.map((type) => ({ type, pageToken: null })));
   };
 
   const handleLoadMore = useCallback((types: EventPageType[]) => {
     if (pageLoadingRef.current) return;
-    const loadable = types.filter((type) => nextPageTokensRef.current[type]);
+    const loadable = types.filter((type) => nextPageTokensRef.current[type] && !pageErrors[type]);
     if (loadable.length === 0) return;
-    void loadPages(loadable, false);
-  }, [loadPages]);
+    void loadPages(loadable.map((type) => ({ type, pageToken: nextPageTokensRef.current[type] })));
+  }, [loadPages, pageErrors]);
 
-  const handleRetry = () => {
+  const handleRetry = (type: EventPageType) => {
+    const error = pageErrors[type];
     if (error && !pageLoadingRef.current) {
-      void loadPages(error.types, error.reset);
+      void loadPages([{ type, pageToken: error.pageToken }]);
     }
   };
 
@@ -286,9 +280,8 @@ export function App() {
         <div hidden={view !== "browse"} style={{ height: "100%" }}>
           <EventBrowser
             events={events}
-            loading={loading}
-            loadingMore={loadingMore}
-            error={error?.message ?? null}
+            pendingTypes={pendingTypes}
+            errorsByType={Object.fromEntries(Object.entries(pageErrors).map(([type, error]) => [type, error.message]))}
             onSelectEvent={handleSelectEvent}
             onRefresh={handleRefresh}
             onRetry={handleRetry}

@@ -1,19 +1,20 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 import type { DashcamEvent } from "../types";
 import { EventBrowser } from "./EventBrowser";
 
-function render(events: DashcamEvent[]) {
+function render(events: DashcamEvent[], overrides: Partial<ComponentProps<typeof EventBrowser>> = {}) {
   return renderToStaticMarkup(<EventBrowser
     events={events}
-    loading={false}
-    loadingMore={false}
-    error={null}
+    pendingTypes={[]}
+    errorsByType={{}}
     hasMore={{ SavedClips: false, SentryClips: false, RecentClips: false }}
     onSelectEvent={() => {}}
     onRefresh={() => {}}
     onRetry={() => {}}
     onLoadMore={() => {}}
+    {...overrides}
   />);
 }
 
@@ -45,5 +46,82 @@ describe("recording list archive scope", () => {
     expect(markup).toContain("Open Recent recording");
     expect(markup).toContain("1 segment");
     expect(markup).not.toContain("No recordings in the loaded pages");
+  });
+
+  it("shows completed sources while another source is pending", () => {
+    const markup = render([recording("RecentClips"), recording("SentryClips")], {
+      pendingTypes: ["SavedClips"],
+    });
+    expect(markup).toContain("Loading Saved recordings…");
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain("Open Recent recording");
+    expect(markup).toContain("Open Sentry recording");
+    expect(markup).toContain("2 recordings loaded");
+    expect(markup).not.toContain("No recordings in the loaded pages");
+  });
+
+  it("names a failed source without hiding successful recordings", () => {
+    const markup = render([recording("RecentClips")], {
+      errorsByType: { SavedClips: "Could not load recordings (HTTP 500)." },
+    });
+    expect(markup).toContain("Saved: Could not load recordings (HTTP 500).");
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain(">Retry Saved</button>");
+    expect(markup).toContain("Open Recent recording");
+    expect(markup).not.toContain("Previously loaded Saved");
+  });
+
+  it("discloses retained recordings when their source fails", () => {
+    const markup = render([recording("SavedClips"), recording("RecentClips")], {
+      errorsByType: { SavedClips: "Refresh failed." },
+    });
+    expect(markup).toContain("Open Saved recording");
+    expect(markup).toContain("Previously loaded Saved recordings are still shown.");
+    expect(markup).toContain(">Retry Saved</button>");
+    expect(markup).toContain("Open Recent recording");
+  });
+
+  it("preserves each failure and disables retries during another pending source", () => {
+    const markup = render([], {
+      pendingTypes: ["SentryClips"],
+      errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
+    });
+    expect(markup).toContain("Loading Sentry recordings…");
+    expect(markup).toContain("Saved listing failed.");
+    expect(markup).toContain("Recent listing failed.");
+    expect(markup).toMatch(/<button disabled="">Retry Saved<\/button>/);
+    expect(markup).toMatch(/<button disabled="">Retry Recent<\/button>/);
+    expect(markup).not.toContain("No recordings in the loaded pages");
+  });
+
+  it("does not claim an empty archive before its sources finish", () => {
+    const markup = render([], { pendingTypes: ["SavedClips", "SentryClips", "RecentClips"] });
+    expect(markup).toContain("Loading Saved, Sentry, Recent recordings…");
+    expect(markup.match(/role="status"/g)).toHaveLength(1);
+    expect(markup).not.toContain("No recordings in the loaded pages");
+    expect(markup).not.toContain("Loading recordings...");
+  });
+
+  it("does not report a failed listing as an empty archive", () => {
+    const markup = render([], { errorsByType: { SavedClips: "Listing failed." } });
+    expect(markup).toContain("Saved: Listing failed.");
+    expect(markup).not.toContain("No recordings in the loaded pages");
+  });
+
+  it("keeps failed continuation pages behind their explicit Retry action", () => {
+    const markup = render([recording("RecentClips")], {
+      errorsByType: { RecentClips: "Older page failed." },
+      hasMore: { SavedClips: false, SentryClips: false, RecentClips: true },
+    });
+    expect(markup).toContain(">Retry Recent</button>");
+    expect(markup).not.toContain("Load more recordings");
+    expect(markup).not.toContain("Older recordings are available");
+  });
+
+  it("shows an empty state after successful sources settle", () => {
+    const markup = render([]);
+    expect(markup).toContain("No recordings in the loaded pages");
+    expect(markup).not.toContain('role="status"');
+    expect(markup).not.toContain('role="alert"');
   });
 });
