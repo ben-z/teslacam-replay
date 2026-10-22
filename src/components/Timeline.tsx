@@ -6,10 +6,6 @@ import "./Timeline.css";
 interface Props {
   events: DashcamEvent[];
   onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[]) => void;
-  selectedEvent?: DashcamEvent | null;
-  displayTime?: number;
-  isPlaying?: boolean;
-  compact?: boolean;
   footer?: ReactNode;
   scrollRef?: Ref<HTMLDivElement>;
 }
@@ -40,10 +36,6 @@ const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", { weekday: "short", t
 const DATE_LABEL_FORMATTER = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function toFractionalHour(d: Date): number {
-  return d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
-}
-
 function formatHour(h: number): string {
   const hr = Math.floor(h) % 24;
   if (hr === 0) return "12a";
@@ -71,7 +63,7 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, isPlaying, compact, footer, scrollRef }: Props) {
+export function Timeline({ events, onSelectEvent, footer, scrollRef }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const sessionList = useMemo(
@@ -155,26 +147,11 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
-  // Compute playhead position on the timeline
-  const playheadInfo = useMemo(() => {
-    if (!selectedEvent || displayTime == null || !selectedEvent.clips[0]) return null;
-    const startEpoch = recordingWallTimeMs(selectedEvent.clips[0].timestamp);
-    const currentEpoch = startEpoch + displayTime * 1000;
-    const currentDate = new Date(currentEpoch);
-
-    const dateStr = currentDate.toISOString().slice(0, 10);
-
-    const fractionalHour = toFractionalHour(currentDate);
-    const leftPct = (fractionalHour / 24) * 100;
-    return { dateStr, leftPct };
-  }, [selectedEvent, displayTime]);
-
-  const selectedKey = selectedEvent ? `${selectedEvent.type}/${selectedEvent.id}` : null;
   const handleTooltipClear = useCallback(() => setTooltip(null), []);
 
   if (days.length === 0) {
     return (
-      <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
+      <div className="timeline">
         <div className="timeline-overview">
           <div className="timeline-scroll" ref={scrollRef}>
             <div className="timeline-empty">No recorded video in the loaded pages</div>
@@ -186,47 +163,39 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
   }
 
   return (
-    <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
+    <div className="timeline">
       <div className="timeline-overview">
-        {!compact && (
-          <div className="timeline-toolbar">
-            <div className="timeline-summary">
-              <strong>{events.length}</strong> loaded recording{events.length !== 1 ? "s" : ""}
-              {" "}· Video on <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
-              <span className="timeline-coverage-note">Approximate recording coverage</span>
-            </div>
-            <div className="timeline-legend">
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
-              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
-            </div>
+        <div className="timeline-toolbar">
+          <div className="timeline-summary">
+            <strong>{events.length}</strong> loaded recording{events.length !== 1 ? "s" : ""}
+            {" "}· Video on <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
+            <span className="timeline-coverage-note">Approximate recording coverage</span>
           </div>
-        )}
-
-        {!compact && (
-          <div className="timeline-axis">
-            <div className="timeline-axis-inner">
-              {HOUR_TICKS.map((h) => (
-                <span
-                  key={h}
-                  className="timeline-axis-label"
-                  style={{ left: `${(h / 24) * 100}%` }}
-                >
-                  {formatHour(h)}
-                </span>
-              ))}
-            </div>
+          <div className="timeline-legend">
+            <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
+            <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
+            <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
           </div>
-        )}
+        </div>
+        <div className="timeline-axis">
+          <div className="timeline-axis-inner">
+            {HOUR_TICKS.map((h) => (
+              <span
+                key={h}
+                className="timeline-axis-label"
+                style={{ left: `${(h / 24) * 100}%` }}
+              >
+                {formatHour(h)}
+              </span>
+            ))}
+          </div>
+        </div>
 
         <div className="timeline-scroll" ref={scrollRef}>
           {days.map((day) => (
             <TimelineDayRow
               key={day.dateStr}
               day={day}
-              selectedKey={selectedKey}
-              playheadLeftPct={playheadInfo?.dateStr === day.dateStr ? playheadInfo.leftPct : null}
-              isPlaying={Boolean(isPlaying)}
               onSessionClick={handleSessionClick}
               onBarMouseMove={handleBarMouseMove}
               onTooltipClear={handleTooltipClear}
@@ -250,17 +219,11 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
 
 const TimelineDayRow = memo(function TimelineDayRow({
   day,
-  selectedKey,
-  playheadLeftPct,
-  isPlaying,
   onSessionClick,
   onBarMouseMove,
   onTooltipClear,
 }: {
   day: DayData;
-  selectedKey: string | null;
-  playheadLeftPct: number | null;
-  isPlaying: boolean;
   onSessionClick: (session: SessionBlock) => void;
   onBarMouseMove: (e: React.MouseEvent, day: DayData) => void;
   onTooltipClear: () => void;
@@ -291,19 +254,13 @@ const TimelineDayRow = memo(function TimelineDayRow({
                     key={`${key}/${index}`}
                     tabIndex={-1}
                     aria-label={`Open ${label}`}
-                    className={`timeline-segment timeline-segment--${typeClass} ${selectedKey === key ? "active" : ""}`}
+                    className={`timeline-segment timeline-segment--${typeClass}`}
                     style={{ left: `${left}%`, width: `${width}%` }}
                     onClick={() => onSessionClick(session)}
                     title={label}
                   />
                 );
               }))}
-              {playheadLeftPct != null && (
-                <div
-                  className={`timeline-playhead ${isPlaying ? "timeline-playhead--playing" : ""}`}
-                  style={{ left: `${playheadLeftPct}%` }}
-                />
-              )}
             </div>
             {HOUR_TICKS.map((h) => (
               <div
@@ -326,7 +283,6 @@ const TimelineDayRow = memo(function TimelineDayRow({
                 key={`${session.event.type}/${session.event.id}`}
                 className="timeline-session-button"
                 aria-label={`Open ${type} recording at ${formatTimeDetailed(session.startHour)} on ${day.dateStr}`}
-                aria-current={selectedKey === `${session.event.type}/${session.event.id}` ? "true" : undefined}
                 onClick={() => onSessionClick(session)}
               >
                 <span className={`timeline-session-type timeline-segment--${type}`}>{type}</span>

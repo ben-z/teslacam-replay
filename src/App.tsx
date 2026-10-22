@@ -7,7 +7,6 @@ import {
 } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import { Player } from "./components/Player";
-import { Timeline } from "./components/Timeline";
 import type { DashcamEvent, ViewMode } from "./types";
 import { mergeEvents, replaceEventSnapshot } from "./events";
 
@@ -81,8 +80,6 @@ export function App() {
   const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
   // The filtered list of events the user was browsing when they selected an event
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
-  const [playerDisplayTime, setPlayerDisplayTime] = useState(0);
-  const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
   const pushedHashRef = useRef(false);
   const browseFocusRef = useRef<HTMLElement | null>(null);
   const eventsRef = useRef(events);
@@ -100,8 +97,6 @@ export function App() {
 
   const selectEvent = useCallback((event: DashcamEvent) => {
     setSelectedEvent(event);
-    setPlayerDisplayTime(0);
-    setPlayerIsPlaying(false);
     setView("player");
   }, []);
 
@@ -279,11 +274,6 @@ export function App() {
     [navList, selectedIdx, loadRoute]
   );
 
-  const handleTimeUpdate = useCallback((time: number, playing: boolean) => {
-    setPlayerDisplayTime((prev) => Math.abs(prev - time) < 0.05 ? prev : time);
-    setPlayerIsPlaying((prev) => prev === playing ? prev : playing);
-  }, []);
-
   const hasMorePages = useMemo(() => ({
     SavedClips: Boolean(nextPageTokens.SavedClips),
     SentryClips: Boolean(nextPageTokens.SentryClips),
@@ -315,18 +305,7 @@ export function App() {
               onNavigate={handleNavigate}
               hasPrev={selectedIdx > 0}
               hasNext={selectedIdx < navList.length - 1}
-              onTimeUpdate={selectedEvent.type === "RecentClips" ? handleTimeUpdate : undefined}
             />
-            {selectedEvent.type === "RecentClips" && (
-              <Timeline
-                events={events}
-                selectedEvent={selectedEvent}
-                displayTime={playerDisplayTime}
-                isPlaying={playerIsPlaying}
-                onSelectEvent={handleSelectEvent}
-                compact
-              />
-            )}
           </div>
         ) : (
           <div className="event-loading" role="status">

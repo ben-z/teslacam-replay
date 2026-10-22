@@ -21,7 +21,7 @@ interface Props {
   onLoadMore: (types: EventPageType[]) => void;
 }
 
-type FilterType = "all" | "SavedClips" | "SentryClips";
+type FilterType = "all" | EventPageType;
 type ViewType = "events" | "timeline";
 
 const PAGE_SIZE = 48;
@@ -92,7 +92,7 @@ export function EventBrowser({
   }, [searchInput]);
 
   const loadedEvents = useMemo(() => events
-    .filter((event) => event.type !== "RecentClips" && (filter === "all" || event.type === filter))
+    .filter((event) => filter === "all" || event.type === filter)
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp)), [events, filter]);
 
   const filtered = useMemo(() => {
@@ -116,15 +116,6 @@ export function EventBrowser({
     document.querySelector(".browse-content")?.scrollTo(0, 0);
   }, []);
 
-  const counts = useMemo(() => {
-    let saved = 0, sentry = 0;
-    for (const e of events) {
-      if (e.type === "SavedClips") saved++;
-      else if (e.type === "SentryClips") sentry++;
-    }
-    return { total: saved + sentry, saved, sentry };
-  }, [events]);
-
   // Count events per date (from full filtered list for accurate counts)
   const dateCounts = useMemo(() => {
     const m = new Map<string, number>();
@@ -138,8 +129,7 @@ export function EventBrowser({
   const visible = filtered.slice(0, visibleCount);
   const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
-    if (view === "timeline") return ["SavedClips", "SentryClips", "RecentClips"];
-    if (filter === "all") return ["SavedClips", "SentryClips"];
+    if (view === "timeline" || filter === "all") return ["SavedClips", "SentryClips", "RecentClips"];
     return [filter];
   }, [filter, view]);
   const remoteTypesToLoad = useMemo(
@@ -151,8 +141,8 @@ export function EventBrowser({
   const loadedEventCount = events.length;
   const timelineAvailability = hasMoreRemote ? "Older recordings are available" : "No older recordings";
   const scopeSummary = search.trim()
-    ? `${filtered.length} matches in ${loadedEvents.length} loaded events`
-    : `${filtered.length} events loaded`;
+    ? `${filtered.length} matches in ${loadedEvents.length} loaded recordings`
+    : `${filtered.length} recordings loaded`;
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
@@ -209,7 +199,7 @@ export function EventBrowser({
               className={`browse-view-btn ${view === "events" ? "active" : ""}`}
               aria-pressed={view === "events"}
             >
-              Events ({counts.total})
+              Recordings ({loadedEventCount})
             </button>
             {(
               <button
@@ -227,8 +217,9 @@ export function EventBrowser({
                 {(
                   [
                     ["all", "All"],
-                    ["SavedClips", `Saved (${counts.saved})`],
-                    ["SentryClips", `Sentry (${counts.sentry})`],
+                    ["SavedClips", "Saved"],
+                    ["SentryClips", "Sentry"],
+                    ["RecentClips", "Recent"],
                   ] as [FilterType, string][]
                 ).map(([value, label]) => (
                   <button
@@ -244,11 +235,11 @@ export function EventBrowser({
               <div className="browse-search-wrapper">
                 <input
                   type="text"
-                  placeholder="Search loaded events…"
+                  placeholder="Search loaded recordings…"
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   className="browse-search"
-                  aria-label="Search loaded events by city, date or reason"
+                  aria-label="Search loaded recordings by city, date or reason"
                 />
                 {searchInput && (
                   <button
@@ -273,14 +264,14 @@ export function EventBrowser({
             {search.trim() && oldestLoadedDate && (
               <> · Loaded dates: {oldestLoadedDate}{oldestLoadedDate !== newestLoadedDate && `–${newestLoadedDate}`}</>
             )}
-            {hasMoreRemote && " · Older events are available"}
+            {hasMoreRemote && " · Older recordings are available"}
           </p>
         )}
 
         {loading && events.length === 0 ? (
           <div className="browse-loading">
             <div className="browse-spinner" />
-            <p>Loading events...</p>
+            <p>Loading recordings...</p>
             <p className="browse-loading-hint">
               Loading recordings
             </p>
@@ -318,7 +309,7 @@ export function EventBrowser({
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
               <>
-                <p>No loaded events match your filters</p>
+                <p>No loaded recordings match your filters</p>
                 <button
                   onClick={() => { setFilter("all"); setSearchInput(""); }}
                   className="browse-clear-filters-btn"
@@ -327,11 +318,11 @@ export function EventBrowser({
                 </button>
               </>
             ) : (
-              <p>No events in the loaded pages</p>
+              <p>No recordings in the loaded pages</p>
             )}
             {hasMoreRemote && (
               <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={loadingMore}>
-                {loadingMore ? "Loading recordings…" : "Load older events"}
+                {loadingMore ? "Loading recordings…" : "Load older recordings"}
               </button>
             )}
           </div>
@@ -348,7 +339,7 @@ export function EventBrowser({
                       <div className="browse-date-header">
                         {formatDateGroup(event.timestamp)}
                         <span className="browse-date-count">
-                          {dateCounts.get(curDate) || 0} event{(dateCounts.get(curDate) || 0) !== 1 ? "s" : ""}
+                          {dateCounts.get(curDate) || 0} recording{(dateCounts.get(curDate) || 0) !== 1 ? "s" : ""}
                         </span>
                       </div>
                     )}
@@ -369,8 +360,8 @@ export function EventBrowser({
                   onClick={handleLoadMore}
                 >
                   {hasMoreLoaded
-                    ? `Show ${filtered.length - visibleCount} more events`
-                    : loadingMore ? "Loading recordings…" : "Load more events"}
+                    ? `Show ${filtered.length - visibleCount} more recordings`
+                    : loadingMore ? "Loading recordings…" : "Load more recordings"}
                 </button>
               </div>
             )}

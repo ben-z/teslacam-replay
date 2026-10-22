@@ -23,15 +23,15 @@ function setup(paths: Record<string, boolean>, listedFiles: Record<string, strin
       return file ? Response.json({ file }) : new Response("Not found", { status: 404 });
     }
     if (url.pathname === "/api/list") {
-      const folderId = url.searchParams.get("folderId")!;
+      const folderId = url.searchParams.get("folderId");
+      if (!folderId) return Response.json({ folderId: "root", files: [...entries.values()].filter((entry) => entry.mimeType === FOLDER_MIME && !entry.id.includes("/")) });
       if (!(folderId in listedFiles)) throw new Error(`Unexpected unbounded folder listing: ${folderId}`);
       return Response.json({ folderId, files: listedFiles[folderId].map((name) => entries.get(name)!) });
     }
     throw new Error(`Unexpected provider request: ${url}`);
   }));
   const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
-  const roots = [...entries.values()].filter((entry) => entry.mimeType === FOLDER_MIME && !entry.id.includes("/"));
-  return { archive: new RecentArchive(drive, roots), requests };
+  return { archive: new RecentArchive(drive), requests };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -47,8 +47,9 @@ describe("Recent recording bookmarks", () => {
     const event = await archive.findEvent(id);
     expect(event).toMatchObject({ id, type: "RecentClips", cameraCount: 2, clips: [{ timestamp: id, cameras: ["front", "back"] }] });
     expect(event!.clips[0].sourceByCamera!.front.id).toBe(`RecentClips/${id}-front.mp4`);
-    expect(requests).toHaveLength(7);
-    expect(requests.every((url) => url.pathname === "/api/resolve")).toBe(true);
+    expect(requests).toHaveLength(8);
+    expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(7);
+    expect(requests.filter((url) => url.pathname === "/api/list").every((url) => !url.searchParams.has("folderId"))).toBe(true);
   });
 
   it("restores a preserved flat recording without listing the large legacy archive", async () => {
@@ -61,8 +62,9 @@ describe("Recent recording bookmarks", () => {
     const event = await archive.findEvent(id);
     expect(event!.clips[0].sourceByCamera!.left_repeater.id).toBe(`${LEGACY}/${id}-left_repeater.mp4`);
     expect(event!.clips[0].cameras).toEqual(["left_repeater"]);
-    expect(requests).toHaveLength(14);
-    expect(requests.every((url) => url.pathname === "/api/resolve")).toBe(true);
+    expect(requests).toHaveLength(15);
+    expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(14);
+    expect(requests.filter((url) => url.pathname === "/api/list").every((url) => !url.searchParams.has("folderId"))).toBe(true);
   });
 
   it("retains dated-session restoration without adding flat-root scans", async () => {
@@ -73,7 +75,7 @@ describe("Recent recording bookmarks", () => {
     const event = await archive.findEvent(timestamps[1]);
     expect(event!.clips.map((clip) => clip.timestamp)).toEqual(timestamps);
     expect(event!.clips.every((clip) => clip.subfolder === "2026-10-21")).toBe(true);
-    expect(requests.filter((url) => url.pathname === "/api/list")).toHaveLength(1);
+    expect(requests.filter((url) => url.pathname === "/api/list" && url.searchParams.has("folderId"))).toHaveLength(1);
   });
 
   it("surfaces a provider failure rather than returning a partial camera set", async () => {
@@ -85,6 +87,6 @@ describe("Recent recording bookmarks", () => {
   it("returns not-found only after all supported roots lack the requested recording", async () => {
     const { archive, requests } = setup({ RecentClips: true, [LEGACY]: true }, {}, {});
     await expect(archive.findEvent("2026-09-30_12-00-00")).resolves.toBeNull();
-    expect(requests).toHaveLength(14);
+    expect(requests).toHaveLength(15);
   });
 });

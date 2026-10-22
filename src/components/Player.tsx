@@ -15,7 +15,6 @@ interface Props {
   onNavigate?: (direction: -1 | 1) => void;
   hasPrev?: boolean;
   hasNext?: boolean;
-  onTimeUpdate?: (time: number, isPlaying: boolean) => void;
 }
 
 type Layout = "grid" | "focus";
@@ -35,7 +34,6 @@ const SYNC_THRESHOLD = 0.15; // seconds - max drift before re-syncing
 const SYNC_INTERVAL = 200; // ms - how often to check sync
 const SEEK_STEP = 5; // seconds for arrow key seeking
 const SPEED_OPTIONS = [0.5, 1, 1.5, 2];
-const PARENT_TIME_UPDATE_INTERVAL = 500; // ms - compact timeline does not need every sync tick
 const NEXT_SEGMENT_PREFETCH_WINDOW = 15; // seconds before boundary
 const HLS_LOAD_TIMEOUT_MS = 120_000; // first-run server-side segmentation can take tens of seconds
 const WALL_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -69,7 +67,7 @@ const BADGE_MAP = {
   SavedClips: { label: "Saved", color: "var(--saved-color)" },
 } as const;
 
-export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext, onTimeUpdate }: Props) {
+export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext }: Props) {
   const [layout, setLayout] = useState<Layout>("focus");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -114,10 +112,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   const bufferingCamerasRef = useRef<Set<CameraAngle>>(new Set());
   const videoErrorsRef = useRef<Set<CameraAngle>>(new Set());
   const endedCamerasRef = useRef<Set<CameraAngle>>(new Set());
-  const onTimeUpdateRef = useRef(onTimeUpdate);
-  const lastParentTimeUpdateRef = useRef({ time: -1, playing: false, at: 0 });
   const prefetchedSegmentsRef = useRef<Set<string>>(new Set());
-  onTimeUpdateRef.current = onTimeUpdate;
 
   // Keep refs in sync with state (displayTimeRef is omitted — it's the
   // source of truth, written by the sync interval and seekTo/loadSegment)
@@ -200,25 +195,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     []
   );
 
-  const notifyTimeUpdate = useCallback((time: number, playing: boolean, force = false) => {
-    const callback = onTimeUpdateRef.current;
-    if (!callback) return;
-
-    const now = performance.now();
-    const last = lastParentTimeUpdateRef.current;
-    if (
-      !force &&
-      playing === last.playing &&
-      Math.abs(time - last.time) < 0.5 &&
-      now - last.at < PARENT_TIME_UPDATE_INTERVAL
-    ) {
-      return;
-    }
-
-    lastParentTimeUpdateRef.current = { time, playing, at: now };
-    callback(time, playing);
-  }, []);
-
   // --- HLS helpers ---
 
   const clearBuffering = useCallback((cam: CameraAngle) => {
@@ -259,9 +235,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((video) => video.pause());
-      notifyTimeUpdate(displayTimeRef.current, false, true);
     }
-  }, [notifyTimeUpdate, clearBuffering]);
+  }, [clearBuffering]);
 
   const playCamera = useCallback((camera: CameraAngle, video: HTMLVideoElement) => {
     if (!participantCamerasRef.current.includes(camera) || videoErrorsRef.current.has(camera)) return;
@@ -274,7 +249,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       if (segmentIdxRef.current === segmentOffsetsRef.current.length - 2 && boundary !== null && localTime >= boundary) {
         isPlayingRef.current = false;
         setIsPlaying(false);
-        notifyTimeUpdate(displayTimeRef.current, false, true);
       }
       return;
     }
@@ -285,9 +259,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       setIsPlaying(false);
       videoElsRef.current.forEach((element) => element.pause());
       setPlayerError(`Playback could not start: ${error instanceof Error ? error.message : String(error)}`);
-      notifyTimeUpdate(displayTimeRef.current, false, true);
     });
-  }, [notifyTimeUpdate]);
+  }, []);
 
   const recordCompletedDuration = useCallback((cam: CameraAngle, url: string, duration: number) => {
     const source = hlsSourcesRef.current.get(cam);
@@ -433,7 +406,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       if (isPlayingRef.current && active.length > 0 && playable.length === 0) {
         isPlayingRef.current = false;
         setIsPlaying(false);
-        notifyTimeUpdate(displayTimeRef.current, false, true);
         return;
       }
       const cameraDurations = playable.map((cam) => {
@@ -459,7 +431,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         const nextTime = displayTimeRef.current + elapsed;
         displayTimeRef.current = boundary === null ? nextTime : Math.min(nextTime, boundary);
         setDisplayTime(displayTimeRef.current);
-        notifyTimeUpdate(displayTimeRef.current, true);
       }
 
       // 2. Sync each video independently to displayTime
@@ -540,7 +511,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         setSegmentLoading(false);
         isPlayingRef.current = false;
         setIsPlaying(false);
-        notifyTimeUpdate(targetGlobalTime, false, true);
         return;
       }
 
@@ -609,7 +579,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       canplayCleanupRef.current = () => cleanups.forEach((cleanup) => cleanup());
       if (bufferedAtPosition) onReady();
     },
-    [event.clips, event.type, event.id, eventKey, allEventCameras, attachHls, playCamera, notifyTimeUpdate, clearBuffering]
+    [event.clips, event.type, event.id, eventKey, allEventCameras, attachHls, playCamera, clearBuffering]
   );
 
   // Advance to next segment
@@ -619,13 +589,12 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((video) => video.pause());
-      notifyTimeUpdate(displayTimeRef.current, false, true);
       return;
     }
     segmentIdxRef.current = nextIdx;
     setSegmentIdx(nextIdx);
     loadSegment(nextIdx, 0, true);
-  }, [event.clips.length, loadSegment, notifyTimeUpdate]);
+  }, [event.clips.length, loadSegment]);
   advanceSegmentRef.current = advanceSegment;
 
   // Seek to global time
@@ -669,7 +638,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           if (isPlayingRef.current) playCamera(cam, v);
         });
       }
-      notifyTimeUpdate(clamped, isPlayingRef.current, true);
     },
     [event.clips, eventKey, loadSegment, totalDuration, playCamera]
   );
@@ -695,7 +663,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((v) => v.pause());
-      notifyTimeUpdate(displayTimeRef.current, false, true);
     } else {
       setPlayerError(null);
       const atLastSegment = segmentIdxRef.current === event.clips.length - 1;
@@ -713,17 +680,15 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         v.playbackRate = playbackRateRef.current;
         playCamera(cam, v);
       });
-      notifyTimeUpdate(displayTimeRef.current, true, true);
     }
-  }, [event.clips, seekTo, notifyTimeUpdate, playCamera]);
+  }, [event.clips, seekTo, playCamera]);
 
   useEffect(() => {
     if (finalDurationKnown && displayTimeRef.current > totalDuration) {
       displayTimeRef.current = totalDuration;
       setDisplayTime(totalDuration);
-      notifyTimeUpdate(totalDuration, isPlayingRef.current, true);
     }
-  }, [finalDurationKnown, totalDuration, notifyTimeUpdate]);
+  }, [finalDurationKnown, totalDuration]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 

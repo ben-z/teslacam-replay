@@ -61,14 +61,6 @@ describe("recording timeline", () => {
     expect(html).toContain("about &lt;1m");
   });
 
-  it("moves the playhead onto the next calendar day after midnight", () => {
-    const recording = event([clip("2026-10-21_23-59-30", 60)]);
-    const html = render([recording], { selectedEvent: recording, displayTime: 45 });
-    const playhead = html.match(/class="timeline-playhead [^>]*style="left:([^%]+)%"/);
-    expect(Number(playhead![1])).toBeCloseTo(100 * 15 / 86400, 8);
-    expect(html.indexOf('class="timeline-playhead ')).toBeLessThan(html.indexOf("Oct 21"));
-  });
-
   it("preserves exact minute labels when fractional-hour arithmetic rounds below a minute", () => {
     const html = render([event([clip("2026-10-21_20-35-00", 60)])]);
     expect(html).toContain('aria-label="Open recent recording at 8:35 PM on 2026-10-21"');
