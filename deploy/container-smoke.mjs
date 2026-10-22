@@ -42,7 +42,8 @@ assert(assets.some((asset) => asset.endsWith(".js")), "Frontend JavaScript is ab
 assert(assets.some((asset) => asset.endsWith(".css")), "Frontend CSS is absent");
 for (const asset of assets) {
   const response = await request(asset);
-  assert(Number(response.headers.get("Content-Length")) > 0, `${asset} is empty`);
+  assert.equal(response.headers.get("Content-Encoding"), "gzip", `${asset} is uncompressed`);
+  assert((await response.arrayBuffer()).byteLength > 0, `${asset} is empty`);
 }
 console.log("Packaged application, Drive connection, ffmpeg and frontend assets passed.");
 process.exit(0);

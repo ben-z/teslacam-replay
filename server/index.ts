@@ -101,7 +101,7 @@ if (appOrigin !== undefined) {
     allowHeaders: ["Content-Type"],
   }));
 }
-app.use("/api/*", compress());
+app.use("*", compress());
 
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
 const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);

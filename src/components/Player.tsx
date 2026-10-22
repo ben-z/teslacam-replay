@@ -320,8 +320,9 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     // Ignore ended events during segment loading (stale events from previous segment)
     if (segmentLoadingRef.current) return;
     const video = videoElsRef.current.get(cam);
-    if (video && !hlsInstancesRef.current.has(cam)) {
-      recordCompletedDuration(cam, video.currentSrc, video.duration);
+    const source = hlsSourcesRef.current.get(cam);
+    if (video && source) {
+      recordCompletedDuration(cam, source.url, video.duration);
     }
     setEndedCameras((prev) => {
       if (prev.has(cam)) return prev;
@@ -406,12 +407,11 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         const source = hlsSourcesRef.current.get(cam);
         return source ? completedDurationsRef.current[source.timestamp]?.[cam] : undefined;
       });
-      const completed = playable.length > 0 && cameraDurations.every((duration) => duration !== undefined);
       const nextStart = segmentIdxRef.current < segmentOffsetsRef.current.length - 2 ? segmentOffsetsRef.current[segmentIdxRef.current + 1] : null;
       const boundary = playbackBoundary(segOff, nextStart, cameraDurations);
-      const allEnded = completed && playable.every((cam) => videoElsRef.current.get(cam)?.ended);
+      const allEnded = hasReachedPlaybackEnd(playable.map((camera) => ({ ended: Boolean(videoElsRef.current.get(camera)?.ended) })));
       if (isPlayingRef.current && allEnded) {
-        const actualEnd = boundary!;
+        const actualEnd = segOff + Math.max(...playable.map((camera) => videoElsRef.current.get(camera)!.currentTime));
         displayTimeRef.current = actualEnd;
         setDisplayTime(actualEnd);
         advanceSegmentRef.current();
@@ -431,6 +431,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
       // 2. Sync each video independently to displayTime
       const expectedLocal = displayTimeRef.current - segOff;
+      const finishingLastSegment = nextStart === null && boundary !== null && displayTimeRef.current >= boundary;
 
       for (const cam of active) {
         const v = videoElsRef.current.get(cam);
@@ -442,14 +443,14 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           playCamera(cam, v);
         }
         // Correct drift — only when video has data ready
-        if (!buffering.has(cam) && Math.abs(v.currentTime - expectedLocal) > SYNC_THRESHOLD) {
+        if (!finishingLastSegment && !buffering.has(cam) && Math.abs(v.currentTime - expectedLocal) > SYNC_THRESHOLD) {
           v.currentTime = expectedLocal;
         }
       }
 
       // 3. Auto-advance at segment boundary
       if (isPlayingRef.current) {
-        if (hasPlayingVideo && boundary !== null && displayTimeRef.current >= boundary) {
+        if (hasPlayingVideo && nextStart !== null && boundary !== null && displayTimeRef.current >= boundary) {
           advanceSegmentRef.current();
         }
       }
@@ -611,10 +612,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       setPlaybackError(null);
       const atLastSegment = segmentIdxRef.current === event.clips.length - 1;
       const playable = activeCamerasRef.current.filter((camera) => !videoErrorsRef.current.has(camera));
-      const atAvailableEnd = hasReachedPlaybackEnd(displayTimeRef.current, segmentOffsetsRef.current[segmentIdxRef.current], playable.map((camera) => {
-        const source = hlsSourcesRef.current.get(camera);
-        return { duration: source ? completedDurationsRef.current[source.timestamp]?.[camera] : undefined, ended: Boolean(videoElsRef.current.get(camera)?.ended) };
-      }));
+      const atAvailableEnd = hasReachedPlaybackEnd(playable.map((camera) => ({ ended: Boolean(videoElsRef.current.get(camera)?.ended) })));
       if (atLastSegment && atAvailableEnd) seekTo(0);
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -628,8 +626,12 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   }, [event.clips.length, seekTo, notifyTimeUpdate, playCamera]);
 
   useEffect(() => {
-    if (finalDurationKnown && displayTimeRef.current > totalDuration) seekTo(totalDuration);
-  }, [finalDurationKnown, totalDuration, seekTo]);
+    if (finalDurationKnown && displayTimeRef.current > totalDuration) {
+      displayTimeRef.current = totalDuration;
+      setDisplayTime(totalDuration);
+      notifyTimeUpdate(totalDuration, isPlayingRef.current, true);
+    }
+  }, [finalDurationKnown, totalDuration, notifyTimeUpdate]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 

@@ -9,9 +9,19 @@ describe("playback timeline", () => {
     const clips = [clip("2026-10-21_20-35-58")];
     const completed = { [clips[0].timestamp]: { front: 43.67 } };
     expect(playbackTimeline(clips, completed).estimated).toBe(true);
-    expect(hasReachedPlaybackEnd(43.67, 0, [{ duration: completed[clips[0].timestamp].front, ended: false }])).toBe(true);
-    expect(hasReachedPlaybackEnd(40, 0, [{ duration: 43.67, ended: false }])).toBe(false);
+    expect(hasReachedPlaybackEnd([{ ended: true }])).toBe(true);
+    expect(hasReachedPlaybackEnd([{ ended: false }])).toBe(false);
     expect(completed[clips[0].timestamp]).not.toHaveProperty("back");
+  });
+
+  it("waits for a lagging surviving camera even after the shared clock reaches the final duration", () => {
+    const globalTime = playbackBoundary(0, null, [43.61, 43.67]);
+    const front = { currentTime: 42.92, ended: false };
+    const left = { currentTime: 43.67, ended: true };
+    expect(globalTime).toBe(43.67);
+    expect(hasReachedPlaybackEnd([front, left])).toBe(false);
+    expect(hasReachedPlaybackEnd([{ ...front, currentTime: 43.61, ended: true }, left])).toBe(true);
+    expect(hasReachedPlaybackEnd([])).toBe(false);
   });
 
   it("ends playback at the longest completed camera, rather than the one-minute estimate", () => {

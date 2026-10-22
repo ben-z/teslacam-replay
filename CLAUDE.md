@@ -73,7 +73,7 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 tesl
 ### Backend
 - **Drive access**: `gdrive-lite.ts` talks to `gdrive-serve-lite`; file IDs and direct read URLs are retained while building pages so playback does not re-resolve paths
 - **Event index**: In-memory index of pages/events touched by the current server process; gdrive-serve-lite owns listing and pagination
-- **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching at `~/.cache/teslacam-replay/hls/`
+- **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching below the configured `CACHE_DIR`
 - **Page-first browsing**: `/api/events/page` scans only the requested Drive page, then the player routes use the in-memory event index or single-folder resolution
 
 ### Multi-Camera Sync
