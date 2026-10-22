@@ -444,6 +444,44 @@ describe("RecentClips archive API", () => {
     expect(response.status).toBe(400);
     expect(provider.listsFor("Private")).toHaveLength(0);
   });
+
+  it("records archive request intervals and statuses without request secrets or error bodies", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await start();
+      log.mockClear();
+      expect((await request("/api/events/page?type=RecentClips")).status).toBe(200);
+      expect((await request("/api/events/page?type=RecentClips&pageToken=private-cursor", {
+        headers: { Authorization: "Bearer private-authorization" },
+      })).status).toBe(400);
+      expect((await request("/api/events/SavedClips/2026-10-02_10-00-00?private-query=private-value")).status).toBe(404);
+      provider.add("RecentClips/2026-02-30_10-00-00-front.mp4");
+      const failed = await request("/api/events/page?type=RecentClips");
+      expect(failed.status).toBe(500);
+      const messages = log.mock.calls.map(([message]) => JSON.parse(message));
+      const spans = messages.filter((message) => message.event === "archive_request");
+      expect(spans).toHaveLength(8);
+      for (let i = 0; i < spans.length; i += 2) {
+        const start = spans[i];
+        const complete = spans[i + 1];
+        expect(start.phase).toBe("start");
+        expect(complete).toMatchObject({
+          requestId: start.requestId, startedAt: start.startedAt,
+          type: start.type, route: start.route, phase: "complete",
+        });
+        expect(Date.parse(start.startedAt)).not.toBeNaN();
+        expect(complete.elapsedMs).toBeGreaterThanOrEqual(0);
+      }
+      expect(spans.filter((span) => span.phase === "complete").map((span) => span.status)).toEqual([200, 400, 404, 500]);
+      expect(spans[4].route).toBe("recording");
+      const serialized = JSON.stringify(messages);
+      for (const secret of ["private-cursor", "private-authorization", "private-query", "private-value", "2026-02-30", "front.mp4"]) {
+        expect(serialized).not.toContain(secret);
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 describe("hosted API origin policy", () => {

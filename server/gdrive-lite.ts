@@ -130,24 +130,23 @@ export class GDriveLiteClient {
 
   async resolvePath(path: string, type: "folder" | "file" | "any" = "folder"): Promise<DriveEntry> {
     const params = new URLSearchParams({ path, type });
-    const res = await fetch(this.url(`/api/resolve?${params.toString()}`), {
-      headers: this.authHeaders(),
-      signal: AbortSignal.timeout(this.metadataTimeoutMs),
+    return this.metadataRequest("resolve", this.url(`/api/resolve?${params.toString()}`), this.metadataTimeoutMs, async (res) => {
+      if (!res.ok) {
+        if (res.status === 404) throw new DriveNotFoundError(`Drive path not found: ${path}`);
+        throw new Error(`Failed to resolve Drive path ${path}: ${res.status}`);
+      }
+      const data = await res.json() as ResolveResponse;
+      return withAbsoluteUrl(data.file, this.baseUrl);
     });
-    if (!res.ok) {
-      if (res.status === 404) throw new DriveNotFoundError(`Drive path not found: ${path}`);
-      throw new Error(`Failed to resolve Drive path ${path}: ${res.status}`);
-    }
-    const data = await res.json() as ResolveResponse;
-    return withAbsoluteUrl(data.file, this.baseUrl);
   }
 
   async readText(file: DriveEntry): Promise<string> {
-    const res = await this.fetchEntry(file);
-    if (!res.ok) {
-      throw new Error(`Failed to read ${file.name}: ${res.status}`);
-    }
-    return res.text();
+    return this.metadataRequest("read-text", this.fileSource(file).url, this.metadataTimeoutMs, async (res) => {
+      if (!res.ok) {
+        throw new Error(`Failed to read ${file.name}: ${res.status}`);
+      }
+      return res.text();
+    });
   }
 
   async fetchSource(source: DriveFileSource): Promise<Response> {
@@ -179,11 +178,35 @@ export class GDriveLiteClient {
     return effectiveMimeType(file) === "application/vnd.google-apps.folder";
   }
 
-  private async fetchEntry(file: DriveEntry): Promise<Response> {
-    return fetch(this.fileSource(file).url, {
-      headers: this.authHeaders(),
-      signal: AbortSignal.timeout(this.metadataTimeoutMs),
-    });
+  private async metadataRequest<T>(
+    operation: "resolve" | "list-page" | "read-text",
+    url: string,
+    timeoutMs: number,
+    read: (response: Response) => Promise<T>,
+  ): Promise<T> {
+    const startedAt = new Date().toISOString();
+    const started = performance.now();
+    let status: number | undefined;
+    let outcome: "success" | "error" = "error";
+    try {
+      const response = await fetch(url, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = response.status;
+      const result = await read(response);
+      outcome = "success";
+      return result;
+    } finally {
+      console.info(JSON.stringify({
+        event: "drive_metadata",
+        operation,
+        startedAt,
+        elapsedMs: performance.now() - started,
+        outcome,
+        status,
+      }));
+    }
   }
 
   private async listAll(folder: Partial<DriveFolderRef>): Promise<DriveList> {
@@ -236,21 +259,19 @@ export class GDriveLiteClient {
     if (opts.type) params.set("type", opts.type);
     if (opts.orderBy) params.set("orderBy", opts.orderBy);
 
-    const res = await fetch(this.url(`/api/list?${params.toString()}`), {
-      headers: this.authHeaders(),
-      signal: AbortSignal.timeout(this.listTimeoutMs),
+    return this.metadataRequest("list-page", this.url(`/api/list?${params.toString()}`), this.listTimeoutMs, async (res) => {
+      if (!res.ok) {
+        throw new Error(`Failed to list Drive folder ${folder.id || "root"}: ${res.status}`);
+      }
+      const data = await res.json() as ListResponse;
+      if (data.incompleteSearch === true) throw new Error("Drive returned an incomplete folder listing");
+      return {
+        folderId: data.folderId,
+        resourceKey: data.resourceKey || folder.resourceKey,
+        nextPageToken: data.nextPageToken,
+        files: (data.files || []).map((entry) => withAbsoluteUrl(entry, this.baseUrl)),
+      };
     });
-    if (!res.ok) {
-      throw new Error(`Failed to list Drive folder ${folder.id || "root"}: ${res.status}`);
-    }
-    const data = await res.json() as ListResponse;
-    if (data.incompleteSearch === true) throw new Error("Drive returned an incomplete folder listing");
-    return {
-      folderId: data.folderId,
-      resourceKey: data.resourceKey || folder.resourceKey,
-      nextPageToken: data.nextPageToken,
-      files: (data.files || []).map((entry) => withAbsoluteUrl(entry, this.baseUrl)),
-    };
   }
 
   private filePath(file: DriveEntry, id: string, resourceKey?: string): string {
