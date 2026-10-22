@@ -48,6 +48,7 @@ interface ListResponse {
   resourceKey?: string;
   files?: DriveEntry[];
   nextPageToken?: string;
+  incompleteSearch?: boolean;
 }
 
 interface ResolveResponse {
@@ -243,6 +244,7 @@ export class GDriveLiteClient {
       throw new Error(`Failed to list Drive folder ${folder.id || "root"}: ${res.status}`);
     }
     const data = await res.json() as ListResponse;
+    if (data.incompleteSearch === true) throw new Error("Drive returned an incomplete folder listing");
     return {
       folderId: data.folderId,
       resourceKey: data.resourceKey || folder.resourceKey,
