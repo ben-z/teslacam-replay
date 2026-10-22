@@ -772,6 +772,11 @@
     flex-basis: 100%;
   }
 
+  .player-header-title {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .player-camera-picker {
     order: 11;
   }
