@@ -1,10 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { hasReachedPlaybackEnd, playbackBoundary, playbackTimeline, recordingWallTimeMs } from "./playback";
+import { hasReachedPlaybackEnd, playbackBoundary, playbackParticipants, playbackTimeline, recordingWallTimeMs } from "./playback";
 import type { EventClip } from "./types";
 
 const clip = (timestamp: string): EventClip => ({ timestamp, cameras: ["front", "back"], durationSec: 60 });
 
 describe("playback timeline", () => {
+  it("keeps all cameras in Grid and only the selected available camera in Focus", () => {
+    const available = ["front", "back", "left_repeater"];
+    expect(playbackParticipants(available, null)).toEqual(available);
+    expect(playbackParticipants(available, "back")).toEqual(["back"]);
+    expect(playbackParticipants(["left_repeater"], "back")).toEqual([]);
+    expect(playbackParticipants([], "back")).toEqual([]);
+  });
+
+  it("ends a focused camera without discarding longer or unknown recording durations", () => {
+    const clips = [clip("2026-10-21_20-35-58")];
+    const partial = { [clips[0].timestamp]: { front: 8 } };
+    expect(playbackTimeline(clips, partial)).toMatchObject({ offsets: [0, 60], estimated: true });
+    const cameras = [{ name: "front", ended: true }, { name: "back", ended: false }];
+    expect(hasReachedPlaybackEnd(cameras.filter((camera) => playbackParticipants(clips[0].cameras, "front").includes(camera.name)))).toBe(true);
+    expect(hasReachedPlaybackEnd(cameras)).toBe(false);
+    expect(playbackTimeline(clips, { [clips[0].timestamp]: { front: 8, back: 12 } })).toMatchObject({ offsets: [0, 12], estimated: false });
+  });
   it("replays completed available views even when a failed camera leaves the event duration estimated", () => {
     const clips = [clip("2026-10-21_20-35-58")];
     const completed = { [clips[0].timestamp]: { front: 43.67 } };
