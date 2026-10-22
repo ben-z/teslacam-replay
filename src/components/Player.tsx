@@ -70,7 +70,7 @@ const BADGE_MAP = {
 } as const;
 
 export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext, onTimeUpdate }: Props) {
-  const [layout, setLayout] = useState<Layout>("grid");
+  const [layout, setLayout] = useState<Layout>("focus");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
   const [displayTime, setDisplayTime] = useState(0);
@@ -190,7 +190,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   const allCamerasFailed = participantCameras.length > 0 && participantCameras.every((camera) => videoErrors.has(camera));
   const audioAvailable = participantCameras.includes("front");
   const { frame: currentTelemFrame, loading: telemetryLoading, error: telemetryError, available: telemetryAvailable } =
-    useTelemetry(event, participantCameras.length > 0 ? segmentIdx : -1, displayTime, segmentOffsets);
+    useTelemetry(event, showTelemetry && participantCameras.length > 0 ? segmentIdx : -1, displayTime, segmentOffsets);
 
   const setRef = useCallback(
     (camera: CameraAngle, el: HTMLVideoElement | null) => {
