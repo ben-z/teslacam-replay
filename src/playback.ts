@@ -15,6 +15,11 @@ export function recordingWallTimeMs(timestamp: string): number {
 
 export type CompletedDurations = Record<string, Record<string, number>>;
 
+export function playbackParticipants<T>(available: T[], focused: T | null): T[] {
+  if (focused === null) return available;
+  return available.includes(focused) ? [focused] : [];
+}
+
 export function playbackBoundary(segmentStart: number, nextSegmentStart: number | null, cameraDurations: (number | undefined)[]): number | null {
   if (cameraDurations.length === 0 || cameraDurations.some((duration) => duration === undefined)) return nextSegmentStart;
   const completed = cameraDurations as number[];
