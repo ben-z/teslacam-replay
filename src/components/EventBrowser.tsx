@@ -192,7 +192,7 @@ export function EventBrowser({
         <div className="browse-filters">
           <div className="browse-view-toggle" role="group" aria-label="View">
             <button
-              onClick={() => { setView("events"); setVisibleCount(PAGE_SIZE); }}
+              onClick={() => { setView("events"); setVisibleCount(PAGE_SIZE); document.querySelector(".browse-content")?.scrollTo(0, 0); }}
               className={`browse-view-btn ${view === "events" ? "active" : ""}`}
               aria-pressed={view === "events"}
             >
@@ -200,7 +200,7 @@ export function EventBrowser({
             </button>
             {(
               <button
-                onClick={() => setView("timeline")}
+                onClick={() => { setView("timeline"); document.querySelector(".browse-content")?.scrollTo(0, 0); }}
                 className={`browse-view-btn ${view === "timeline" ? "active" : ""}`}
                 aria-pressed={view === "timeline"}
               >
