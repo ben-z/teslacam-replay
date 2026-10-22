@@ -851,7 +851,9 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           e.preventDefault();
           if (e.shiftKey) {
             // Shift+Left: jump to previous segment
-            seekTo(segmentOffsetsRef.current[Math.max(0, segmentIdxRef.current - 1)]);
+            if (segmentIdxRef.current > 0) {
+              seekTo(segmentOffsetsRef.current[segmentIdxRef.current - 1]);
+            }
           } else {
             seekTo(displayTimeRef.current - SEEK_STEP);
           }
@@ -860,7 +862,9 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           e.preventDefault();
           if (e.shiftKey) {
             // Shift+Right: jump to next segment
-            seekTo(segmentOffsetsRef.current[segmentIdxRef.current + 1] || 0);
+            if (segmentIdxRef.current < segmentOffsetsRef.current.length - 2) {
+              seekTo(segmentOffsetsRef.current[segmentIdxRef.current + 1]);
+            }
           } else {
             seekTo(displayTimeRef.current + SEEK_STEP);
           }
@@ -1257,7 +1261,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
               {bufferingCameras.has(cam) && !videoErrors.has(cam) && (
                 <span className="player-video-buffering" role="status">{initialLoading ? "Loading" : "Buffering"} {CAMERA_LABELS[cam]}...</span>
               )}
-              {(endedCameras.has(cam) || atCompletedEnd) && !videoErrors.has(cam) && (
+              {!inRecordingGap && (endedCameras.has(cam) || atCompletedEnd) && !videoErrors.has(cam) && (
                 <span className="player-video-ended">End of clip</span>
               )}
               {videoErrors.has(cam) && (
@@ -1351,6 +1355,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
             aria-valuenow={Math.min(displayTime, totalDuration)}
             aria-valuetext={`${formatTime(displayTime)} of ${timeline.estimated ? "approximately " : ""}${formatTime(totalDuration)}${segmentIdx === event.clips.length - 1 && participantDuration !== null && segmentOffsets[segmentIdx] + participantDuration < totalDuration ? `; ${layout === "focus" ? CAMERA_LABELS[focusCamera] : "Selected"} footage ends at ${formatTime(segmentOffsets[segmentIdx] + participantDuration)}` : ""}`}
             onKeyDown={(e) => {
+              if (e.altKey || e.ctrlKey || e.metaKey || (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"))) return;
               const target = e.key === "Home" ? 0 : e.key === "End" ? totalDuration : e.key === "ArrowLeft" || e.key === "ArrowDown" ? displayTimeRef.current - SEEK_STEP : e.key === "ArrowRight" || e.key === "ArrowUp" ? displayTimeRef.current + SEEK_STEP : null;
               if (target === null) return;
               e.preventDefault();
@@ -1464,7 +1469,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           <button
             className="player-segment-btn"
             disabled={segmentIdx >= event.clips.length - 1}
-            onClick={() => seekTo(segmentOffsetsRef.current[segmentIdx + 1] || 0)}
+            onClick={() => seekTo(segmentOffsetsRef.current[segmentIdx + 1])}
             title="Next segment (Shift+Right)"
             aria-label="Next segment"
           >
