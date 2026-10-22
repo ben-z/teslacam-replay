@@ -5,7 +5,7 @@ import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { HTTPException } from "hono/http-exception";
 import { createReadStream } from "fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
@@ -82,6 +82,28 @@ app.get("/healthz", async (c) => {
 });
 
 app.get("/api/version", (c) => c.json({ version: appVersion }));
+
+app.use("/api/events/*", async (c, next) => {
+  const parts = c.req.path.split("/");
+  const type = parts[3] === "page" ? c.req.query("type") : parts[3];
+  if (type !== "SavedClips" && type !== "SentryClips" && type !== "RecentClips") return next();
+  const route = parts[3] === "page" && parts.length === 4 ? "page"
+    : parts.length === 5 && validateParams(type, parts[4]) ? "recording" : undefined;
+  if (!route) return next();
+  const context = {
+    event: "archive_request", requestId: randomUUID(), route, type,
+    startedAt: new Date().toISOString(),
+  };
+  const started = performance.now();
+  console.info(JSON.stringify({ ...context, phase: "start" }));
+  try {
+    await next();
+  } finally {
+    console.info(JSON.stringify({
+      ...context, phase: "complete", elapsedMs: performance.now() - started, status: c.res.status,
+    }));
+  }
+});
 
 if (appOrigin !== undefined) {
   app.use("/api/*", async (c, next) => {
