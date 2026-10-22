@@ -541,7 +541,7 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
 
 // Serve static files when SERVE_FRONTEND is enabled
 if (process.env.SERVE_FRONTEND === "true") {
-  app.use("/*", serveStatic({ root: "./dist" }));
+  app.use("/*", serveStatic({ root: "./dist", precompressed: true }));
   // SPA fallback - only for non-API routes
   app.get("*", (c, next) => {
     if (c.req.path.startsWith("/api/")) return next();
