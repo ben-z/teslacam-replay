@@ -133,12 +133,14 @@ export function EventBrowser({
     if (view === "timeline" || filter === "all") return SOURCE_TYPES;
     return [filter];
   }, [filter, view]);
-  const remoteTypesToLoad = useMemo(
+  const knownRemoteTypes = useMemo(
     () => pageTypesToLoad.filter((type) => hasMorePages[type] && errorsByType[type] === undefined),
     [hasMorePages, pageTypesToLoad, errorsByType]
   );
+  const remoteTypesToLoad = knownRemoteTypes.filter((type) => !pendingTypes.includes(type));
   const scopeIncomplete = pageTypesToLoad.some((type) => pendingTypes.includes(type) || errorsByType[type] !== undefined);
-  const hasMoreRemote = remoteTypesToLoad.length > 0;
+  const hasMoreRemote = knownRemoteTypes.length > 0;
+  const canLoadRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
   const timelineAvailability = hasMoreRemote ? "Older recordings are available" : "No older recordings";
@@ -152,17 +154,17 @@ export function EventBrowser({
   const handleLoadMore = useCallback(() => {
     if (hasMoreLoaded) {
       setVisibleCount((c) => c + PAGE_SIZE);
-    } else if (hasMoreRemote && !pending) {
+    } else if (canLoadRemote) {
       onLoadMore(remoteTypesToLoad);
     }
-  }, [hasMoreLoaded, hasMoreRemote, pending, onLoadMore, remoteTypesToLoad]);
+  }, [hasMoreLoaded, canLoadRemote, onLoadMore, remoteTypesToLoad]);
 
   const timelineFooter = hasMoreRemote ? (
     <div className="browse-load-more browse-load-more--passive">
       <button
         type="button"
         className="browse-load-more-hint"
-        disabled={pending}
+        disabled={!canLoadRemote}
         onClick={handleLoadMore}
       >
         Load older recordings
@@ -263,7 +265,7 @@ export function EventBrowser({
             {events.some((event) => event.type === type) && (
               <> Previously loaded {BADGE_STYLES[type].label} recordings are still shown.</>
             )}
-            {" "}<button onClick={() => onRetry(type)} disabled={pending}>Retry {BADGE_STYLES[type].label}</button>
+            {" "}<button onClick={() => onRetry(type)} disabled={pendingTypes.includes(type)}>Retry {BADGE_STYLES[type].label}</button>
           </div>
         ))}
         {view === "events" && (
@@ -308,7 +310,7 @@ export function EventBrowser({
               <p>No recordings in the loaded pages</p>
             ))}
             {hasMoreRemote && (
-              <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={pending}>
+              <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={!canLoadRemote}>
                 Load older recordings
               </button>
             )}
@@ -343,11 +345,11 @@ export function EventBrowser({
                 <button
                   type="button"
                   className="browse-load-more-hint"
-                  disabled={pending && !hasMoreLoaded}
+                  disabled={!hasMoreLoaded && !canLoadRemote}
                   onClick={handleLoadMore}
                 >
                   {hasMoreLoaded
-                    ? `Show ${filtered.length - visibleCount} more recordings`
+                    ? "Show more recordings"
                     : "Load more recordings"}
                 </button>
               </div>
