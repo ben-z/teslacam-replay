@@ -23,5 +23,10 @@ jobs:
       - run: npm test
       - run: npx tsc --noEmit
       - run: npm run build
+      - name: Build production container
+        run: docker build --build-arg SOURCE_SHA=image-smoke -t teslacam-replay:smoke .
+      - name: Boot packaged application
+        timeout-minutes: 1
+        run: docker run --rm -i --entrypoint node teslacam-replay:smoke --import tsx/esm --input-type=module < deploy/container-smoke.mjs
       - run: bash -n deploy/deploy.sh deploy/bootstrap/bootstrap.sh
       - run: python3 -m unittest discover -s deploy/bootstrap -p 'test_*.py'

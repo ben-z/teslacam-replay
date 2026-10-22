@@ -8,3 +8,4 @@ dist
 *.png
 *.tsbuildinfo
 .playwright-mcp
+/cache/
