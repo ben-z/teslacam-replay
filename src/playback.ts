@@ -23,11 +23,8 @@ export function playbackBoundary(segmentStart: number, nextSegmentStart: number 
   return nextSegmentStart === null ? mediaEnd : Math.min(mediaEnd, nextSegmentStart);
 }
 
-export function hasReachedPlaybackEnd(position: number, segmentStart: number, cameras: { duration: number | undefined; ended: boolean }[]): boolean {
-  if (cameras.length === 0) return false;
-  if (cameras.every((camera) => camera.ended)) return true;
-  const boundary = playbackBoundary(segmentStart, null, cameras.map((camera) => camera.duration));
-  return boundary !== null && position >= boundary;
+export function hasReachedPlaybackEnd(cameras: { ended: boolean }[]): boolean {
+  return cameras.length > 0 && cameras.every((camera) => camera.ended);
 }
 
 export function playbackTimeline(clips: EventClip[], completed: CompletedDurations): {
