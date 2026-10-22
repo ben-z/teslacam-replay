@@ -83,7 +83,7 @@ export function App() {
   const browseFocusRef = useRef<HTMLElement | null>(null);
   const eventsRef = useRef(events);
   const nextPageTokensRef = useRef(nextPageTokens);
-  const pageLoadingRef = useRef(false);
+  const pendingPageTypesRef = useRef(new Set<EventPageType>());
   eventsRef.current = events;
   nextPageTokensRef.current = nextPageTokens;
 
@@ -124,43 +124,45 @@ export function App() {
   }, [selectEvent]);
 
   const loadPages = useCallback(async (pages: PageRequest[]) => {
-    if (pageLoadingRef.current) return;
+    const requested: PageRequest[] = [];
+    for (const page of pages) {
+      if (pendingPageTypesRef.current.has(page.type)) continue;
+      pendingPageTypesRef.current.add(page.type);
+      requested.push(page);
+    }
+    if (requested.length === 0) return;
     const catalogAtStart = eventsRef.current;
-    pageLoadingRef.current = true;
-    setPendingTypes(pages.map(({ type }) => type));
+    setPendingTypes([...pendingPageTypesRef.current]);
     setPageErrors((previous) => {
       const errors = { ...previous };
-      for (const { type } of pages) delete errors[type];
+      for (const { type } of requested) delete errors[type];
       return errors;
     });
-    try {
-      await Promise.all(pages.map(async ({ type, pageToken }) => {
-        try {
-          const result = await fetchEventPage(type, pageToken, PAGE_LOAD_LIMIT);
-          // Recording details loaded after this page began remain authoritative.
-          const updatedRecordings = eventsRef.current.filter((event) =>
-            event.type === type && !catalogAtStart.includes(event));
-          const previous = pageToken === null
-            ? eventsRef.current.filter((event) => event.type !== type)
-            : eventsRef.current;
-          const merged = updatedRecordings.reduce(replaceEventSnapshot, mergeEvents(previous, result.events));
-          const nextTokens = { ...nextPageTokensRef.current, [type]: result.nextPageToken };
-          eventsRef.current = merged;
-          nextPageTokensRef.current = nextTokens;
-          setEvents(merged);
-          setNextPageTokens(nextTokens);
-        } catch (err) {
-          setPageErrors((previous) => ({
-            ...previous,
-            [type]: { message: err instanceof Error ? err.message : String(err), pageToken },
-          }));
-        } finally {
-          setPendingTypes((previous) => previous.filter((pending) => pending !== type));
-        }
-      }));
-    } finally {
-      pageLoadingRef.current = false;
-    }
+    await Promise.all(requested.map(async ({ type, pageToken }) => {
+      try {
+        const result = await fetchEventPage(type, pageToken, PAGE_LOAD_LIMIT);
+        // Recording details loaded after this page began remain authoritative.
+        const updatedRecordings = eventsRef.current.filter((event) =>
+          event.type === type && !catalogAtStart.includes(event));
+        const previous = pageToken === null
+          ? eventsRef.current.filter((event) => event.type !== type)
+          : eventsRef.current;
+        const merged = updatedRecordings.reduce(replaceEventSnapshot, mergeEvents(previous, result.events));
+        const nextTokens = { ...nextPageTokensRef.current, [type]: result.nextPageToken };
+        eventsRef.current = merged;
+        nextPageTokensRef.current = nextTokens;
+        setEvents(merged);
+        setNextPageTokens(nextTokens);
+      } catch (err) {
+        setPageErrors((previous) => ({
+          ...previous,
+          [type]: { message: err instanceof Error ? err.message : String(err), pageToken },
+        }));
+      } finally {
+        pendingPageTypesRef.current.delete(type);
+        setPendingTypes([...pendingPageTypesRef.current]);
+      }
+    }));
   }, []);
 
   useEffect(() => {
@@ -190,13 +192,12 @@ export function App() {
   }, [loadRoute]);
 
   const handleRefresh = async () => {
-    if (pageLoadingRef.current) return;
+    if (pendingPageTypesRef.current.size > 0) return;
     setBrowseList([]);
     await loadPages(PAGE_TYPES.map((type) => ({ type, pageToken: null })));
   };
 
   const handleLoadMore = useCallback((types: EventPageType[]) => {
-    if (pageLoadingRef.current) return;
     const loadable = types.filter((type) => nextPageTokensRef.current[type] && !pageErrors[type]);
     if (loadable.length === 0) return;
     void loadPages(loadable.map((type) => ({ type, pageToken: nextPageTokensRef.current[type] })));
@@ -204,7 +205,7 @@ export function App() {
 
   const handleRetry = (type: EventPageType) => {
     const error = pageErrors[type];
-    if (error && !pageLoadingRef.current) {
+    if (error) {
       void loadPages([{ type, pageToken: error.pageToken }]);
     }
   };

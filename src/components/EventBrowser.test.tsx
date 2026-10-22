@@ -81,7 +81,7 @@ describe("recording list archive scope", () => {
     expect(markup).toContain("Open Recent recording");
   });
 
-  it("preserves each failure and disables retries during another pending source", () => {
+  it("keeps retries available while an unrelated source is pending", () => {
     const markup = render([], {
       pendingTypes: ["SentryClips"],
       errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
@@ -89,9 +89,50 @@ describe("recording list archive scope", () => {
     expect(markup).toContain("Loading Sentry recordings…");
     expect(markup).toContain("Saved listing failed.");
     expect(markup).toContain("Recent listing failed.");
-    expect(markup).toMatch(/<button disabled="">Retry Saved<\/button>/);
-    expect(markup).toMatch(/<button disabled="">Retry Recent<\/button>/);
+    expect(markup).toContain("<button>Retry Saved</button>");
+    expect(markup).toContain("<button>Retry Recent</button>");
+    expect(markup).toMatch(/<button disabled="" class="browse-refresh-btn"/);
     expect(markup).not.toContain("No recordings in the loaded pages");
+  });
+
+  it("disables only a retry whose own source is pending", () => {
+    const markup = render([], {
+      pendingTypes: ["SavedClips"],
+      errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
+    });
+    expect(markup).toContain('<button disabled="">Retry Saved</button>');
+    expect(markup).toContain("<button>Retry Recent</button>");
+  });
+
+  it("allows an idle continuation while another source is pending", () => {
+    const markup = render([recording("SavedClips")], {
+      pendingTypes: ["SentryClips"],
+      hasMore: { SavedClips: true, SentryClips: true, RecentClips: false },
+    });
+    expect(markup).toContain("Loading Sentry recordings…");
+    expect(markup).toContain('class="browse-load-more-hint">Load more recordings</button>');
+    expect(markup).not.toContain('class="browse-load-more-hint" disabled=""');
+    expect(markup).toContain("Older recordings are available");
+  });
+
+  it("keeps a pending continuation visible without reporting exhaustion", () => {
+    const markup = render([recording("SavedClips")], {
+      pendingTypes: ["SavedClips"],
+      hasMore: { SavedClips: true, SentryClips: false, RecentClips: false },
+    });
+    expect(markup).toContain('class="browse-load-more-hint" disabled="">Load more recordings</button>');
+    expect(markup).toContain("Older recordings are available");
+    expect(markup).not.toContain("No older recordings");
+  });
+
+  it("keeps loaded recordings revealable while their source is pending", () => {
+    const events = Array.from({ length: 49 }, (_, index) => ({
+      ...recording("RecentClips"),
+      id: `recent-${index}`,
+    }));
+    const markup = render(events, { pendingTypes: ["RecentClips"] });
+    expect(markup).toContain('class="browse-load-more-hint">Show more recordings</button>');
+    expect(markup).not.toContain('class="browse-load-more-hint" disabled=""');
   });
 
   it("does not claim an empty archive before its sources finish", () => {
