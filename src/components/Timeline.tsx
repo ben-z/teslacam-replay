@@ -151,12 +151,8 @@ export function Timeline({ events, onSelectEvent, footer }: Props) {
   if (days.length === 0) {
     return (
       <div className="timeline">
-        <div className="timeline-overview">
-          <div className="timeline-scroll">
-            <div className="timeline-empty">No recorded video in the loaded pages</div>
-            {footer}
-          </div>
-        </div>
+        <div className="timeline-empty">No recorded video in the loaded pages</div>
+        {footer}
       </div>
     );
   }
@@ -189,20 +185,17 @@ export function Timeline({ events, onSelectEvent, footer }: Props) {
             ))}
           </div>
         </div>
-
-        <div className="timeline-scroll">
-          {days.map((day) => (
-            <TimelineDayRow
-              key={day.dateStr}
-              day={day}
-              onSessionClick={handleSessionClick}
-              onBarMouseMove={handleBarMouseMove}
-              onTooltipClear={handleTooltipClear}
-            />
-          ))}
-          {footer}
-        </div>
       </div>
+      {days.map((day) => (
+        <TimelineDayRow
+          key={day.dateStr}
+          day={day}
+          onSessionClick={handleSessionClick}
+          onBarMouseMove={handleBarMouseMove}
+          onTooltipClear={handleTooltipClear}
+        />
+      ))}
+      {footer}
 
       {tooltip && (
         <div
