@@ -84,11 +84,19 @@ export function App() {
   const [playerDisplayTime, setPlayerDisplayTime] = useState(0);
   const [playerIsPlaying, setPlayerIsPlaying] = useState(false);
   const pushedHashRef = useRef(false);
+  const browseFocusRef = useRef<HTMLElement | null>(null);
   const eventsRef = useRef(events);
   const nextPageTokensRef = useRef(nextPageTokens);
   const pageLoadingRef = useRef(false);
   eventsRef.current = events;
   nextPageTokensRef.current = nextPageTokens;
+
+  useEffect(() => {
+    if (view !== "browse") return;
+    const opener = browseFocusRef.current;
+    browseFocusRef.current = null;
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  }, [view]);
 
   const selectEvent = useCallback((event: DashcamEvent) => {
     setSelectedEvent(event);
@@ -213,6 +221,9 @@ export function App() {
   };
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
+    if (view === "browse" && document.activeElement instanceof HTMLElement) {
+      browseFocusRef.current = document.activeElement;
+    }
     if (filteredList) setBrowseList(filteredList);
     const hash = `#/event/${event.type}/${event.id}`;
     if (location.hash === hash) {

@@ -19,7 +19,7 @@ export function TelemetryOverlay({ frame }: Props) {
   const gear = GEAR_LABELS[frame.gearState] ?? "?";
   const ap = AP_LABELS[frame.autopilotState] ?? "";
   const steerDeg = Math.round(frame.steeringWheelAngle);
-  const throttlePct = Math.round(frame.acceleratorPedalPosition * 100);
+  const throttlePct = Math.round(frame.acceleratorPedalPosition);
   const hasGps = frame.latitudeDeg !== 0 || frame.longitudeDeg !== 0;
 
   return (

@@ -1,20 +1,10 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import protobuf from "protobufjs";
+import type { TelemetryFrame } from "../src/types.js";
 
-export interface SeiFrame {
+export interface SeiFrame extends TelemetryFrame {
   frameSeqNo: number;
-  vehicleSpeedMps: number;
-  acceleratorPedalPosition: number; // 0..1
-  steeringWheelAngle: number;
-  gearState: number; // 0=P, 1=D, 2=R, 3=N
-  autopilotState: number; // 0=none, 1=FSD, 2=autosteer, 3=TACC
-  brakeApplied: boolean;
-  blinkerOnLeft: boolean;
-  blinkerOnRight: boolean;
-  latitudeDeg: number;
-  longitudeDeg: number;
-  headingDeg: number;
 }
 
 export interface TelemetryData {
