@@ -1,62 +1,47 @@
-import { execFile, spawn } from "child_process";
-import { stat, mkdir, readFile, writeFile, rm } from "fs/promises";
+import { execFile, spawn, type ChildProcess } from "child_process";
+import { createHash } from "crypto";
+import { watch, type FSWatcher } from "fs";
+import { mkdir, readFile, writeFile, rename, rm } from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { HLS_CACHE_DIR } from "./paths.js";
+import { HLS_CACHE_VERSION } from "../src/types.js";
 
 const execFileAsync = promisify(execFile);
-const HLS_SEGMENT_DURATION = 4; // seconds per chunk
+const HLS_CONFIG = {
+  segmentDurationSeconds: 1,
+  processTimeoutMs: 120_000,
+  encoderDetectionTimeoutMs: 5_000,
+};
 
-// Re-encode video at this bitrate (e.g. "800k", "2M"). Empty = remux only (copy mode).
+// Re-encoding and scaling are optional; an empty bitrate preserves source video.
 const HLS_BITRATE = process.env.HLS_BITRATE || "";
-
-// Downscale video width before encoding (e.g. "960", "640"). Height scales proportionally.
-// Only applies when HLS_BITRATE is set (transcoding mode). Empty = keep original resolution.
 const HLS_WIDTH = process.env.HLS_WIDTH || "";
 
-// Detect available H.264 encoder at startup
-async function detectEncoder(): Promise<string> {
-  if (!HLS_BITRATE) {
-    console.log("HLS: copy mode (no transcoding)");
-    return "libx264";
-  }
-  let encoder = "libx264";
-  try {
-    const { stdout } = await execFileAsync("ffmpeg", ["-encoders"], { timeout: 5000 });
-    if (stdout.includes("h264_videotoolbox")) {
-      encoder = "h264_videotoolbox";
-    }
-  } catch {
-    // ffmpeg not found or failed — will error later when actually needed
-  }
-  const label = encoder === "h264_videotoolbox" ? "VideoToolbox (hardware)" : "software";
-  const scaleLabel = HLS_WIDTH ? `, scale to ${HLS_WIDTH}w` : "";
-  console.log(`HLS: transcoding at ${HLS_BITRATE} using ${label} encoder${scaleLabel}`);
-  return encoder;
+async function detectEncoder(): Promise<string | null> {
+  if (!HLS_BITRATE) return null;
+  const { stdout } = await execFileAsync("ffmpeg", ["-encoders"], {
+    timeout: HLS_CONFIG.encoderDetectionTimeoutMs,
+  });
+  if (stdout.includes("h264_videotoolbox")) return "h264_videotoolbox";
+  if (stdout.includes("libx264")) return "libx264";
+  throw new Error("ffmpeg has no supported H.264 encoder");
 }
 
 const hlsEncoder = await detectEncoder();
-
 const HLS_ENCODING_LABEL = HLS_BITRATE
   ? `${HLS_BITRATE}${HLS_WIDTH ? `_${HLS_WIDTH}` : ""}`
   : "copy";
 
-/**
- * Get the cache directory for a specific camera stream.
- * Includes encoding profile so different bitrates don't serve stale segments.
- */
 export function hlsCacheDir(
   type: string,
   eventId: string,
   segment: string,
   camera: string
 ): string {
-  return path.join(HLS_CACHE_DIR, HLS_ENCODING_LABEL, type, eventId, segment, camera);
+  return path.join(HLS_CACHE_DIR, `v${HLS_CACHE_VERSION}`, HLS_ENCODING_LABEL, type, eventId, segment, camera);
 }
 
-/**
- * Get the path to the HLS manifest for a camera stream.
- */
 export function hlsManifestPath(
   type: string,
   eventId: string,
@@ -66,9 +51,6 @@ export function hlsManifestPath(
   return path.join(hlsCacheDir(type, eventId, segment, camera), "stream.m3u8");
 }
 
-/**
- * Return ffmpeg codec flags based on detected encoder.
- */
 function codecArgs(): string[] {
   if (!HLS_BITRATE) return ["-c", "copy"];
   const scale = HLS_WIDTH ? ["-vf", `scale=${HLS_WIDTH}:-2`] : [];
@@ -78,180 +60,172 @@ function codecArgs(): string[] {
   return [...scale, "-c:v", "libx264", "-preset", "fast", "-b:v", HLS_BITRATE, "-c:a", "aac", "-b:a", "64k"];
 }
 
-// --- Job tracking ---
-
-/** Tracks an in-flight ffmpeg job. Callers await `manifestReady`. */
-const activeJobs = new Map<string, Promise<boolean>>();
-
-/** Check if a manifest is complete (has #EXT-X-ENDLIST). */
-async function isCompleteManifest(manifestPath: string): Promise<boolean> {
-  try {
-    const content = await readFile(manifestPath, "utf-8");
-    return content.includes("#EXT-X-ENDLIST");
-  } catch {
-    return false;
-  }
-}
-
-/** Poll for manifest file to appear on disk. */
-async function waitForManifest(manifestPath: string, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      await stat(manifestPath);
-      return true;
-    } catch {
-      await new Promise(r => setTimeout(r, 100));
-    }
-  }
-  return false;
-}
-
 export interface HlsSource {
   url: string;
   headers: Record<string, string>;
+  identity: string;
 }
 
-/**
- * Run ffmpeg to produce HLS segments. Resolves true once the manifest
- * file appears on disk (progressive serving), even though ffmpeg may
- * still be writing additional segments.
- */
+interface HlsJob {
+  sourceHash: string;
+  ready: Promise<boolean>;
+  failed: boolean;
+}
+
+const activeJobs = new Map<string, HlsJob>();
+
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+async function isCompleteCache(cacheDir: string, sourceHash: string): Promise<boolean> {
+  try {
+    const [manifest, receipt] = await Promise.all([
+      readFile(path.join(cacheDir, "stream.m3u8"), "utf-8"),
+      readFile(path.join(cacheDir, "source.json"), "utf-8"),
+    ]);
+    const source = JSON.parse(receipt) as { sourceHash: string };
+    return source.sourceHash === sourceHash && manifest.includes("#EXT-X-ENDLIST");
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
 async function runSegmentation(
   source: HlsSource,
   cacheDir: string,
-  manifestFile: string,
   cacheKey: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  console.log(`HLS: segmenting ${cacheKey}`);
-  const start = performance.now();
+  job: HlsJob,
+  ready: (value: boolean) => void,
+): Promise<void> {
+  let watcher: FSWatcher | undefined;
+  let child: ChildProcess | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let observationError: unknown;
+  let timedOut = false;
+  const manifestFile = path.join(cacheDir, "stream.m3u8");
 
   try {
+    if (await isCompleteCache(cacheDir, job.sourceHash)) {
+      ready(true);
+      return;
+    }
+    await rm(cacheDir, { recursive: true, force: true });
     await mkdir(cacheDir, { recursive: true });
 
-    const args: string[] = [];
+    const observeManifest = () => {
+      void readFile(manifestFile, "utf-8").then(
+        (content) => {
+          if (!job.failed && content.includes("#EXTINF:")) ready(true);
+        },
+        (error: unknown) => {
+          if (isMissing(error)) return;
+          observationError = error;
+          job.failed = true;
+          child?.kill("SIGKILL");
+        },
+      );
+    };
+    watcher = watch(cacheDir, (_event, filename) => {
+      if (filename === "stream.m3u8") observeManifest();
+    });
+    watcher.on("error", (error) => {
+      observationError = error;
+      job.failed = true;
+      child?.kill("SIGKILL");
+    });
 
-    const headerStr = Object.entries(source.headers)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join("\r\n");
-    if (headerStr) args.push("-headers", `${headerStr}\r\n`);
+    const args: string[] = [];
+    const headers = Object.entries(source.headers).map(([key, value]) => `${key}: ${value}`).join("\r\n");
+    if (headers) args.push("-headers", `${headers}\r\n`);
     args.push(
       "-seekable", "1",
       "-reconnect", "1",
       "-reconnect_on_network_error", "1",
       "-reconnect_delay_max", "5",
       "-i", source.url,
-    );
-
-    args.push(...codecArgs());
-    args.push(
-      "-hls_time", String(HLS_SEGMENT_DURATION),
-      "-hls_segment_filename", path.join(cacheDir, "chunk_%03d.ts"),
+      ...codecArgs(),
+      "-hls_time", String(HLS_CONFIG.segmentDurationSeconds),
+      "-hls_segment_filename", path.join(cacheDir, `chunk_${job.sourceHash}_%03d.ts`),
       "-hls_playlist_type", "event",
       "-hls_list_size", "0",
-      "-hls_flags", "temp_file",
+      "-hls_flags", "temp_file+omit_endlist",
       "-f", "hls",
       "-v", "error",
       manifestFile,
     );
-
-    const ffmpeg = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
-
-    let stderrOutput = "";
-    ffmpeg.stderr!.on("data", (chunk: Buffer) => { stderrOutput += chunk.toString(); });
-
-    const killTimer = setTimeout(() => ffmpeg.kill("SIGKILL"), timeoutMs);
-
-    // Wait for ffmpeg to exit
-    const exitCode = await new Promise<number | null>(resolve => {
-      ffmpeg.on("close", resolve);
+    console.log(`HLS: segmenting ${cacheKey}`);
+    child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child!.once("error", reject);
+      child!.once("close", resolve);
     });
-    clearTimeout(killTimer);
+    killTimer = setTimeout(() => {
+      timedOut = true;
+      job.failed = true;
+      child!.kill("SIGKILL");
+    }, HLS_CONFIG.processTimeoutMs);
+    observeManifest();
 
-    const elapsed = ((performance.now() - start) / 1000).toFixed(1);
-
-    if (exitCode === 0) {
-      // Count chunks and total duration from the manifest
-      let info = "";
-      try {
-        const manifest = await readFile(manifestFile, "utf-8");
-        const durations = manifest.match(/#EXTINF:([\d.]+)/g);
-        if (durations) {
-          const chunks = durations.length;
-          const totalSec = durations.reduce((sum, d) => sum + parseFloat(d.split(":")[1]), 0);
-          info = ` (${totalSec.toFixed(0)}s source, ${chunks} chunks)`;
-        }
-      } catch {}
-      console.log(`HLS: done ${cacheKey} in ${elapsed}s${info}`);
-      return true;
+    const exitCode = await exited;
+    if (observationError) throw observationError;
+    if (timedOut) throw new Error(`ffmpeg exceeded ${HLS_CONFIG.processTimeoutMs}ms`);
+    if (exitCode !== 0 || stderr.trim()) {
+      throw new Error(`ffmpeg failed (exit ${exitCode}): ${stderr.trim()}`);
     }
-
-    const msg = stderrOutput.split("\n").filter(Boolean)[0] || `exit ${exitCode}`;
-    console.error(`HLS: failed ${cacheKey} after ${elapsed}s: ${msg}`);
-    // Append ENDLIST so hls.js stops polling and plays what we have
-    try {
-      const content = await readFile(manifestFile, "utf-8");
-      if (!content.includes("#EXT-X-ENDLIST")) {
-        await writeFile(manifestFile, content + "#EXT-X-ENDLIST\n");
-      }
-    } catch {
-      // Manifest may not exist if ffmpeg failed before writing any segment
+    const manifest = await readFile(manifestFile, "utf-8");
+    if (!manifest.startsWith("#EXTM3U") || !manifest.includes("#EXTINF:")) {
+      throw new Error("ffmpeg produced no playable HLS segments");
     }
-    return false;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
-    console.error(`HLS: error ${cacheKey}: ${msg}`);
-    return false;
+    await writeFile(path.join(cacheDir, "source.json"), JSON.stringify({ sourceHash: job.sourceHash }));
+    const finalManifest = `${manifest.trimEnd()}\n#EXT-X-ENDLIST\n`;
+    await writeFile(`${manifestFile}.tmp`, finalManifest);
+    await rename(`${manifestFile}.tmp`, manifestFile);
+    ready(true);
+  } catch (error) {
+    job.failed = true;
+    ready(false);
+    await rm(cacheDir, { recursive: true, force: true });
+    throw error;
   } finally {
-    activeJobs.delete(cacheKey);
+    watcher?.close();
+    clearTimeout(killTimer);
   }
 }
 
-/**
- * Ensure HLS segments are available for a given camera stream.
- * Returns true as soon as the first segment is ready (progressive serving).
- * ffmpeg continues producing segments in the background.
- */
-export async function ensureHlsSegments(
+/** Return as soon as ffmpeg publishes the first playable segment. */
+export function ensureHlsSegments(
   source: HlsSource,
   type: string,
   eventId: string,
   segment: string,
   camera: string
 ): Promise<boolean> {
-  const cacheDir = hlsCacheDir(type, eventId, segment, camera);
-  const manifestFile = path.join(cacheDir, "stream.m3u8");
   const cacheKey = `${type}/${eventId}/${segment}/${camera}`;
-
-  // Complete manifest on disk = fully cached
-  if (await isCompleteManifest(manifestFile)) return true;
-
-  // ffmpeg already running for this stream -- wait for its manifest
+  const sourceHash = createHash("sha256").update(source.identity).digest("hex").slice(0, 16);
   const existing = activeJobs.get(cacheKey);
-  if (existing) return existing;
-
-  // Stale incomplete manifest from a crashed ffmpeg -- clean up
-  try {
-    await stat(manifestFile);
-    await rm(cacheDir, { recursive: true, force: true });
-  } catch {
-    // No manifest -- fresh start
+  if (existing) {
+    return existing.failed || existing.sourceHash !== sourceHash
+      ? Promise.resolve(false)
+      : existing.ready;
   }
 
-  // Start ffmpeg in the background. The returned promise resolves true once
-  // the manifest appears (for progressive serving) or false on failure.
-  // We race manifest appearance against process completion so callers don't
-  // have to wait for the entire encode.
-  const timeoutMs = 120000;
-  const processComplete = runSegmentation(source, cacheDir, manifestFile, cacheKey, timeoutMs);
-
-  const manifestReady = Promise.race([
-    waitForManifest(manifestFile, timeoutMs),
-    processComplete,
-  ]);
-
-  activeJobs.set(cacheKey, manifestReady);
-
-  return manifestReady;
+  let ready!: (value: boolean) => void;
+  const job: HlsJob = {
+    sourceHash,
+    ready: new Promise<boolean>((resolve) => { ready = resolve; }),
+    failed: false,
+  };
+  activeJobs.set(cacheKey, job);
+  void runSegmentation(source, hlsCacheDir(type, eventId, segment, camera), cacheKey, job, ready)
+    .catch((error: unknown) => {
+      job.failed = true;
+      ready(false);
+      console.error(`HLS: failed ${cacheKey}:`, error);
+    })
+    .finally(() => activeJobs.delete(cacheKey));
+  return job.ready;
 }

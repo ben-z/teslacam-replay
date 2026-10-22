@@ -1,30 +1,7 @@
 import type { DashcamEvent, TelemetryData } from "./types";
+import { HLS_CACHE_VERSION } from "./types";
 
-const STORAGE_KEY = "teslacam-replay:api-url";
-
-function initApiBase(): string {
-  const params = new URLSearchParams(window.location.search);
-  const serverParam = params.get("server");
-  if (serverParam) {
-    // Normalize: strip trailing slash, ensure /api suffix
-    const base = serverParam.replace(/\/+$/, "");
-    const url = base.endsWith("/api") ? base : `${base}/api`;
-    localStorage.setItem(STORAGE_KEY, url);
-    // Remove ?server= from URL to keep it clean
-    params.delete("server");
-    const clean = params.toString();
-    const newUrl = window.location.pathname + (clean ? `?${clean}` : "") + window.location.hash;
-    window.history.replaceState(null, "", newUrl);
-    return url;
-  }
-  return localStorage.getItem(STORAGE_KEY) || "/api";
-}
-
-const API_BASE = initApiBase();
-
-export function getApiBase(): string {
-  return API_BASE;
-}
+const API_BASE = "/api";
 
 export type EventPageType = DashcamEvent["type"];
 
@@ -36,8 +13,8 @@ export interface EventPage {
 
 export async function fetchEventPage(
   type: EventPageType,
-  pageToken?: string | null,
-  limit = 24
+  pageToken: string | null,
+  limit: number
 ): Promise<EventPage> {
   const params = new URLSearchParams({ type, limit: String(limit) });
   if (pageToken) params.set("pageToken", pageToken);
@@ -46,14 +23,14 @@ export async function fetchEventPage(
   return res.json();
 }
 
-export async function fetchEvent(type: string, id: string): Promise<DashcamEvent> {
-  const res = await fetch(`${API_BASE}/events/${type}/${id}`);
+export async function fetchEvent(type: string, id: string, refresh: boolean): Promise<DashcamEvent> {
+  const res = await fetch(`${API_BASE}/events/${type}/${id}${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch event: ${res.status}`);
   return res.json();
 }
 
-export function thumbnailUrl(type: string, id: string): string {
-  return `${API_BASE}/events/${type}/${id}/thumbnail`;
+export function thumbnailUrl(type: string, id: string, version: string | undefined): string {
+  return `${API_BASE}/events/${type}/${id}/thumbnail${version ? `?v=${version}` : ""}`;
 }
 
 export async function fetchTelemetry(
@@ -61,46 +38,10 @@ export async function fetchTelemetry(
   eventId: string,
   segment: string
 ): Promise<TelemetryData | null> {
-  try {
-    const res = await fetch(`${API_BASE}/video/${type}/${eventId}/${segment}/telemetry`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.hasSei ? data : null;
-  } catch {
-    return null;
-  }
-}
-
-export type ServerStatus =
-  {
-    storageBackend: string;
-    storagePath: string;
-  };
-
-export async function fetchStatus(): Promise<ServerStatus> {
-  const res = await fetch(`${API_BASE}/status`);
-  if (!res.ok) throw new Error(`Failed to fetch status: ${res.status}`);
-  return res.json();
-}
-
-export interface CacheInfo {
-  id: string;
-  label: string;
-  path: string | null;
-  sizeBytes?: number;
-  entryCount?: number;
-}
-
-export async function fetchCaches(): Promise<CacheInfo[]> {
-  const res = await fetch(`${API_BASE}/debug/caches`);
-  if (!res.ok) throw new Error(`Failed to fetch caches: ${res.status}`);
+  const res = await fetch(`${API_BASE}/video/${type}/${eventId}/${segment}/telemetry`);
+  if (!res.ok) throw new Error(`Vehicle data could not be loaded (HTTP ${res.status}).`);
   const data = await res.json();
-  return data.caches;
-}
-
-export async function clearCache(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/debug/caches/${id}/clear`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to clear cache: ${res.status}`);
+  return data.hasSei ? data : null;
 }
 
 export function hlsManifestUrl(
@@ -109,5 +50,5 @@ export function hlsManifestUrl(
   segment: string,
   camera: string
 ): string {
-  return `${API_BASE}/hls/${type}/${eventId}/${segment}/${camera}/stream.m3u8`;
+  return `${API_BASE}/hls/${type}/${eventId}/${segment}/${camera}/stream.m3u8?v=${HLS_CACHE_VERSION}`;
 }

@@ -6,6 +6,7 @@ import {
   type GDriveLiteClient,
 } from "./gdrive-lite.js";
 import { scanRecentClipsPage, type DashcamEvent } from "./scan.js";
+import { ALL_CAMERAS } from "../src/types.js";
 
 const RECENT_ROOT_PATTERN = /^RecentClips(?:-before-\d{4}-\d{2}-\d{2})?$/;
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -92,12 +93,22 @@ export class RecentArchive {
   async findEvent(id: string): Promise<DashcamEvent | null> {
     for (const root of this.roots) {
       const date = await this.findPath(`/${root.name}/${id.slice(0, 10)}`, "folder");
-      if (!date) continue;
-      const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
-      const events = await scanRecentClipsPage(this.drive, files);
-      const event = events.find((entry) => entry.clips.some((clip) => clip.timestamp === id));
-      if (event) {
-        for (const clip of event.clips) clip.subfolder = date.name;
+      if (date) {
+        const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
+        const events = await scanRecentClipsPage(this.drive, files);
+        const event = events.find((entry) => entry.clips.some((clip) => clip.timestamp === id));
+        if (event) {
+          for (const clip of event.clips) clip.subfolder = date.name;
+          return event;
+        }
+      }
+      const flatFiles = await Promise.all(ALL_CAMERAS.map((camera) =>
+        this.findPath(`/${root.name}/${id}-${camera}.mp4`, "file")
+      ));
+      const files = flatFiles.filter((file): file is DriveEntry => file !== null);
+      if (files.length) {
+        const [event] = await scanRecentClipsPage(this.drive, files);
+        if (!event) throw new Error(`Resolved recording has no supported videos: ${root.name}/${id}`);
         return event;
       }
     }

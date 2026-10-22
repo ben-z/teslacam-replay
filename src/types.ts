@@ -1,3 +1,5 @@
+export const HLS_CACHE_VERSION = "2";
+
 export interface EventClip {
   timestamp: string;
   cameras: string[];
@@ -15,6 +17,7 @@ export interface DashcamEvent {
   reason?: string;
   camera?: string;
   hasThumbnail: boolean;
+  thumbnailVersion?: string;
   clips: EventClip[];
   totalDurationSec: number;
   cameraCount?: number;
@@ -69,6 +72,9 @@ export interface TelemetryData {
 
 export function formatReason(reason?: string): string {
   if (!reason) return "";
+  if (["user_interaction_dashcam_launcher_action_tapped", "user_interaction_dashcam_icon_tapped"].includes(reason)) return "Saved manually";
+  if (reason === "user_interaction_dashcam_honk") return "Saved by honk";
+  if (reason === "sentry_aware_object_detection") return "Object detected";
   return reason
     .replace(/^user_interaction_dashcam_/, "")
     .replace(/^sentry_/, "Sentry: ")

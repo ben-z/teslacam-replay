@@ -1,10 +1,12 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { fetchTelemetry } from "./api";
 import type { DashcamEvent, TelemetryFrame, TelemetryData } from "./types";
+import { telemetryFrameAt } from "./telemetry";
 
 interface UseTelemetryResult {
   frame: TelemetryFrame | null;
   loading: boolean;
+  error: string | null;
 }
 
 export function useTelemetry(
@@ -13,49 +15,38 @@ export function useTelemetry(
   displayTime: number,
   segmentOffsets: number[]
 ): UseTelemetryResult {
-  const [data, setData] = useState<TelemetryData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const fetchIdRef = useRef(0);
-
   const segTimestamp = event.clips[segmentIdx]?.timestamp;
+  const [result, setResult] = useState<{
+    event: DashcamEvent;
+    segment: string;
+    data: TelemetryData | null;
+    error: string | null;
+  } | null>(null);
+  const current = result?.event === event && result.segment === segTimestamp ? result : null;
+  const data = current?.data;
 
   useEffect(() => {
-    if (!segTimestamp) {
-      setData(null);
-      setLoading(false);
-      return;
-    }
-
-    const id = ++fetchIdRef.current;
-    setData(null);
-    setLoading(true);
+    if (!segTimestamp) return;
+    let active = true;
 
     fetchTelemetry(event.type, event.id, segTimestamp).then(
       (result) => {
-        if (fetchIdRef.current !== id) return;
-        setData(result);
-        setLoading(false);
+        if (active) setResult({ event, segment: segTimestamp, data: result, error: null });
       },
-      () => {
-        if (fetchIdRef.current !== id) return;
-        setLoading(false);
+      (error: unknown) => {
+        if (active) setResult({ event, segment: segTimestamp, data: null, error: error instanceof Error ? error.message : String(error) });
       }
     );
-  }, [event.type, event.id, segTimestamp]);
+    return () => { active = false; };
+  }, [event, segTimestamp]);
 
   // Binary search for the frame matching current playback position
   const frame = useMemo(() => {
-    if (!data || data.frames.length === 0) return null;
-    const segOff = segmentOffsets[segmentIdx] || 0;
+    if (!data) return null;
+    const segOff = segmentOffsets[segmentIdx];
     const localTimeMs = (displayTime - segOff) * 1000;
-    let lo = 0, hi = data.frameTimesMs.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (data.frameTimesMs[mid] <= localTimeMs) lo = mid;
-      else hi = mid - 1;
-    }
-    return data.frames[lo];
+    return telemetryFrameAt(data, localTimeMs);
   }, [data, displayTime, segmentIdx, segmentOffsets]);
 
-  return { frame, loading };
+  return { frame, loading: Boolean(segTimestamp) && current === null, error: current?.error ?? null };
 }

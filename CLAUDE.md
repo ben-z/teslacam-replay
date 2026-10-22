@@ -11,7 +11,7 @@ TeslaCam Replay is a full-stack TypeScript application for browsing and replayin
 - **Testing**: Vitest
 - **Video**: ffmpeg (HLS segmentation), protobufjs (telemetry parsing)
 - **Storage access**: `gdrive-serve-lite` HTTP API
-- **Deployment**: Docker (Node 22 Alpine + ffmpeg), GitHub Pages (frontend only)
+- **Deployment**: Docker (Node 22 Alpine + ffmpeg), app-owned AKS deployment
 
 ## Repository Structure
 
@@ -66,7 +66,7 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 tesl
 ### Frontend
 - **State management**: React hooks only (no external state library)
 - **Routing**: Hash-based (`#/event/SavedClips/...`), parsed in App.tsx
-- **Caching**: localStorage for loaded event pages
+- **Browsing state**: loaded pages remain in React state while the browser stays mounted during playback
 - **Styling**: Component-scoped CSS files + global CSS variables in `index.css` (dark theme)
 - **Error handling**: React ErrorBoundary class component in App.tsx
 
@@ -110,8 +110,7 @@ Start `gdrive-serve-lite` separately, then copy `.env.example` to `.env` and con
 - Backend runs from TypeScript source via tsx (no separate compile step)
 
 ### CI/CD
-- **docker.yml**: Builds and pushes Docker image to `ghcr.io/ben-z/teslacam-replay` on push to main
-- **deploy.yml**: Builds frontend and deploys to GitHub Pages on push to main
+- **docker.yml** builds and pushes the Docker image, then deploys the frontend and API together at the private HTTPS origin after checks pass
 
 ### Key Constants
 - HLS segment duration: 4 seconds

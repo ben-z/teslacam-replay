@@ -93,10 +93,11 @@ export class GDriveLiteClient {
       : null;
   }
 
-  streamSource(source: DriveFileSource): { url: string; headers: Record<string, string> } {
+  streamSource(source: DriveFileSource): { url: string; headers: Record<string, string>; identity: string } {
     return {
       url: source.url,
       headers: this.authHeaders(),
+      identity: JSON.stringify([source.id, source.modifiedTime ?? null, source.sizeBytes ?? null]),
     };
   }
 

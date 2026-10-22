@@ -1,28 +1,16 @@
 import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList } from "./gdrive-lite.js";
+import { recordingWallTimeMs } from "../src/playback.js";
+import type { DashcamEvent as PublicDashcamEvent, EventClip as PublicEventClip } from "../src/types.js";
 
-export interface EventClip {
-  timestamp: string; // e.g. "2025-06-01_18-07-09"
-  cameras: string[]; // available camera angles
-  durationSec: number; // estimated from timestamp gaps, ~60s
-  subfolder?: string; // for RecentClips: date subfolder if files are in one (e.g. "2025-12-19")
+export interface EventClip extends PublicEventClip {
   sourceByCamera?: Record<string, DriveFileSource>;
 }
 
-export type EventType = "SavedClips" | "SentryClips" | "RecentClips";
+export type EventType = PublicDashcamEvent["type"];
 
-export interface DashcamEvent {
-  id: string; // folder name (trigger timestamp) or first clip timestamp for RecentClips
-  type: EventType;
-  timestamp: string; // from event.json or folder name
-  city?: string;
-  lat?: number;
-  lon?: number;
-  reason?: string;
-  camera?: string;
-  hasThumbnail: boolean;
+export interface DashcamEvent extends PublicDashcamEvent {
   thumbnailSource?: DriveFileSource;
   clips: EventClip[];
-  totalDurationSec: number; // estimated from number of segments
   cameraCount: number;
 }
 
@@ -41,19 +29,14 @@ const CAMERA_ORDER = ["front", "left_repeater", "right_repeater", "back", "left_
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 // Max gap between consecutive clips before splitting into separate events (seconds)
-const SESSION_GAP_THRESHOLD = 120;
+const SCAN_CONFIG = { sessionGapThresholdSec: 120, clipDurationEstimateSec: 60 } as const;
 
 export async function scanEventFolder(
   drive: TeslacamDrive,
   type: "SavedClips" | "SentryClips",
   folder: DriveEntry
 ): Promise<DashcamEvent | null> {
-  let files: DriveEntry[];
-  try {
-    files = (await drive.listFolder(drive.folderRef(folder))).files;
-  } catch {
-    return null;
-  }
+  const files = (await drive.listFolder(drive.folderRef(folder))).files;
 
   // Parse event.json if present
   let eventMeta: Record<string, string> = {};
@@ -61,9 +44,21 @@ export async function scanEventFolder(
   if (eventJson) {
     try {
       const raw = await drive.readText(eventJson);
-      eventMeta = JSON.parse(raw);
-    } catch {
-      // ignore malformed event.json
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("event.json must be an object");
+      for (const key of ["timestamp", "city", "est_lat", "est_lon", "reason", "camera"] as const) {
+        const value = (parsed as Record<string, unknown>)[key];
+        if (value !== undefined && typeof value !== "string") throw new Error(`${key} must be a string`);
+      }
+      eventMeta = parsed as Record<string, string>;
+      if (eventMeta.timestamp) recordingWallTimeMs(eventMeta.timestamp);
+      for (const [key, bound] of [["est_lat", 90], ["est_lon", 180]] as const) {
+        if (eventMeta[key] !== undefined && (!eventMeta[key].trim() || !Number.isFinite(Number(eventMeta[key])) || Math.abs(Number(eventMeta[key])) > bound)) {
+          throw new Error(`${key} is not a valid coordinate`);
+        }
+      }
+    } catch (error) {
+      throw new Error(`Cannot read metadata for ${type}/${folder.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   }
 
@@ -99,8 +94,8 @@ export async function scanEventFolder(
     type,
     timestamp: eventMeta.timestamp || folderNameToISO(folder.name),
     city: eventMeta.city || undefined,
-    lat: eventMeta.est_lat ? parseFloat(eventMeta.est_lat) : undefined,
-    lon: eventMeta.est_lon ? parseFloat(eventMeta.est_lon) : undefined,
+    lat: eventMeta.est_lat ? Number(eventMeta.est_lat) : undefined,
+    lon: eventMeta.est_lon ? Number(eventMeta.est_lon) : undefined,
     reason: eventMeta.reason || undefined,
     camera: eventMeta.camera || undefined,
     hasThumbnail: Boolean(thumbnail),
@@ -112,24 +107,23 @@ export async function scanEventFolder(
 }
 
 function estimateDuration(timestamp: string, nextTimestamp?: string): number {
-  if (!nextTimestamp) return 60;
   const cur = segmentTimestampToEpoch(timestamp);
+  if (!nextTimestamp) return SCAN_CONFIG.clipDurationEstimateSec;
   const next = segmentTimestampToEpoch(nextTimestamp);
   if (cur > 0 && next > 0) {
     const diff = next - cur;
-    if (diff >= 1 && diff <= 120) return diff;
+    if (diff >= 1) return Math.min(diff, SCAN_CONFIG.clipDurationEstimateSec);
   }
-  return 60;
+  return SCAN_CONFIG.clipDurationEstimateSec;
 }
 
 function segmentTimestampToEpoch(ts: string): number {
-  // "2025-06-01_18-07-09" -> epoch seconds
-  const iso = folderNameToISO(ts);
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? 0 : d.getTime() / 1000;
+  // A timezone-neutral coordinate for the recorded calendar fields.
+  return recordingWallTimeMs(ts) / 1000;
 }
 
 function folderNameToISO(name: string): string {
+  recordingWallTimeMs(name);
   // "2025-06-01_18-17-49" -> "2025-06-01T18:17:49"
   const match = name.match(
     /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$/
@@ -163,12 +157,7 @@ export async function scanRecentClipsPage(
     drive.isFolder(f) && DATE_FOLDER_PATTERN.test(f.name)
   );
   for (const folder of dateFolders) {
-    let files: DriveEntry[];
-    try {
-      files = (await drive.listFolder(drive.folderRef(folder))).files;
-    } catch {
-      continue;
-    }
+    const files = (await drive.listFolder(drive.folderRef(folder))).files;
     for (const file of files) {
       const match = file.name.match(CLIP_REGEX);
       if (!match) continue;
@@ -197,7 +186,7 @@ function recentEventsFromSegmentMap(
   for (let i = 1; i < sorted.length; i++) {
     const prevEpoch = segmentTimestampToEpoch(sorted[i - 1][0]);
     const curEpoch = segmentTimestampToEpoch(sorted[i][0]);
-    if (prevEpoch > 0 && curEpoch > 0 && curEpoch - prevEpoch > SESSION_GAP_THRESHOLD) {
+    if (prevEpoch > 0 && curEpoch > 0 && curEpoch - prevEpoch > SCAN_CONFIG.sessionGapThresholdSec) {
       sessions.push(current);
       current = [];
     }
