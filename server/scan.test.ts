@@ -190,7 +190,7 @@ describe("scanEventFolder", () => {
     expect(getClipSource(event!, "2025-06-01_18-07-09", "front")?.url).toContain("front.mp4");
   });
 
-  it("returns null for empty or missing event folders", async () => {
+  it("returns null for an empty folder and rejects a missing folder", async () => {
     const drive = createMockDrive(fixture());
 
     await expect(scanEventFolder(
@@ -202,7 +202,92 @@ describe("scanEventFolder", () => {
       drive,
       "SavedClips",
       drive.entry("SavedClips/does-not-exist", true)
-    )).resolves.toBeNull();
+    )).rejects.toThrow("ENOENT: SavedClips/does-not-exist");
+  });
+
+  it.each(["null", "[]", "42", '"metadata"', "{"])("rejects malformed metadata %s", async (raw) => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const drive = createMockDrive({ [`${path}/event.json`]: raw });
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+      .rejects.toThrow(`Cannot read metadata for ${path}:`);
+  });
+
+  it.each(["timestamp", "city", "est_lat", "est_lon", "reason", "camera"])(
+    "rejects a non-string %s metadata field",
+    async (field) => {
+      const path = "SavedClips/2025-06-01_18-17-49";
+      const drive = createMockDrive({ [`${path}/event.json`]: JSON.stringify({ [field]: 17 }) });
+      await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+        .rejects.toThrow(`${field} must be a string`);
+    },
+  );
+
+  it.each(["not-a-date", "2025-02-30T12:00:00", "2025-06-01T24:00:00"])(
+    "rejects an invalid event timestamp %s",
+    async (timestamp) => {
+      const path = "SavedClips/2025-06-01_18-17-49";
+      const drive = createMockDrive({ [`${path}/event.json`]: JSON.stringify({ timestamp }) });
+      await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+        .rejects.toThrow(`Invalid recording timestamp: ${timestamp}`);
+    },
+  );
+
+  it.each([
+    ["est_lat", "91"], ["est_lat", "-91"], ["est_lon", "181"], ["est_lon", "-181"],
+    ["est_lat", "NaN"], ["est_lon", "Infinity"], ["est_lat", "37.2degrees"], ["est_lat", " "],
+  ])("rejects invalid coordinate %s=%s", async (field, value) => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const drive = createMockDrive({ [`${path}/event.json`]: JSON.stringify({ [field]: value }) });
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+      .rejects.toThrow(`${field} is not a valid coordinate`);
+  });
+
+  it("keeps zero and exponential coordinates consistent with validation", async () => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const drive = createMockDrive({ [`${path}/event.json`]: JSON.stringify({ est_lat: "0", est_lon: "1e1" }) });
+    const event = await scanEventFolder(drive, "SavedClips", drive.entry(path, true));
+    expect(event?.lat).toBe(0);
+    expect(event?.lon).toBe(10);
+  });
+
+  it("propagates folder discovery failures instead of returning an empty event", async () => {
+    const drive = createMockDrive(fixture());
+    const error = new Error("Drive listing timed out");
+    drive.listFolder = async () => { throw error; };
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry("SavedClips/2025-06-01_18-17-49", true)))
+      .rejects.toBe(error);
+  });
+
+  it("reports metadata read failures with their recording and original cause", async () => {
+    const drive = createMockDrive(fixture());
+    const cause = new Error("Drive metadata read failed");
+    drive.readText = async () => { throw cause; };
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry("SavedClips/2025-06-01_18-17-49", true)))
+      .rejects.toMatchObject({ message: "Cannot read metadata for SavedClips/2025-06-01_18-17-49: Drive metadata read failed", cause });
+  });
+
+  it("does not inflate segment estimates to fill missing recording time", async () => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const drive = createMockDrive(Object.fromEntries([
+      "2025-06-01_18-00-00", "2025-06-01_18-00-30", "2025-06-01_18-02-30",
+    ].map((timestamp) => [`${path}/${timestamp}-front.mp4`, ""])));
+    const event = await scanEventFolder(drive, "SavedClips", drive.entry(path, true));
+    expect(event?.clips.map((clip) => clip.durationSec)).toEqual([30, 60, 60]);
+    expect(event?.totalDurationSec).toBe(150);
+  });
+
+  it("rejects an impossible date in a thumbnail-only event folder", async () => {
+    const path = "SavedClips/2025-02-30_12-00-00";
+    const drive = createMockDrive({ [`${path}/thumb.png`]: "thumbnail" });
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+      .rejects.toThrow("Invalid recording timestamp");
+  });
+
+  it("rejects an invalid timestamp even when it is the only Saved segment", async () => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const drive = createMockDrive({ [`${path}/2025-02-30_12-00-00-front.mp4`]: "" });
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+      .rejects.toThrow("Invalid recording timestamp");
   });
 
   it("keeps metadata-only event folders visible while video files are pending", async () => {
@@ -274,6 +359,31 @@ describe("scanRecentClipsPage", () => {
   it("returns an empty page when no clips are present", async () => {
     const drive = createMockDrive({});
     await expect(scanRecentClipsPage(drive, [])).resolves.toEqual([]);
+  });
+
+  it("propagates a date-folder discovery failure even if flat clips were already found", async () => {
+    const drive = createMockDrive(fixture());
+    const page = [drive.entry("RecentClips/2026-02-01_10-00-00-front.mp4"), drive.entry("RecentClips/2026-01-15", true)];
+    const error = new Error("Drive date listing failed");
+    drive.listFolder = async () => { throw error; };
+    await expect(scanRecentClipsPage(drive, page)).rejects.toBe(error);
+  });
+
+  it("keeps a missing minute unrecorded within a Recent driving session", async () => {
+    const files = Object.fromEntries(["2026-02-01_10-00-00", "2026-02-01_10-02-00"]
+      .map((timestamp) => [`RecentClips/${timestamp}-front.mp4`, ""]));
+    const drive = createMockDrive(files);
+    const events = await scanRecentClipsPage(drive, Object.keys(files).map((path) => drive.entry(path)));
+    expect(events).toHaveLength(1);
+    expect(events[0].clips.map((clip) => clip.durationSec)).toEqual([60, 60]);
+    expect(events[0].totalDurationSec).toBe(120);
+  });
+
+  it("rejects an invalid timestamp even when it is the only Recent segment", async () => {
+    const path = "RecentClips/2025-02-30_12-00-00-front.mp4";
+    const drive = createMockDrive({ [path]: "" });
+    await expect(scanRecentClipsPage(drive, [drive.entry(path)]))
+      .rejects.toThrow("Invalid recording timestamp");
   });
 });
 

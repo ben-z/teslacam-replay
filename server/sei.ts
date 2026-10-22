@@ -57,6 +57,7 @@ class Mp4Parser {
       let headerSize = 8;
 
       if (size === 1) {
+        if (pos + 16 > end) throw new Error(`Truncated MP4 ${type} box header`);
         // Extended size (64-bit)
         const high = this.view.getUint32(pos + 8);
         const low = this.view.getUint32(pos + 12);
@@ -66,7 +67,7 @@ class Mp4Parser {
         size = end - pos;
       }
 
-      if (size < 8 || pos + size > end) break;
+      if (size < headerSize || pos + size > end) throw new Error(`Invalid MP4 ${type} box size`);
 
       if (type === name) {
         return { start: pos + headerSize, end: pos + size, size: size - headerSize };
@@ -82,9 +83,9 @@ class Mp4Parser {
   }
 
   /** Navigate moov > trak > mdia to get timescale and stts entries */
-  parseFrameDurations(): number[] | null {
+  parseFrameDurations(): number[] {
     const moov = this.findBox(0, this.buffer.length, "moov");
-    if (!moov) return null;
+    if (!moov) throw new Error("Vehicle data requires the MP4 movie timing table");
 
     // Find first video trak (iterate traks, look for video handler)
     let trakStart = moov.start;
@@ -97,6 +98,7 @@ class Mp4Parser {
         // Check handler type (hdlr box)
         const hdlr = this.findBox(mdia.start, mdia.end, "hdlr");
         if (hdlr) {
+          if (hdlr.size < 12) throw new Error("Truncated MP4 handler box");
           const handlerType = this.readAscii(hdlr.start + 8, 4);
           if (handlerType === "vide") {
             return this.parseStts(mdia);
@@ -107,43 +109,51 @@ class Mp4Parser {
       // Move past this trak to find next
       trakStart = trak.end;
     }
-    return null;
+    throw new Error("Vehicle data requires a video track with sample timing");
   }
 
   private parseStts(
     mdia: { start: number; end: number }
-  ): number[] | null {
+  ): number[] {
     // Get timescale from mdhd
     const mdhd = this.findBox(mdia.start, mdia.end, "mdhd");
-    if (!mdhd) return null;
+    if (!mdhd) throw new Error("Vehicle data requires the MP4 media clock");
 
     const mdhdVersion = this.buffer[mdhd.start];
-    const timescale =
-      mdhdVersion === 1
-        ? this.view.getUint32(mdhd.start + 20)
-        : this.view.getUint32(mdhd.start + 12);
-    if (timescale === 0) return null;
+    if (mdhdVersion !== 0 && mdhdVersion !== 1) throw new Error(`Unsupported MP4 media clock version: ${mdhdVersion}`);
+    const timescaleOffset = mdhdVersion === 1 ? 20 : 12;
+    if (mdhd.size < timescaleOffset + 4) throw new Error("Truncated MP4 media clock");
+    const timescale = this.view.getUint32(mdhd.start + timescaleOffset);
+    if (timescale === 0) throw new Error("MP4 media clock has zero timescale");
 
     // Navigate to stts
     const stbl = this.findBox(mdia.start, mdia.end, "minf");
-    if (!stbl) return null;
+    if (!stbl) throw new Error("Vehicle data requires an MP4 sample table");
     const stblBox = this.findBox(stbl.start, stbl.end, "stbl");
-    if (!stblBox) return null;
+    if (!stblBox) throw new Error("Vehicle data requires an MP4 sample table");
     const stts = this.findBox(stblBox.start, stblBox.end, "stts");
-    if (!stts) return null;
+    if (!stts) throw new Error("Vehicle data requires the MP4 sample timing table");
 
+    if (stts.size < 8) throw new Error("Truncated MP4 sample timing table");
     const entryCount = this.view.getUint32(stts.start + 4);
+    if (entryCount > (stts.size - 8) / 8) throw new Error("Truncated MP4 sample timing table");
     const durations: number[] = [];
     let pos = stts.start + 8;
     for (let i = 0; i < entryCount; i++) {
-      if (pos + 8 > stts.end) break;
       const count = this.view.getUint32(pos);
       const delta = this.view.getUint32(pos + 4);
+      if (count === 0) throw new Error("MP4 sample timing entries must have positive sample counts");
+      // ISO BMFF permits a zero decoding interval for the final sample only.
+      if (delta === 0 && (i !== entryCount - 1 || count !== 1)) {
+        throw new Error("MP4 sample timing permits zero duration only for the final sample");
+      }
+      if (durations.length + count > this.buffer.length) throw new Error("MP4 sample timing count exceeds video size");
       const ms = (delta / timescale) * 1000;
       for (let j = 0; j < count; j++) durations.push(ms);
       pos += 8;
     }
-    return durations.length > 0 ? durations : null;
+    if (durations.length === 0) throw new Error("MP4 sample timing table is empty");
+    return durations;
   }
 
   /** Strip H.264 emulation prevention bytes (0x00 0x00 0x03 -> 0x00 0x00) */
@@ -173,34 +183,38 @@ class Mp4Parser {
     while (i < nal.length && nal[i] === 0x42) i++;
     if (i <= 3 || i + 1 >= nal.length || nal[i] !== 0x69) return null;
 
+    const payload = this.stripEmulationBytes(nal.subarray(i + 1, nal.length - 1));
+    let msg: Record<string, unknown>;
     try {
-      const payload = this.stripEmulationBytes(
-        nal.subarray(i + 1, nal.length - 1)
-      );
-      const msg = SeiMetadata.decode(payload) as protobuf.Message & Record<string, unknown>;
-      return {
-        frameSeqNo: Number((msg.frameSeqNo as number | bigint) || 0),
-        vehicleSpeedMps: (msg.vehicleSpeedMps as number) || 0,
-        acceleratorPedalPosition: (msg.acceleratorPedalPosition as number) || 0,
-        steeringWheelAngle: (msg.steeringWheelAngle as number) || 0,
-        gearState: (msg.gearState as number) || 0,
-        autopilotState: (msg.autopilotState as number) || 0,
-        brakeApplied: (msg.brakeApplied as boolean) || false,
-        blinkerOnLeft: (msg.blinkerOnLeft as boolean) || false,
-        blinkerOnRight: (msg.blinkerOnRight as boolean) || false,
-        latitudeDeg: (msg.latitudeDeg as number) || 0,
-        longitudeDeg: (msg.longitudeDeg as number) || 0,
-        headingDeg: (msg.headingDeg as number) || 0,
-      };
-    } catch {
-      return null;
+      msg = SeiMetadata.toObject(SeiMetadata.decode(payload), { defaults: true, longs: Number });
+    } catch (error) {
+      throw new Error("Cannot decode Tesla vehicle data", { cause: error });
     }
+    const frame: SeiFrame = {
+      frameSeqNo: msg.frameSeqNo as number,
+      vehicleSpeedMps: msg.vehicleSpeedMps as number,
+      acceleratorPedalPosition: msg.acceleratorPedalPosition as number,
+      steeringWheelAngle: msg.steeringWheelAngle as number,
+      gearState: msg.gearState as number,
+      autopilotState: msg.autopilotState as number,
+      brakeApplied: msg.brakeApplied as boolean,
+      blinkerOnLeft: msg.blinkerOnLeft as boolean,
+      blinkerOnRight: msg.blinkerOnRight as boolean,
+      latitudeDeg: msg.latitudeDeg as number,
+      longitudeDeg: msg.longitudeDeg as number,
+      headingDeg: msg.headingDeg as number,
+    };
+    if (!Number.isSafeInteger(frame.frameSeqNo)) throw new Error("Vehicle data frame sequence is not a safe integer");
+    for (const [field, value] of Object.entries(frame)) {
+      if (typeof value === "number" && !Number.isFinite(value)) throw new Error(`Vehicle data ${field} must be finite`);
+    }
+    return frame;
   }
 
   /** Extract all SEI messages from mdat */
   extractSeiMessages(SeiMetadata: protobuf.Type): SeiFrame[] {
     const mdat = this.findMdat();
-    if (!mdat) return [];
+    if (!mdat) throw new Error("Video has no MP4 media data");
 
     const frames: SeiFrame[] = [];
     let cursor = mdat.start;
@@ -209,10 +223,7 @@ class Mp4Parser {
       const nalSize = this.view.getUint32(cursor);
       cursor += 4;
 
-      if (nalSize < 2 || cursor + nalSize > this.buffer.length) {
-        cursor += Math.max(nalSize, 0);
-        continue;
-      }
+      if (nalSize < 2 || cursor + nalSize > mdat.end) throw new Error("Invalid H.264 video data length");
 
       // NAL type 6 = SEI, payload type 5 = user data unregistered
       if (
@@ -230,6 +241,7 @@ class Mp4Parser {
 
       cursor += nalSize;
     }
+    if (cursor !== mdat.end) throw new Error("Truncated H.264 video data length");
 
     return frames;
   }
@@ -261,22 +273,17 @@ export async function extractTelemetryFromBuffer(
   // frameSeqNo values are absolute — normalize to segment-relative indices
   const minSeq = frames.reduce((m, f) => Math.min(m, f.frameSeqNo), Infinity);
 
-  let frameTimesMs: number[];
-  if (durations && durations.length > 0) {
-    // Cumulative time for each video frame index
-    const cumulative = new Float64Array(durations.length + 1);
-    for (let i = 0; i < durations.length; i++) {
-      cumulative[i + 1] = cumulative[i] + durations[i];
-    }
-    // Map each telemetry frame to its start time (segment-relative)
-    frameTimesMs = frames.map((f) => {
-      const relIdx = Math.min(f.frameSeqNo - minSeq, durations.length - 1);
-      return cumulative[Math.max(0, relIdx)];
-    });
-  } else {
-    // Fallback: assume ~36fps, evenly spaced by relative sequence number
-    frameTimesMs = frames.map((f) => (f.frameSeqNo - minSeq) * (1000 / 36));
+  const cumulative = new Float64Array(durations.length + 1);
+  for (let i = 0; i < durations.length; i++) {
+    cumulative[i + 1] = cumulative[i] + durations[i];
   }
+  const frameTimesMs = frames.map((frame, index) => {
+    const relativeIndex = frame.frameSeqNo - minSeq;
+    if (relativeIndex >= durations.length || (index > 0 && frame.frameSeqNo <= frames[index - 1].frameSeqNo)) {
+      throw new Error("Vehicle data frame sequence does not match MP4 sample timing");
+    }
+    return cumulative[relativeIndex];
+  });
 
   return { frameTimesMs, frames };
 }

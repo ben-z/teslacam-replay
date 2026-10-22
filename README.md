@@ -20,7 +20,7 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 │  Static Frontend │  HTTP   │  Node.js Server    │
 │  (React + Vite)  │ ──────> │  Hono + ffmpeg     │
 │                  │         │                    │
-│  GitHub Pages /  │         │  Reads dashcam     │
+│  Same origin /  │         │  Reads dashcam     │
 │  any static host │         │  files via         │
 │                  │         │  gdrive-serve-lite │
 └──────────────────┘         └────────────────────┘
@@ -79,33 +79,9 @@ docker run -d \
   ghcr.io/ben-z/teslacam-replay
 ```
 
-**API-only** (use with GitHub Pages or another frontend host):
-
-```bash
-docker run -d \
-  -p 3001:3001 \
-  -e GDRIVE_BASE_URL=http://host.docker.internal:8765 \
-  -e SERVE_FRONTEND=false \
-  ghcr.io/ben-z/teslacam-replay
-```
+The production frontend and API use the same HTTPS origin. Local development uses the Vite proxy to the API on port 3001.
 
 Tags available: `latest` and full commit SHA (e.g., `sha-a1b2c3d4e5f6...`).
-
-### GitHub Pages + Remote Backend
-
-The frontend is automatically deployed to GitHub Pages on push to `main`. To connect it to your backend:
-
-1. Start the backend on your machine:
-   ```bash
-   npm start
-   ```
-
-2. Open the GitHub Pages URL with a `?server=` parameter:
-   ```
-   https://your-username.github.io/teslacam-replay/?server=http://your-server:3001
-   ```
-
-The server URL is saved to localStorage, so you only need the `?server=` parameter once. To change it later, add the parameter again with a new URL.
 
 ## Environment Variables
 

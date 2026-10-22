@@ -5,7 +5,8 @@ import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { HTTPException } from "hono/http-exception";
 import { createReadStream } from "fs";
-import { readFile, stat, readdir, rename, rm } from "fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import {
@@ -16,10 +17,11 @@ import {
 } from "./scan.js";
 import { extractTelemetryFromBuffer, type TelemetryData } from "./sei.js";
 import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
-import { createGDriveLiteFromEnv, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
-import { HLS_CACHE_DIR } from "./paths.js";
+import { createGDriveLiteFromEnv, DriveNotFoundError, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 import { RecentArchive } from "./recent-archive.js";
+import { mergeRecentFragments } from "../src/events.js";
+import type { DashcamEvent as PublicDashcamEvent } from "../src/types.js";
 
 const appOrigin = process.env.APP_ORIGIN;
 if (appOrigin !== undefined) {
@@ -144,6 +146,8 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
   return {
     ...existing,
     ...incoming,
+    id: existing.id,
+    timestamp: clips[0].timestamp.replace("_", "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2"),
     hasThumbnail: existing.hasThumbnail || incoming.hasThumbnail,
     thumbnailSource: existing.thumbnailSource ?? incoming.thumbnailSource,
     clips,
@@ -152,18 +156,51 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
   };
 }
 
-function rememberEvents(events: DashcamEvent[]): void {
+function rememberEvents(events: DashcamEvent[], mode: "page" | "snapshot"): DashcamEvent[] {
+  const touchedKeys: string[] = [];
   for (const event of events) {
     const key = eventKey(event.type, event.id);
-    const existing = eventIndex.get(key);
-    eventIndex.set(key, existing ? mergeEvent(existing, event) : event);
+    touchedKeys.push(key);
+    if (event.type !== "RecentClips") {
+      eventIndex.set(key, event);
+      continue;
+    }
+    const canonical = [...new Map(
+      [...eventIndex.values()]
+        .filter((entry) => entry.type === "RecentClips")
+        .map((entry) => [entry.id, entry]),
+    ).values()];
+    const known = eventIndex.get(key);
+    const fragment = known ? { ...event, id: known.id } : event;
+    const { merged, originalIds } = mergeRecentFragments(canonical, fragment, mode === "page"
+      ? mergeEvent
+      : (first, snapshot) => ({ ...snapshot, id: first.id }));
+    originalIds.push(event.id);
+    const absorbedIds = new Set(originalIds);
+    for (const [alias, previous] of eventIndex) {
+      if (previous.type === "RecentClips" && absorbedIds.has(previous.id)) eventIndex.set(alias, merged);
+    }
+    for (const id of originalIds) eventIndex.set(eventKey(event.type, id), merged);
   }
+  return [...new Set(touchedKeys.map((key) => eventIndex.get(key)!))];
 }
 
-function publicEvent(event: DashcamEvent): DashcamEvent {
+function publicEvent(event: DashcamEvent): PublicDashcamEvent {
   return {
-    ...event,
-    thumbnailSource: undefined,
+    id: event.id,
+    type: event.type,
+    timestamp: event.timestamp,
+    city: event.city,
+    lat: event.lat,
+    lon: event.lon,
+    reason: event.reason,
+    camera: event.camera,
+    hasThumbnail: event.hasThumbnail,
+    totalDurationSec: event.totalDurationSec,
+    cameraCount: event.cameraCount,
+    thumbnailVersion: event.thumbnailSource
+      ? createHash("sha256").update(drive.streamSource(event.thumbnailSource).identity).digest("hex").slice(0, 16)
+      : undefined,
     clips: event.clips.map((clip) => ({
       timestamp: clip.timestamp,
       cameras: clip.cameras,
@@ -173,24 +210,14 @@ function publicEvent(event: DashcamEvent): DashcamEvent {
   };
 }
 
-function publicEvents(events: DashcamEvent[]): DashcamEvent[] {
+function publicEvents(events: DashcamEvent[]): PublicDashcamEvent[] {
   return events.map(publicEvent);
 }
 
 async function getTypeFolder(type: EventType): Promise<DriveEntry> {
   const cached = typeFolders.get(type);
   if (cached) return cached;
-  let folder: DriveEntry | undefined;
-  try {
-    folder = await drive.resolvePath(`/${type}`, "folder");
-  } catch {
-    folder = (await drive.listRoot()).files.find((entry) =>
-      entry.name === type && drive.isFolder(entry)
-    );
-  }
-  if (!folder) {
-    throw new Error(`TeslaCam folder not found: ${type}`);
-  }
+  const folder = await drive.resolvePath(`/${type}`, "folder");
   typeFolders.set(type, folder);
   return folder;
 }
@@ -219,8 +246,7 @@ async function getEventPage(
 ): Promise<{ events: DashcamEvent[]; nextPageToken?: string }> {
   if (type === "RecentClips") {
     const page = await recentArchive.page(pageToken);
-    rememberEvents(page.events);
-    return page;
+    return { ...page, events: rememberEvents(page.events, "page") };
   }
 
   const folder = await getTypeFolder(type);
@@ -242,7 +268,7 @@ async function getEventPage(
   const events = scanned
     .filter((event): event is DashcamEvent => Boolean(event))
     .sort((a, b) => b.id.localeCompare(a.id));
-  rememberEvents(events);
+  rememberEvents(events, "snapshot");
   return { events, nextPageToken: page.nextPageToken };
 }
 
@@ -251,23 +277,33 @@ async function findEvent(type: string, id: string): Promise<DashcamEvent | null>
   if (indexed) return indexed;
 
   if (type === "SavedClips" || type === "SentryClips") {
-    try {
-      const folder = await drive.resolvePath(`/${type}/${id}`, "folder");
-      const event = await scanEventFolder(drive, type, folder);
-      if (event) rememberEvents([event]);
-      return event;
-    } catch {
-      return null;
-    }
+    return readEventFolder(type, id);
   }
 
   if (type === "RecentClips") {
     const event = await recentArchive.findEvent(id);
-    if (event) rememberEvents([event]);
-    return event;
+    if (!event) return null;
+    const [canonical] = rememberEvents([event], "page");
+    eventIndex.set(eventKey(type, id), canonical);
+    return canonical;
   }
 
   return null;
+}
+
+async function readEventFolder(type: "SavedClips" | "SentryClips", id: string): Promise<DashcamEvent | null> {
+  let folder: DriveEntry;
+  try {
+    folder = await drive.resolvePath(`/${type}/${id}`, "folder");
+  } catch (error) {
+    if (!(error instanceof DriveNotFoundError)) throw error;
+    eventIndex.delete(eventKey(type, id));
+    return null;
+  }
+  const event = await scanEventFolder(drive, type, folder);
+  if (event) rememberEvents([event], "snapshot");
+  else eventIndex.delete(eventKey(type, id));
+  return event;
 }
 
 async function findClipSource(
@@ -301,6 +337,7 @@ app.get("/api/status", (c) => {
 });
 
 app.get("/api/events/page", async (c) => {
+  c.header("Cache-Control", "no-cache");
   const type = c.req.query("type") as EventType | undefined;
   if (type !== "SavedClips" && type !== "SentryClips" && type !== "RecentClips") {
     return c.json({ error: "Invalid event type" }, 400);
@@ -324,7 +361,23 @@ app.get("/api/events/page", async (c) => {
 app.get("/api/events/:type/:id", async (c) => {
   const { type, id } = c.req.param();
   if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
-  const event = await findEvent(type, id);
+  const refresh = c.req.query("refresh");
+  if (refresh !== undefined && refresh !== "1") return c.json({ error: "Invalid refresh flag" }, 400);
+  c.header("Cache-Control", "no-cache");
+  let event: DashcamEvent | null;
+  if (!refresh) event = await findEvent(type, id);
+  else if (type === "SavedClips" || type === "SentryClips") event = await readEventFolder(type, id);
+  else if (type === "RecentClips") {
+    const snapshot = await recentArchive.findEvent(id);
+    event = snapshot ? rememberEvents([snapshot], "snapshot")[0] : null;
+    if (event) eventIndex.set(eventKey(type, id), event);
+    else {
+      const previous = eventIndex.get(eventKey(type, id));
+      for (const [key, candidate] of eventIndex) {
+        if (key === eventKey(type, id) || (previous && candidate.type === type && candidate.id === previous.id)) eventIndex.delete(key);
+      }
+    }
+  } else event = null;
   if (!event) return c.json({ error: "Event not found" }, 404);
   return c.json(publicEvent(event));
 });
@@ -337,7 +390,7 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
   if (!source) return c.json({ error: "Thumbnail not found" }, 404);
 
   const res = await drive.fetchSource(source);
-  if (!res.ok || !res.body) return c.json({ error: "Thumbnail not found" }, 404);
+  if (!res.ok || !res.body) return c.json({ error: `Cannot read thumbnail: HTTP ${res.status}` }, 502);
 
   const headers = readHeaders(res);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "image/png");
@@ -365,14 +418,11 @@ function telemetryCacheSet(key: string, value: TelemetryResult): void {
 }
 
 app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
+  c.header("Cache-Control", "no-cache");
   const { type, eventId, segment } = c.req.param();
   if (!validateParams(type, eventId, segment)) {
     return c.json({ error: "Invalid params" }, 400);
   }
-
-  const cacheKey = `${type}/${eventId}/${segment}`;
-  const cached = telemetryCache.get(cacheKey);
-  if (cached) return c.json(cached);
 
   const event = type === "RecentClips"
     ? eventIndex.get(eventKey(type, eventId)) ?? null
@@ -384,19 +434,22 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
 
   const camera = clip?.cameras.includes("front") ? "front" : clip?.cameras[0] ?? "front";
   const source = await findClipSource(type, eventId, segment, camera);
-  if (!source) return c.json(NO_SEI);
+  if (!source) return c.json({ error: "Video source not found" }, 404);
+  const cacheKey = JSON.stringify([type, eventId, segment, drive.streamSource(source).identity]);
+  const cached = telemetryCache.get(cacheKey);
+  if (cached) return c.json(cached);
 
   try {
     const res = await drive.fetchSource(source);
-    if (!res.ok) return c.json(NO_SEI);
+    if (!res.ok) throw new Error(`Cannot read video for vehicle data: HTTP ${res.status}`);
     const data = await extractTelemetryFromBuffer(Buffer.from(await res.arrayBuffer()));
     const result: TelemetryResult = data
       ? { hasSei: true, frameTimesMs: data.frameTimesMs, frames: data.frames }
       : NO_SEI;
     telemetryCacheSet(cacheKey, result);
     return c.json(result);
-  } catch {
-    return c.json(NO_SEI);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
   }
 });
 
@@ -423,12 +476,11 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
 
   const manifestFile = hlsManifestPath(type, eventId, segment, camera);
   const manifestContent = await readFile(manifestFile, "utf-8");
-  const isComplete = manifestContent.includes("#EXT-X-ENDLIST");
   return new Response(manifestContent, {
     headers: {
       "Content-Type": "application/vnd.apple.mpegurl",
       // In-progress manifests must not be cached so hls.js can poll for new segments
-      "Cache-Control": isComplete ? "public, max-age=86400" : "no-cache",
+      "Cache-Control": "no-cache",
     },
   });
 });
@@ -436,7 +488,7 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/stream.m3u8", async (c) => {
 // Chunk route: serves .ts segment files from cache
 app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
   const { type, eventId, segment, camera, chunk } = c.req.param();
-  if (!validateParams(type, eventId, segment, camera) || !/^chunk_\d{3}\.ts$/.test(chunk)) {
+  if (!validateParams(type, eventId, segment, camera) || !/^chunk_[0-9a-f]{16}_\d{3,}\.ts$/.test(chunk)) {
     return c.json({ error: "Invalid params" }, 400);
   }
 
@@ -460,58 +512,6 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
       "Cache-Control": "public, max-age=86400",
     },
   });
-});
-
-// --- Debug: cache management ---
-
-async function dirSizeBytes(dirPath: string): Promise<number> {
-  try {
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    let total = 0;
-    for (const entry of entries) {
-      const full = path.join(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        total += await dirSizeBytes(full);
-      } else {
-        try {
-          const s = await stat(full);
-          total += s.size;
-        } catch {}
-      }
-    }
-    return total;
-  } catch {
-    return 0;
-  }
-}
-
-app.get("/api/debug/caches", async (c) => {
-  const hlsSize = await dirSizeBytes(HLS_CACHE_DIR);
-
-  return c.json({
-    caches: [
-      { id: "hls", label: "HLS segments", path: HLS_CACHE_DIR, sizeBytes: hlsSize },
-      { id: "telemetry", label: "Telemetry (memory)", path: null, entryCount: telemetryCache.size },
-    ],
-  });
-});
-
-app.post("/api/debug/caches/:id/clear", async (c) => {
-  const { id } = c.req.param();
-  switch (id) {
-    case "hls": {
-      // Rename first (atomic), then delete in background to avoid race with new ffmpeg writes
-      const tmp = `${HLS_CACHE_DIR}_del_${Date.now()}`;
-      try { await rename(HLS_CACHE_DIR, tmp); rm(tmp, { recursive: true, force: true }).catch(() => {}); } catch {}
-      break;
-    }
-    case "telemetry":
-      telemetryCache.clear();
-      break;
-    default:
-      return c.json({ error: "Unknown cache id" }, 400);
-  }
-  return c.json({ ok: true });
 });
 
 // Serve static files when SERVE_FRONTEND is enabled

@@ -1,17 +1,12 @@
 import { Fragment, memo, useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   thumbnailUrl,
-  fetchStatus,
-  fetchCaches,
-  clearCache,
-  getApiBase,
   type EventPageType,
-  type ServerStatus,
-  type CacheInfo,
 } from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
+import { recordingWallTimeMs } from "../playback";
 import "./EventBrowser.css";
 
 interface Props {
@@ -36,15 +31,17 @@ const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   hour: "numeric",
   minute: "2-digit",
-  timeZoneName: "short",
+  timeZone: "UTC",
 });
 const DATE_GROUP_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
   weekday: "long",
   month: "long",
   day: "numeric",
   year: "numeric",
 });
 const SCAN_FRONTIER_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
   weekday: "short",
   month: "short",
   day: "numeric",
@@ -52,20 +49,8 @@ const SCAN_FRONTIER_FORMATTER = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-function timestampToMs(ts: string): number {
-  const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
-  const d = m
-    ? new Date(
-      Number(m[1]), Number(m[2]) - 1, Number(m[3]),
-      Number(m[4]), Number(m[5]), Number(m[6])
-    )
-    : new Date(ts);
-  const ms = d.getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
-
 function eventStartMs(event: DashcamEvent): number {
-  return timestampToMs(event.clips[0]?.timestamp ?? event.timestamp);
+  return recordingWallTimeMs(event.clips[0]?.timestamp ?? event.timestamp);
 }
 
 function formatScanFrontier(ms: number | null): string {
@@ -74,38 +59,25 @@ function formatScanFrontier(ms: number | null): string {
 }
 
 function formatTimestamp(ts: string): string {
-  try {
-    return TIMESTAMP_FORMATTER.format(new Date(ts));
-  } catch {
-    return ts;
-  }
+  return TIMESTAMP_FORMATTER.format(new Date(recordingWallTimeMs(ts)));
 }
 
 function formatDuration(seconds: number): string {
-  if (seconds <= 0) return "Pending";
-  const m = Math.floor(seconds / 60);
-  if (m >= 60) {
-    const h = Math.floor(m / 60);
-    const rm = m % 60;
-    return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
-  }
-  return `${m} min`;
+  if (seconds <= 0) return "No video";
+  if (seconds < 60) return `~${Math.round(seconds)} sec`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `~${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `~${hours}h ${remainder}m` : `~${hours}h`;
 }
 
 function formatDateGroup(ts: string): string {
-  try {
-    return DATE_GROUP_FORMATTER.format(new Date(ts));
-  } catch {
-    return ts;
-  }
+  return DATE_GROUP_FORMATTER.format(new Date(recordingWallTimeMs(ts)));
 }
 
 function dateKey(ts: string): string {
-  try {
-    return new Date(ts).toDateString();
-  } catch {
-    return ts;
-  }
+  return ts.slice(0, 10);
 }
 
 export function EventBrowser({
@@ -123,11 +95,6 @@ export function EventBrowser({
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const [status, setStatus] = useState<ServerStatus | null>(null);
-
-  useEffect(() => {
-    fetchStatus().then(setStatus).catch(() => {});
-  }, []);
 
   // Debounce search input
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -141,7 +108,7 @@ export function EventBrowser({
 
   const filtered = useMemo(() => {
     if (view === "recent") {
-      return events.filter((e) => e.type === "RecentClips");
+      return events.filter((e) => e.type === "RecentClips").sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     }
     let result = events.filter((e) => e.type !== "RecentClips");
     if (filter !== "all") {
@@ -153,10 +120,10 @@ export function EventBrowser({
         (e) =>
           e.city?.toLowerCase().includes(q) ||
           e.id.includes(q) ||
-          e.reason?.toLowerCase().includes(q)
+          formatReason(e.reason).toLowerCase().includes(q)
       );
     }
-    return result;
+    return result.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }, [events, view, filter, search]);
 
   const setFilterAndReset = useCallback((f: FilterType) => {
@@ -244,7 +211,7 @@ export function EventBrowser({
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const root = view === "recent" ? recentTimelineScrollRef.current : null;
-    if (!sentinel || !hasMore) return;
+    if (!sentinel || !hasMore || search.trim() || error) return;
     if (view === "recent" && !root) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -256,7 +223,7 @@ export function EventBrowser({
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, handleLoadMore, view]);
+  }, [hasMore, handleLoadMore, view, search, error]);
 
   return (
     <div className="browse-container">
@@ -266,9 +233,9 @@ export function EventBrowser({
           <div className="browse-header-actions">
             <button
               onClick={onRefresh}
-              disabled={loading}
+              disabled={loading || loadingMore}
               className="browse-refresh-btn"
-              title="Reload first event pages"
+              title="Refresh recordings"
             >
               {loading ? "Loading..." : "Refresh"}
             </button>
@@ -284,7 +251,7 @@ export function EventBrowser({
             >
               Events ({counts.total})
             </button>
-            {counts.recent > 0 && (
+            {(
               <button
                 onClick={() => setView("recent")}
                 className={`browse-view-btn ${view === "recent" ? "active" : ""}`}
@@ -317,11 +284,11 @@ export function EventBrowser({
               <div className="browse-search-wrapper">
                 <input
                   type="text"
-                  placeholder="Search by city, date, reason..."
+                  placeholder="Search loaded events…"
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   className="browse-search"
-                  aria-label="Search events"
+                  aria-label="Search loaded events by city, date or reason"
                 />
                 {searchInput && (
                   <button
@@ -339,14 +306,21 @@ export function EventBrowser({
       </header>
 
       <div className="browse-content">
-        {error && <div className="browse-error">{error}</div>}
+        {error && <div className="browse-error" role="alert">{error} <button onClick={onRefresh} disabled={loading || loadingMore}>Retry</button></div>}
+        {view === "events" && (
+          <p className="browse-scope" aria-live="polite">
+            {loading ? "Loading recordings…" : `${filtered.length} matching events loaded`}
+            {hasMoreRemote && " · Older events are available"}
+            {search.trim() && " · Search covers loaded events"}
+          </p>
+        )}
 
         {loading && events.length === 0 ? (
           <div className="browse-loading">
             <div className="browse-spinner" />
             <p>Loading events...</p>
             <p className="browse-loading-hint">
-              Loading the first Drive pages
+              Loading recordings
             </p>
           </div>
         ) : view === "recent" ? (
@@ -383,7 +357,7 @@ export function EventBrowser({
           <div className="browse-empty">
             {search.trim() || filter !== "all" ? (
               <>
-                <p>No events match your filters</p>
+                <p>No loaded events match your filters</p>
                 <button
                   onClick={() => { setFilter("all"); setSearchInput(""); }}
                   className="browse-clear-filters-btn"
@@ -392,7 +366,12 @@ export function EventBrowser({
                 </button>
               </>
             ) : (
-              <p>No events found</p>
+              <p>No events in the loaded pages</p>
+            )}
+            {hasMoreRemote && (
+              <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={loadingMore}>
+                {loadingMore ? "Loading older events…" : "Load older events"}
+              </button>
             )}
           </div>
         ) : (
@@ -438,26 +417,9 @@ export function EventBrowser({
         )}
       </div>
 
-      {status && (
-        <div className="browse-status-bar">
-          <span>Server: {getApiBase()}</span>
-          <span className="browse-status-sep">&middot;</span>
-          <span>Storage: {status.storageBackend}</span>
-          {status.storagePath && (
-            <>
-              <span className="browse-status-sep">&middot;</span>
-              <span className="browse-status-path">{status.storagePath}</span>
-            </>
-          )}
-          {loadedEventCount > 0 && (
-            <>
-              <span className="browse-status-sep">&middot;</span>
-              <span>{loadedEventCount} event{loadedEventCount !== 1 ? "s" : ""} loaded</span>
-            </>
-          )}
-          <DebugPanelToggle />
-        </div>
-      )}
+      <footer className="browse-status-bar">
+        <span>{loadedEventCount} recordings loaded · Times shown as recorded</span>
+      </footer>
     </div>
   );
 }
@@ -467,7 +429,6 @@ const BADGE_STYLES: Record<string, { label: string; color: string }> = {
   RecentClips: { label: "Recent", color: "var(--recent-color)" },
   SavedClips: { label: "Saved", color: "var(--saved-color)" },
 };
-const DEFAULT_BADGE = { label: "Saved", color: "var(--saved-color)" };
 
 const EventCard = memo(function EventCard({
   event,
@@ -476,7 +437,7 @@ const EventCard = memo(function EventCard({
   event: DashcamEvent;
   onSelect: (event: DashcamEvent) => void;
 }) {
-  const badge = BADGE_STYLES[event.type] ?? DEFAULT_BADGE;
+  const badge = BADGE_STYLES[event.type];
   const formattedTimestamp = useMemo(
     () => formatTimestamp(event.timestamp),
     [event.timestamp]
@@ -490,187 +451,67 @@ const EventCard = memo(function EventCard({
   );
   useEffect(() => {
     setThumbState(event.hasThumbnail ? "loading" : "error");
-  }, [event.type, event.id, event.hasThumbnail]);
+  }, [event.type, event.id, event.hasThumbnail, event.thumbnailVersion]);
 
   const handleClick = useCallback(() => onSelect(event), [event, onSelect]);
 
   return (
-    <button onClick={handleClick} className="browse-card">
-      <div className="browse-card-thumb">
-        {event.hasThumbnail && thumbState !== "error" ? (
-          <>
-            {thumbState === "loading" && <div className="browse-card-shimmer" />}
-            <img
-              src={thumbnailUrl(event.type, event.id)}
-              alt=""
-              className={`browse-card-img ${thumbState === "loaded" ? "loaded" : ""}`}
-              loading="lazy"
-              decoding="async"
-              onLoad={() => setThumbState("loaded")}
-              onError={() => setThumbState("error")}
-            />
-          </>
-        ) : (
-          <div className="browse-card-placeholder">No preview</div>
-        )}
-        <span
-          className="browse-card-badge"
-          style={{ background: badge.color }}
-        >
-          {badge.label}
-        </span>
-        <span className="browse-card-duration">
-          {formatDuration(event.totalDurationSec)}
-        </span>
-      </div>
-      <div className="browse-card-info">
-        <div className="browse-card-date">
-          {formattedTimestamp}
-        </div>
-        {event.city && (
-          <div className="browse-card-city">{event.city}</div>
-        )}
-        {event.reason && (
-          <div className="browse-card-reason">
-            {formatReason(event.reason)}
-          </div>
-        )}
-        <div className="browse-card-meta">
-          {event.clips.length === 0 ? (
-            "Videos not available yet"
+    <article className="browse-card">
+      <button onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${event.city ? ` in ${event.city}` : ""}`}>
+        <div className="browse-card-thumb">
+          {event.hasThumbnail && thumbState !== "error" ? (
+            <>
+              {thumbState === "loading" && <div className="browse-card-shimmer" />}
+              <img
+                src={thumbnailUrl(event.type, event.id, event.thumbnailVersion)}
+                alt=""
+                className={`browse-card-img ${thumbState === "loaded" ? "loaded" : ""}`}
+                loading="lazy"
+                decoding="async"
+                onLoad={() => setThumbState("loaded")}
+                onError={() => setThumbState("error")}
+              />
+            </>
           ) : (
-            <>
-              {event.clips.length} segments &middot;{" "}
-              {cameraCount} cameras
-            </>
+            <div className="browse-card-placeholder">No preview</div>
           )}
-          {event.lat != null && event.lon != null && (
-            <>
-              {" "}&middot;{" "}
-              <a
-                href={`https://maps.google.com/?q=${event.lat},${event.lon}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="browse-card-gps"
-                onClick={(e) => e.stopPropagation()}
-              >
-                GPS
-              </a>
-            </>
-          )}
+          <span
+            className="browse-card-badge"
+            style={{ background: badge.color }}
+          >
+            {badge.label}
+          </span>
+          <span className="browse-card-duration">
+            {formatDuration(event.totalDurationSec)}
+          </span>
         </div>
-      </div>
-    </button>
+        <div className="browse-card-info">
+          <div className="browse-card-date" title={`Recorded local time: ${event.timestamp}`}>
+            {formattedTimestamp}
+          </div>
+          {event.city && (
+            <div className="browse-card-city">{event.city}</div>
+          )}
+          {event.reason && (
+            <div className="browse-card-reason">
+              {formatReason(event.reason)}
+            </div>
+          )}
+          <div className="browse-card-meta">
+            {event.clips.length === 0 ? (
+              "No archived video"
+            ) : (
+              <>
+                {event.clips.length} segments &middot;{" "}
+                {cameraCount} cameras
+              </>
+            )}
+          </div>
+        </div>
+      </button>
+      {event.lat != null && event.lon != null && (
+        <a href={`https://maps.google.com/?q=${event.lat},${event.lon}`} target="_blank" rel="noopener noreferrer" className="browse-card-gps" aria-label={`Open location of ${formattedTimestamp} in Google Maps`}>Map</a>
+      )}
+    </article>
   );
 });
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / 1024 ** i;
-  return `${val < 10 ? val.toFixed(1) : Math.round(val)} ${units[i]}`;
-}
-
-function DebugPanelToggle() {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <>
-      <button
-        className="debug-toggle-btn"
-        onClick={() => setOpen((v) => !v)}
-        title="Debug: cache management"
-        aria-label="Toggle debug panel"
-      >
-        {/* wrench icon */}
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M12.7 3.3a4.5 4.5 0 0 0-5.6-.5L9 4.7l-.7 2.6-2.6.7-1.9-1.9a4.5 4.5 0 0 0 .5 5.6 4.5 4.5 0 0 0 5.2.7l3.4 3.4a1.5 1.5 0 0 0 2.1-2.1l-3.4-3.4a4.5 4.5 0 0 0-.9-5z"/>
-        </svg>
-      </button>
-      {open && <DebugPanel onClose={() => setOpen(false)} />}
-    </>
-  );
-}
-
-function DebugPanel({ onClose }: { onClose: () => void }) {
-  const [caches, setCaches] = useState<CacheInfo[] | null>(null);
-  const [clearing, setClearing] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    fetchCaches().then(setCaches).catch((e) => setError(e.message));
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const handleClear = useCallback(async (id: string) => {
-    setClearing(id);
-    try {
-      await clearCache(id);
-      load();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Clear failed");
-    } finally {
-      setClearing(null);
-    }
-  }, [load]);
-
-  const handleClearAll = useCallback(async () => {
-    if (!caches) return;
-    setClearing("all");
-    try {
-      await Promise.all(caches.map(c => clearCache(c.id)));
-      load();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Clear failed");
-    } finally {
-      setClearing(null);
-    }
-  }, [caches, load]);
-
-  return (
-    <div className="debug-overlay" onClick={onClose}>
-      <div className="debug-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="debug-panel-header">
-          <span className="debug-panel-title">Cache Management</span>
-          <button className="debug-panel-close" onClick={onClose}>&times;</button>
-        </div>
-        {error && <div className="debug-panel-error">{error}</div>}
-        {!caches ? (
-          <div className="debug-panel-loading">Loading...</div>
-        ) : (
-          <>
-            <div className="debug-cache-list">
-              {caches.map((c) => (
-                <div key={c.id} className="debug-cache-row">
-                  <div className="debug-cache-info">
-                    <span className="debug-cache-label">{c.label}</span>
-                    <span className="debug-cache-detail">
-                      {c.sizeBytes != null ? formatBytes(c.sizeBytes) : `${c.entryCount} entries`}
-                      {c.path && <span className="debug-cache-path">{c.path}</span>}
-                    </span>
-                  </div>
-                  <button
-                    className="debug-cache-clear-btn"
-                    onClick={() => handleClear(c.id)}
-                    disabled={clearing !== null}
-                  >
-                    {clearing === c.id ? "..." : "Clear"}
-                  </button>
-                </div>
-              ))}
-            </div>
-            <button
-              className="debug-clear-all-btn"
-              onClick={handleClearAll}
-              disabled={clearing !== null}
-            >
-              {clearing === "all" ? "Clearing..." : "Clear All"}
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}

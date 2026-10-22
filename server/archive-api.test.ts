@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DriveEntry } from "./gdrive-lite.js";
 
-const { serve, ensureHlsSegments } = vi.hoisted(() => ({
+const { serve, ensureHlsSegments, extractTelemetryFromBuffer } = vi.hoisted(() => ({
   serve: vi.fn(),
   ensureHlsSegments: vi.fn(),
+  extractTelemetryFromBuffer: vi.fn(),
 }));
 
 vi.mock("@hono/node-server", () => ({ serve }));
+vi.mock("./sei.js", () => ({ extractTelemetryFromBuffer }));
 vi.mock("./hls.js", () => ({
   ensureHlsSegments,
   hlsManifestPath: () => path.join(testDirectory, "stream.m3u8"),
@@ -27,6 +29,7 @@ class DriveProvider {
   readonly children = new Map<string, DriveEntry[]>([["", []]]);
   readonly requests: URL[] = [];
   readonly resolveFailures = new Map<string, number>();
+  readonly reads = new Map<string, { body: string; status: number }>();
 
   add(filePath: string, folder = false): DriveEntry {
     const parentPath = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
@@ -43,10 +46,23 @@ class DriveProvider {
     return entry;
   }
 
+  remove(filePath: string): void {
+    const entry = this.entries.get(filePath);
+    if (!entry) throw new Error(`Cannot remove missing fixture: ${filePath}`);
+    this.entries.delete(filePath);
+    for (const [id, children] of this.children) this.children.set(id, children.filter((child) => child.id !== entry.id));
+    this.children.delete(entry.id);
+  }
+
   async fetch(input: string | URL | Request): Promise<Response> {
     const url = new URL(input instanceof Request ? input.url : input);
     this.requests.push(url);
     if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+    if (url.pathname.startsWith("/file/")) {
+      const file = this.reads.get(url.pathname.split("/")[2]);
+      if (!file) throw new Error(`Missing file-read fixture: ${url}`);
+      return new Response(file.body, { status: file.status });
+    }
     if (url.pathname === "/api/resolve") {
       const filePath = url.searchParams.get("path")!.replace(/^\//, "");
       const failure = this.resolveFailures.get(filePath);
@@ -91,6 +107,8 @@ beforeEach(async () => {
   }
   serve.mockReturnValue({ close: vi.fn() });
   ensureHlsSegments.mockResolvedValue(true);
+  extractTelemetryFromBuffer.mockReset();
+  extractTelemetryFromBuffer.mockResolvedValue(null);
   testDirectory = await mkdtemp(path.join(tmpdir(), "teslacam-archive-api-"));
   await writeFile(path.join(testDirectory, "stream.m3u8"), "#EXTM3U\n#EXT-X-ENDLIST\n");
   priorSignals = new Set([...process.listeners("SIGTERM"), ...process.listeners("SIGINT")]);
@@ -231,6 +249,162 @@ describe("RecentClips archive API", () => {
     expect(response.status).toBe(200);
     const event = await response.json();
     expect(event.clips.map((clip: { timestamp: string }) => clip.timestamp)).toEqual(segments);
+    const requestsBefore = provider.requests.length;
+    expect((await request(`/api/events/RecentClips/${segments[1]}`)).status).toBe(200);
+    expect(provider.requests).toHaveLength(requestsBefore);
+  });
+
+  it("joins overlapping page groups, retains the first server ID and all aliases, and unions private sources", async () => {
+    const early = "2026-10-02_10-00-00";
+    const middle = "2026-10-02_10-01-00";
+    const late = "2026-10-02_10-02-00";
+    provider.add(`RecentClips/${early}-front.mp4`);
+    const front = provider.add(`RecentClips/${middle}-front.mp4`);
+    const back = provider.add(`RecentClips/${middle}-back.mp4`);
+    provider.add(`RecentClips/${late}-front.mp4`);
+    await start();
+    for (const id of [early, late]) {
+      const response = await request(`/api/events/RecentClips/${id}`);
+      expect(response.status).toBe(200);
+      expect((await response.json()).id).toBe(id);
+    }
+    const first = await page();
+    expect(first.events[0].id).toBe(late);
+    const second = await page(first.nextPageToken);
+    expect(second.events).toHaveLength(1);
+    expect(second.events[0]).toMatchObject({ id: early, clips: [
+      { timestamp: early },
+      { timestamp: middle, cameras: ["front", "back"] },
+      { timestamp: late },
+    ] });
+    expect(second.events[0].clips.every((clip: {sourceByCamera?: unknown}) => clip.sourceByCamera === undefined)).toBe(true);
+    const requestsBefore = provider.requests.length;
+    for (const alias of [early, middle, late]) {
+      const response = await request(`/api/events/RecentClips/${alias}`);
+      expect(response.status).toBe(200);
+      expect((await response.json()).id).toBe(early);
+    }
+    for (const [camera, source] of [["front", front], ["back", back]] as const) {
+      const response = await request(`/api/hls/RecentClips/${late}/${middle}/${camera}/stream.m3u8`);
+      expect(response.status).toBe(200);
+      expect(ensureHlsSegments.mock.calls.at(-1)![0].url).toContain(`/file/${source.id}/`);
+    }
+    expect(provider.requests).toHaveLength(requestsBefore);
+    provider.remove(`RecentClips/${middle}-back.mp4`);
+    const refreshed = await request(`/api/events/RecentClips/${middle}?refresh=1`);
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toMatchObject({ id: early, clips: [{ timestamp: middle, cameras: ["front"] }] });
+    const beforeAliasReads = provider.requests.length;
+    for (const alias of [early, middle, late]) {
+      const event = await (await request(`/api/events/RecentClips/${alias}`)).json();
+      expect(event.clips).toHaveLength(1);
+      expect(event.clips[0].cameras).toEqual(["front"]);
+    }
+    expect(provider.requests).toHaveLength(beforeAliasReads);
+    for (const segment of [early, middle, late]) provider.remove(`RecentClips/${segment}-front.mp4`);
+    expect((await request(`/api/events/RecentClips/${late}?refresh=1`)).status).toBe(404);
+    for (const alias of [early, middle, late]) expect((await request(`/api/events/RecentClips/${alias}`)).status).toBe(404);
+  });
+
+  it("uses indexed Saved snapshots until explicit refresh replaces removed cameras and folders", async () => {
+    const id = "2026-10-02_10-00-00";
+    const folder = `SavedClips/${id}`;
+    provider.add("SavedClips", true);
+    provider.add(folder, true);
+    provider.add(`${folder}/${id}-front.mp4`);
+    provider.add(`${folder}/${id}-back.mp4`);
+    await start();
+    expect((await request(`/api/events/SavedClips/${id}`)).status).toBe(200);
+    provider.remove(`${folder}/${id}-back.mp4`);
+    const before = provider.requests.length;
+    const indexed = await request(`/api/events/SavedClips/${id}`);
+    expect((await indexed.json()).clips[0].cameras).toEqual(["front", "back"]);
+    expect(provider.requests).toHaveLength(before);
+    const refreshed = await request(`/api/events/SavedClips/${id}?refresh=1`);
+    expect(refreshed.status).toBe(200);
+    expect((await refreshed.json()).clips[0].cameras).toEqual(["front"]);
+    provider.resolveFailures.set(folder, 503);
+    expect((await request(`/api/events/SavedClips/${id}?refresh=1`)).status).toBe(500);
+    provider.resolveFailures.delete(folder);
+    provider.remove(folder);
+    expect((await request(`/api/events/SavedClips/${id}?refresh=1`)).status).toBe(404);
+    expect((await request(`/api/events/SavedClips/${id}`)).status).toBe(404);
+  });
+
+  it("replaces a Recent refreshed scope, preserves aliases, and never treats provider failure as deletion", async () => {
+    const id = "2026-10-02_10-00-00";
+    const front = `RecentClips/${id}-front.mp4`;
+    const back = `RecentClips/${id}-back.mp4`;
+    provider.add(front);
+    provider.add(back);
+    await start();
+    expect((await request(`/api/events/RecentClips/${id}`)).status).toBe(200);
+    provider.remove(back);
+    const before = provider.requests.length;
+    expect((await (await request(`/api/events/RecentClips/${id}`)).json()).clips[0].cameras).toEqual(["front", "back"]);
+    expect(provider.requests).toHaveLength(before);
+    const refreshed = await request(`/api/events/RecentClips/${id}?refresh=1`);
+    expect(refreshed.status).toBe(200);
+    expect((await refreshed.json()).clips[0].cameras).toEqual(["front"]);
+    provider.resolveFailures.set(back, 503);
+    expect((await request(`/api/events/RecentClips/${id}?refresh=1`)).status).toBe(500);
+    provider.resolveFailures.delete(back);
+    expect((await (await request(`/api/events/RecentClips/${id}`)).json()).clips[0].cameras).toEqual(["front"]);
+    provider.remove(front);
+    expect((await request(`/api/events/RecentClips/${id}?refresh=1`)).status).toBe(404);
+    expect((await request(`/api/events/RecentClips/${id}`)).status).toBe(404);
+  });
+
+  it("publishes a thumbnail version without leaking private Drive source fields", async () => {
+    const id = "2026-10-02_10-00-00";
+    provider.add("SavedClips", true);
+    provider.add(`SavedClips/${id}`, true);
+    const camera = provider.add(`SavedClips/${id}/${id}-front.mp4`);
+    camera.resourceKey = "private-camera-key";
+    const thumbnail = provider.add(`SavedClips/${id}/thumb.png`);
+    thumbnail.resourceKey = "private-thumbnail-key";
+    thumbnail.mimeType = "image/png";
+    thumbnail.modifiedTime = "2026-10-02T10:00:00Z";
+    await start();
+    const original = await (await request(`/api/events/SavedClips/${id}`)).json();
+    expect(original.thumbnailVersion).toMatch(/^[0-9a-f]{16}$/);
+    expect(original).not.toHaveProperty("thumbnailSource");
+    expect(original.clips[0]).not.toHaveProperty("sourceByCamera");
+    expect(JSON.stringify(original)).not.toMatch(/private-camera-key|private-thumbnail-key|drive\.test|file-\d/);
+    thumbnail.modifiedTime = "2026-10-02T11:00:00Z";
+    const refreshed = await (await request(`/api/events/SavedClips/${id}?refresh=1`)).json();
+    expect(refreshed.thumbnailVersion).toMatch(/^[0-9a-f]{16}$/);
+    expect(refreshed.thumbnailVersion).not.toBe(original.thumbnailVersion);
+    provider.reads.set(thumbnail.id, { body: "Provider unavailable", status: 503 });
+    const failedThumbnail = await request(`/api/events/SavedClips/${id}/thumbnail`);
+    expect(failedThumbnail.status).toBe(502);
+    expect(await failedThumbnail.json()).toEqual({ error: "Cannot read thumbnail: HTTP 503" });
+  });
+
+  it("reports telemetry failures, caches genuine absence, and invalidates it when the refreshed source changes", async () => {
+    const id = "2026-10-02_10-00-00";
+    provider.add("SavedClips", true);
+    provider.add(`SavedClips/${id}`, true);
+    const camera = provider.add(`SavedClips/${id}/${id}-front.mp4`);
+    provider.reads.set(camera.id, { body: "Provider unavailable", status: 503 });
+    await start();
+    const route = `/api/video/SavedClips/${id}/${id}/telemetry`;
+    const failedRead = await request(route);
+    expect(failedRead.status).toBe(502);
+    expect(await failedRead.json()).toEqual({ error: "Cannot read video for vehicle data: HTTP 503" });
+    expect(extractTelemetryFromBuffer).not.toHaveBeenCalled();
+    provider.reads.set(camera.id, { body: "video bytes", status: 200 });
+    extractTelemetryFromBuffer.mockRejectedValueOnce(new Error("Invalid SEI payload"));
+    const failedExtraction = await request(route);
+    expect(failedExtraction.status).toBe(502);
+    expect(await failedExtraction.json()).toEqual({ error: "Invalid SEI payload" });
+    expect(await (await request(route)).json()).toEqual({ hasSei: false });
+    expect(await (await request(route)).json()).toEqual({ hasSei: false });
+    expect(extractTelemetryFromBuffer).toHaveBeenCalledTimes(2);
+    camera.modifiedTime = "2026-10-02T11:00:00Z";
+    expect((await request(`/api/events/SavedClips/${id}?refresh=1`)).status).toBe(200);
+    expect(await (await request(route)).json()).toEqual({ hasSei: false });
+    expect(extractTelemetryFromBuffer).toHaveBeenCalledTimes(3);
   });
 
   it("keeps SavedClips event browsing available", async () => {
@@ -312,21 +486,20 @@ describe("hosted API origin policy", () => {
     expect(provider.requests).toHaveLength(requestsBefore);
   });
 
-  it("allows same-origin API actions", async () => {
+  it("removes cache mutation endpoints from the viewing app", async () => {
     vi.stubEnv("APP_ORIGIN", origin);
     await start();
     const response = await request("/api/debug/caches/telemetry/clear", {
       method: "POST",
       headers: { Origin: origin, "Sec-Fetch-Site": "same-origin" },
     });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true });
+    expect(response.status).toBe(404);
   });
 
   it.each([
     ["/api/events/SavedClips/2026-10-02_10-00-00/thumbnail", "image/png", "thumbnail bytes"],
     ["/api/hls/SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00/front/stream.m3u8", "application/vnd.apple.mpegurl", "#EXTM3U\n#EXT-X-ENDLIST\n"],
-    ["/api/hls/SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00/front/chunk_000.ts", "video/mp2t", "segment bytes"],
+    ["/api/hls/SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00/front/chunk_0123456789abcdef_000.ts", "video/mp2t", "segment bytes"],
   ])("preserves origin policy headers and streamed bytes for %s", async (route, contentType, body) => {
     vi.stubEnv("APP_ORIGIN", origin);
     provider.add("SavedClips", true);
@@ -341,7 +514,7 @@ describe("hosted API origin policy", () => {
       }
       return provider.fetch(input);
     });
-    await writeFile(path.join(testDirectory, "chunk_000.ts"), "segment bytes");
+    await writeFile(path.join(testDirectory, "chunk_0123456789abcdef_000.ts"), "segment bytes");
     await start();
     const response = await request(route, { headers: { Origin: origin, "Sec-Fetch-Site": "same-origin" } });
     expect(response.status).toBe(200);
