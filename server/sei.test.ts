@@ -119,6 +119,15 @@ function writeTableValue(source: Buffer, name: string, offset: number, value: nu
 const slice = () => nal(Buffer.from([0x65, 0x88]));
 
 describe("Tesla vehicle data integrity", () => {
+  it("preserves the recorded accelerator percentage without normalization", async () => {
+    const payload = teslaPayload(escapeEmulationBytes(metadata.encode(metadata.create({
+      frameSeqNo: 100,
+      acceleratorPedalPosition: 17.6,
+    })).finish()));
+    const data = await extractTelemetryFromBuffer(movie([Buffer.concat([payload, slice()])], [40], {}));
+    expect(data?.frames[0].acceleratorPedalPosition).toBe(17.600000381469727);
+  });
+
   it("uses variable sample timing and preserves two messages in one sample", async () => {
     const source = movie([
       Buffer.concat([teslaFrame(100, 1), slice()]),

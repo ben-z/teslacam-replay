@@ -565,3 +565,22 @@
   overflow: hidden;
   white-space: nowrap;
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .browse-refresh-btn,
+  .browse-view-btn,
+  .browse-filter-btn,
+  .browse-search,
+  .browse-search-clear,
+  .browse-clear-filters-btn,
+  .browse-load-more-hint,
+  .browse-error button,
+  .browse-card .browse-card-gps {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .browse-search {
+    padding-right: 56px;
+  }
+}
