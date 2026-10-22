@@ -1,4 +1,4 @@
-import { Fragment, memo, useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { Fragment, memo, useState, useMemo, useCallback, useEffect } from "react";
 import {
   thumbnailUrl,
   type EventPageType,
@@ -82,15 +82,15 @@ export function EventBrowser({
   const failedTypes = SOURCE_TYPES.filter((type) => errorsByType[type] !== undefined);
 
   // Debounce search input
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => {
-    debounceRef.current = setTimeout(() => {
+    if (searchInput === search) return;
+    const timeout = setTimeout(() => {
       setSearch(searchInput);
       setVisibleCount(PAGE_SIZE);
       document.querySelector(".browse-content")?.scrollTo(0, 0);
     }, 200);
-    return () => clearTimeout(debounceRef.current);
-  }, [searchInput]);
+    return () => clearTimeout(timeout);
+  }, [searchInput, search]);
 
   const loadedEvents = useMemo(() => events
     .filter((event) => filter === "all" || event.type === filter)
@@ -160,7 +160,7 @@ export function EventBrowser({
   }, [hasMoreLoaded, canLoadRemote, onLoadMore, remoteTypesToLoad]);
 
   const timelineFooter = hasMoreRemote ? (
-    <div className="browse-load-more browse-load-more--passive">
+    <div className="browse-load-more">
       <button
         type="button"
         className="browse-load-more-hint"
@@ -279,7 +279,7 @@ export function EventBrowser({
         )}
 
         {view === "timeline" ? (
-          <div className="recent-view">
+          <>
             {!scopeIncomplete && (
               <div className="recent-scan-status" aria-live="polite">
                 <span className="recent-scan-dot" />
@@ -293,7 +293,7 @@ export function EventBrowser({
                 footer={timelineFooter}
               />
             ) : timelineFooter}
-          </div>
+          </>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
             {!scopeIncomplete && (search.trim() || filter !== "all" ? (
