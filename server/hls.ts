@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "child_process";
 import { createHash } from "crypto";
 import { watch, type FSWatcher } from "fs";
-import { mkdir, readFile, writeFile, rename, rm } from "fs/promises";
+import { mkdir, readFile, writeFile, rename, rm, lstat } from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { HLS_CACHE_DIR } from "./paths.js";
@@ -78,14 +78,59 @@ function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+interface HlsChunk {
+  name: string;
+  size: number;
+}
+
+// Only the local MPEG-TS media playlist emitted by our ffmpeg command is supported.
+function completedChunkNames(manifest: string, sourceHash: string): string[] | null {
+  const lines = manifest.trimEnd().split(/\r?\n/);
+  if (lines.shift() !== "#EXTM3U" || lines.pop() !== "#EXT-X-ENDLIST") return null;
+  const names: string[] = [];
+  const filename = new RegExp(`^chunk_${sourceHash}_\\d{3,}\\.ts$`);
+  let needsUri = false;
+  for (const line of lines) {
+    if (needsUri) {
+      if (!filename.test(line) || names.includes(line)) return null;
+      names.push(line);
+      needsUri = false;
+    } else if (line.startsWith("#EXTINF:")) {
+      const duration = /^#EXTINF:([0-9]+(?:\.[0-9]+)?),$/.exec(line);
+      if (!duration || !Number.isFinite(Number(duration[1])) || Number(duration[1]) <= 0) return null;
+      needsUri = true;
+    } else if (!/^#EXT-X-(?:VERSION|TARGETDURATION|MEDIA-SEQUENCE):\d+$/.test(line)
+      && line !== "#EXT-X-PLAYLIST-TYPE:EVENT") {
+      return null;
+    }
+  }
+  return names.length > 0 && !needsUri ? names : null;
+}
+
+async function chunkReceipt(cacheDir: string, names: string[]): Promise<HlsChunk[] | null> {
+  const chunks = await Promise.all(names.map(async (name) => {
+    const file = await lstat(path.join(cacheDir, name));
+    return file.isFile() && Number.isSafeInteger(file.size) && file.size > 0
+      ? { name, size: file.size } : null;
+  }));
+  return chunks.every((chunk) => chunk !== null) ? chunks : null;
+}
+
 async function isCompleteCache(cacheDir: string, sourceHash: string): Promise<boolean> {
   try {
     const [manifest, receipt] = await Promise.all([
       readFile(path.join(cacheDir, "stream.m3u8"), "utf-8"),
       readFile(path.join(cacheDir, "source.json"), "utf-8"),
     ]);
-    const source = JSON.parse(receipt) as { sourceHash: string };
-    return source.sourceHash === sourceHash && manifest.includes("#EXT-X-ENDLIST");
+    const source = JSON.parse(receipt) as { sourceHash?: string; chunks?: HlsChunk[] } | null;
+    const names = completedChunkNames(manifest, sourceHash);
+    if (source?.sourceHash !== sourceHash || !names || !Array.isArray(source.chunks)
+      || source.chunks.length !== names.length) return false;
+    const chunks = await chunkReceipt(cacheDir, names);
+    return chunks !== null && chunks.every((chunk, index) => {
+      const recorded = source.chunks![index];
+      return recorded?.name === chunk.name && recorded.size === chunk.size;
+    });
   } catch (error) {
     if (isMissing(error)) return false;
     throw error;
@@ -177,11 +222,12 @@ async function runSegmentation(
       throw new Error(`ffmpeg failed (exit ${exitCode}): ${stderr.trim()}`);
     }
     const manifest = await readFile(manifestFile, "utf-8");
-    if (!manifest.startsWith("#EXTM3U") || !manifest.includes("#EXTINF:")) {
-      throw new Error("ffmpeg produced no playable HLS segments");
-    }
-    await writeFile(path.join(cacheDir, "source.json"), JSON.stringify({ sourceHash: job.sourceHash }));
     const finalManifest = `${manifest.trimEnd()}\n#EXT-X-ENDLIST\n`;
+    const names = completedChunkNames(finalManifest, job.sourceHash);
+    if (!names) throw new Error("ffmpeg produced an invalid or empty HLS media playlist");
+    const chunks = await chunkReceipt(cacheDir, names);
+    if (!chunks) throw new Error("ffmpeg produced an empty or non-file HLS segment");
+    await writeFile(path.join(cacheDir, "source.json"), JSON.stringify({ sourceHash: job.sourceHash, chunks }));
     await writeFile(`${manifestFile}.tmp`, finalManifest);
     await rename(`${manifestFile}.tmp`, manifestFile);
     ready(true);

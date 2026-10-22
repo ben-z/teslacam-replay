@@ -33,7 +33,7 @@ if (appOrigin !== undefined) {
 
 const drive = createGDriveLiteFromEnv();
 
-async function verifyDrive(): Promise<DriveEntry[]> {
+async function verifyDrive(): Promise<void> {
   try {
     await drive.healthCheck();
     const rootEntries = (await drive.listRoot()).files;
@@ -45,7 +45,6 @@ async function verifyDrive(): Promise<DriveEntry[]> {
     } else {
       console.log(`Found TeslaCam folders: ${found.join(", ")}`);
     }
-    return rootEntries;
   } catch (err) {
     console.error("Error: Failed to access gdrive-serve-lite:", err instanceof Error ? err.message : err);
     console.error("Set GDRIVE_BASE_URL, GDRIVE_USER, and GDRIVE_PASS to match gdrive-serve-lite.");
@@ -53,7 +52,8 @@ async function verifyDrive(): Promise<DriveEntry[]> {
   }
 }
 
-const recentArchive = new RecentArchive(drive, await verifyDrive());
+await verifyDrive();
+const recentArchive = new RecentArchive(drive);
 
 const app = new Hono();
 const basicAuth = basicAuthConfigFromEnv();
@@ -522,8 +522,11 @@ app.get("/api/hls/:type/:eventId/:segment/:camera/:chunk", async (c) => {
   let fileStat;
   try {
     fileStat = await stat(chunkPath);
-  } catch {
-    return c.json({ error: "Chunk not found" }, 404);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return c.json({ error: "Chunk not found" }, 404);
+    }
+    throw error;
   }
 
   const stream = createReadStream(chunkPath);

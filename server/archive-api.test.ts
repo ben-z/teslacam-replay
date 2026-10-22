@@ -217,6 +217,64 @@ describe("RecentClips archive API", () => {
     expect(provider.requests.some((url) => url.searchParams.get("path")?.includes("RecentClips-backup"))).toBe(false);
   });
 
+  it("discovers archive folders added after startup when the recording list is refreshed", async () => {
+    await start();
+    const archive = "RecentClips-before-2026-10-21";
+    const segment = "2026-10-20_12-00-00";
+    provider.add(archive, true);
+    provider.add(`${archive}/${segment}-front.mp4`);
+    const ids: string[] = [];
+    let token: string | undefined;
+    do {
+      const result = await page(token);
+      ids.push(...result.events.map((event: { id: string }) => event.id));
+      token = result.nextPageToken;
+    } while (token);
+    expect(ids).toEqual([segment]);
+  });
+
+  it.each(["recording", "video"])("restores a %s from an archive added after startup without browsing", async (kind) => {
+    await start();
+    const archive = "RecentClips-before-2026-10-21";
+    const segment = "2026-10-20_12-00-00";
+    provider.add(archive, true);
+    const file = provider.add(`${archive}/${segment}-front.mp4`);
+    if (kind === "recording") {
+      const response = await request(`/api/events/RecentClips/${segment}`);
+      expect(response.status).toBe(200);
+      expect((await response.json()).clips[0].cameras).toEqual(["front"]);
+    }
+    expect((await request(hls(segment, "front"))).status).toBe(200);
+    expect(ensureHlsSegments.mock.calls[0][0].url).toContain(`/file/${file.id}/`);
+  });
+
+  it("surfaces root discovery failure instead of serving a stale archive list", async () => {
+    await start();
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && !url.searchParams.has("folderId")) return new Response("Provider failure", { status: 503 });
+      return provider.fetch(input);
+    });
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Failed to list Drive folder root: 503" });
+  });
+
+  it("distinguishes missing chunks from a broken cache path", async () => {
+    await start();
+    const route = "/api/hls/RecentClips/2026-10-20_12-00-00/2026-10-20_12-00-00/front/chunk_0123456789abcdef_000.ts";
+    expect((await request(route)).status).toBe(404);
+    await rm(testDirectory, { recursive: true });
+    await writeFile(testDirectory, "not a cache directory");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await request(route)).status).toBe(500);
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ code: "ENOTDIR" }));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("preserves flat browsing alongside dated files without repeating clips", async () => {
     const flat = "2026-10-02_12-00-00";
     const dated = "2026-10-02_11-00-00";

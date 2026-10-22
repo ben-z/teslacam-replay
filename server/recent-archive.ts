@@ -19,11 +19,11 @@ interface Cursor {
 }
 
 export class RecentArchive {
-  private readonly roots: DriveEntry[];
+  constructor(private readonly drive: GDriveLiteClient) {}
 
-  constructor(private readonly drive: GDriveLiteClient, rootEntries: DriveEntry[]) {
-    this.roots = rootEntries
-      .filter((entry) => drive.isFolder(entry) && RECENT_ROOT_PATTERN.test(entry.name))
+  private async roots(): Promise<DriveEntry[]> {
+    return (await this.drive.listRoot()).files
+      .filter((entry) => this.drive.isFolder(entry) && RECENT_ROOT_PATTERN.test(entry.name))
       .sort((a, b) => {
         if (a.name === b.name) return 0;
         if (a.name === "RecentClips") return -1;
@@ -36,11 +36,12 @@ export class RecentArchive {
     events: DashcamEvent[];
     nextPageToken?: string;
   }> {
-    if (this.roots.length === 0) throw new Error("No RecentClips archive folders found");
-    const cursor = pageToken ? this.decodeCursor(pageToken) : { root: this.roots[0].id };
-    const rootIndex = this.roots.findIndex((root) => root.id === cursor.root);
+    const roots = await this.roots();
+    if (roots.length === 0) throw new Error("No RecentClips archive folders found");
+    const cursor = pageToken ? this.decodeCursor(pageToken) : { root: roots[0].id };
+    const rootIndex = roots.findIndex((root) => root.id === cursor.root);
     if (rootIndex < 0) throw invalidCursor();
-    const root = this.roots[rootIndex];
+    const root = roots[rootIndex];
     const page = await this.drive.listFolderPage(this.drive.folderRef(root), {
       pageToken: cursor.pageToken,
       pageSize: RECENT_FILE_PAGE_SIZE,
@@ -51,7 +52,7 @@ export class RecentArchive {
       this.drive.isFolder(entry) && DATE_FOLDER_PATTERN.test(entry.name)
     );
     let afterRootPage: Cursor | undefined;
-    const nextRoot = this.roots[rootIndex + 1];
+    const nextRoot = roots[rootIndex + 1];
     if (page.nextPageToken) afterRootPage = { root: root.id, pageToken: page.nextPageToken };
     else if (nextRoot) afterRootPage = { root: nextRoot.id };
 
@@ -91,7 +92,7 @@ export class RecentArchive {
   }
 
   async findEvent(id: string): Promise<DashcamEvent | null> {
-    for (const root of this.roots) {
+    for (const root of await this.roots()) {
       const date = await this.findPath(`/${root.name}/${id.slice(0, 10)}`, "folder");
       if (date) {
         const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
@@ -116,7 +117,7 @@ export class RecentArchive {
   }
 
   async findClipSource(segment: string, camera: string): Promise<DriveFileSource | null> {
-    for (const root of this.roots) {
+    for (const root of await this.roots()) {
       for (const directory of [root.name, `${root.name}/${segment.slice(0, 10)}`]) {
         const file = await this.findPath(`/${directory}/${segment}-${camera}.mp4`, "file");
         if (file) return this.drive.fileSource(file);

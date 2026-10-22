@@ -1,17 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { HlsSource } from "./hls.js";
 
-const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
+const { spawn, publishManifest } = vi.hoisted(() => ({ spawn: vi.fn(), publishManifest: vi.fn() }));
 vi.mock("child_process", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:child_process")>(),
   spawn,
 }));
+vi.mock("fs/promises", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  publishManifest.mockImplementation(fs.rename);
+  return { ...fs, rename: publishManifest };
+});
 
 class Encoder extends EventEmitter {
   readonly stderr = new PassThrough();
@@ -39,6 +44,8 @@ class Encoder extends EventEmitter {
 }
 
 const source: HlsSource = { url: "http://drive.test/file/id/front.mp4", headers: {}, identity: '["id","2026-10-22T00:00:00Z",100]' };
+const sourceHash = createHash("sha256").update(source.identity).digest("hex").slice(0, 16);
+const chunkName = `chunk_${sourceHash}_000.ts`;
 const stream = ["SavedClips", "2026-10-21_20-36-52", "2026-10-21_20-35-58", "front"] as const;
 let directory: string;
 let encoders: Encoder[];
@@ -91,6 +98,101 @@ async function removed(file: string): Promise<void> {
 }
 
 describe("HLS conversion integrity", () => {
+  it.each([
+    "missing chunk", "empty chunk", "byte-truncated chunk", "packet-aligned truncated chunk",
+    "ENDLIST without segments", "EXTINF without URI", "unsafe URI", "wrong source chunk",
+    "receipt without chunk proof", "receipt with wrong chunk name", "non-file chunk", "symlink chunk",
+  ])("regenerates a completed cache with %s", async (damage) => {
+    const cache = hls.hlsCacheDir(...stream);
+    await mkdir(cache, { recursive: true });
+    let manifest = `#EXTM3U\n#EXTINF:4.0,\n${chunkName}\n#EXT-X-ENDLIST\n`;
+    const size = 188 * 4;
+    if (damage !== "missing chunk") {
+      if (damage === "non-file chunk") await mkdir(path.join(cache, chunkName));
+      else if (damage === "symlink chunk") {
+        await writeFile(path.join(cache, "target.ts"), Buffer.alloc(size));
+        await symlink("target.ts", path.join(cache, chunkName));
+      }
+      else await writeFile(path.join(cache, chunkName), Buffer.alloc(
+        damage === "empty chunk" ? 0 : damage === "byte-truncated chunk" ? size - 1
+          : damage === "packet-aligned truncated chunk" ? size - 188 : size,
+      ));
+    }
+    if (damage === "ENDLIST without segments") manifest = "#EXTM3U\n#EXT-X-ENDLIST\n";
+    if (damage === "EXTINF without URI") manifest = "#EXTM3U\n#EXTINF:4.0,\n#EXT-X-ENDLIST\n";
+    if (damage === "unsafe URI") manifest = manifest.replace(chunkName, `../${chunkName}`);
+    if (damage === "wrong source chunk") manifest = manifest.replace(sourceHash, "0000000000000000");
+    await writeFile(path.join(cache, "stream.m3u8"), manifest);
+    await writeFile(path.join(cache, "source.json"), JSON.stringify({
+      sourceHash,
+      ...(damage === "receipt without chunk proof" ? {} : {
+        chunks: [{ name: damage === "receipt with wrong chunk name" ? "other.ts" : chunkName, size }],
+      }),
+    }));
+
+    const ready = hls.ensureHlsSegments(source, ...stream);
+    const replacement = await started(0);
+    await completed(replacement);
+    expect(await ready).toBe(true);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await readFile(path.join(cache, "source.json"), "utf-8"))).toEqual({
+      sourceHash, chunks: [{ name: chunkName, size: Buffer.byteLength("test encoded chunk") }],
+    });
+    expect(await hls.ensureHlsSegments(source, ...stream)).toBe(true);
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["missing", "empty", "directory", "no URI", "no segments"])(
+    "does not publish a completed receipt or ENDLIST when ffmpeg leaves %s output", async (damage) => {
+      hls.ensureHlsSegments(source, ...stream);
+      const child = await started(0);
+      const cache = path.dirname(child.manifest);
+      if (damage === "directory") await mkdir(path.join(cache, chunkName));
+      if (damage === "empty") await writeFile(path.join(cache, chunkName), "");
+      const manifest = damage === "no segments" ? "#EXTM3U\n"
+        : `#EXTM3U\n#EXTINF:4.0,\n${damage === "no URI" ? "" : `${chunkName}\n`}`;
+      await writeFile(child.manifest, manifest);
+      child.finish(0);
+      await removed(cache);
+      await expect(readFile(path.join(cache, "source.json"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(child.manifest)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(publishManifest).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reuses all verified chunks in manifest order and rejects a mismatched receipt", async () => {
+    const cache = hls.hlsCacheDir(...stream);
+    await mkdir(cache, { recursive: true });
+    const names = [chunkName, chunkName.replace("_000.ts", "_001.ts")];
+    await Promise.all(names.map((name, index) => writeFile(path.join(cache, name), Buffer.alloc(index + 1))));
+    await writeFile(path.join(cache, "stream.m3u8"),
+      `#EXTM3U\n${names.map((name) => `#EXTINF:1.0,\n${name}\n`).join("")}#EXT-X-ENDLIST\n`);
+    const chunks = names.map((name, index) => ({ name, size: index + 1 }));
+    await writeFile(path.join(cache, "source.json"), JSON.stringify({ sourceHash, chunks }));
+    expect(await hls.ensureHlsSegments(source, ...stream)).toBe(true);
+    expect(spawn).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    await writeFile(path.join(cache, "source.json"), JSON.stringify({ sourceHash, chunks: chunks.reverse() }));
+    const ready = hls.ensureHlsSegments(source, ...stream);
+    const replacement = await started(0);
+    await completed(replacement);
+    expect(await ready).toBe(true);
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a non-missing cache read error instead of treating it as a cache miss", async () => {
+    const cache = hls.hlsCacheDir(...stream);
+    await mkdir(path.join(cache, "source.json"), { recursive: true });
+    await writeFile(path.join(cache, "stream.m3u8"), "#EXTM3U\n#EXT-X-ENDLIST\n");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await hls.ensureHlsSegments(source, ...stream)).toBe(false);
+    await removed(cache);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("HLS: failed"), expect.objectContaining({ code: "EISDIR" }),
+    ));
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it("shares one encoder between concurrent requests and serves progressive output without claiming completion", async () => {
     const first = hls.ensureHlsSegments(source, ...stream);
     const second = hls.ensureHlsSegments(source, ...stream);
