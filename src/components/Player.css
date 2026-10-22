@@ -20,12 +20,26 @@
 
 .player-nav-group {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   flex-shrink: 0;
 }
 
+.player-recording-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.player-nav-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .player-back-btn {
-  padding: 4px 12px;
+  padding: 4px 8px;
   background: var(--bg-surface);
   color: var(--text-muted);
   border: 1px solid var(--border);
@@ -102,6 +116,37 @@
   background: var(--border);
 }
 
+.player-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.player-view-btn {
+  padding: 4px 6px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.player-view-btn.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.player-view-btn:disabled {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+  cursor: default;
+}
+
 .player-layout-toggle {
   display: flex;
   gap: 2px;
@@ -122,7 +167,7 @@
 }
 .player-layout-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--bg);
   box-shadow: 0 1px 4px var(--accent-glow);
 }
 
@@ -398,18 +443,18 @@
 }
 
 .player-trigger-btn {
-  width: 30px;
+  min-width: 44px;
   height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   color: var(--sentry-color);
-  border: none;
+  border: 1px solid var(--border);
   cursor: pointer;
   flex-shrink: 0;
   border-radius: 4px;
-  opacity: 0.8;
+  font-size: 11px;
 }
 .player-trigger-btn:hover {
   opacity: 1;
@@ -733,7 +778,7 @@
 
   .player-controls {
     display: grid;
-    grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+    grid-template-columns: 44px 44px minmax(44px, 1fr) minmax(100px, 1fr);
     gap: 6px;
     padding: 6px 12px max(6px, env(safe-area-inset-bottom));
   }
@@ -796,10 +841,6 @@
     display: none;
   }
 
-  .player-layout-toggle {
-    margin-left: auto;
-  }
-
   .player-videos-grid .telem-hud {
     bottom: 4px;
     left: 4px;
@@ -847,6 +888,7 @@
   .player-play-btn,
   .player-mute-btn,
   .player-trigger-btn,
+  .player-view-btn,
   .player-shortcuts-hint,
   .player-segment-btn,
   .player-camera-select,

@@ -58,6 +58,7 @@ function parseHash(): { type: string; id: string } | null {
 const PAGE_LOAD_LIMIT = 24;
 const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
 type PageTokens = Record<EventPageType, string | null>;
+type PageLoadError = { message: string; types: EventPageType[]; reset: boolean };
 const EMPTY_PAGE_TOKENS: PageTokens = {
   SavedClips: null,
   SentryClips: null,
@@ -69,7 +70,7 @@ export function App() {
   const [loading, setLoading] = useState(events.length === 0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PageLoadError | null>(null);
   const [eventError, setEventError] = useState<string | null>(null);
   const routeRequest = useRef(0);
   const pageRequest = useRef(0);
@@ -85,10 +86,9 @@ export function App() {
   const pushedHashRef = useRef(false);
   const eventsRef = useRef(events);
   const nextPageTokensRef = useRef(nextPageTokens);
-  const loadingMoreRef = useRef(loadingMore);
+  const pageLoadingRef = useRef(false);
   eventsRef.current = events;
   nextPageTokensRef.current = nextPageTokens;
-  loadingMoreRef.current = loadingMore;
 
   const selectEvent = useCallback((event: DashcamEvent) => {
     setSelectedEvent(event);
@@ -102,7 +102,7 @@ export function App() {
     pageRequest.current++;
     setLoading(false);
     setLoadingMore(false);
-    loadingMoreRef.current = false;
+    pageLoadingRef.current = false;
     setView("player");
     setSelectedEvent(null);
     setEventError(null);
@@ -131,8 +131,9 @@ export function App() {
   ) => {
     const request = ++pageRequest.current;
     setError(null);
-    if (reset) setLoading(true);
-    else setLoadingMore(true);
+    pageLoadingRef.current = true;
+    setLoading(reset);
+    setLoadingMore(!reset);
     try {
       const tokenSource = reset ? EMPTY_PAGE_TOKENS : nextPageTokensRef.current;
       const results = await Promise.all(
@@ -154,9 +155,12 @@ export function App() {
       setEvents(merged);
       eventsRef.current = merged;
     } catch (err) {
-      if (request === pageRequest.current) setError(err instanceof Error ? err.message : String(err));
+      if (request === pageRequest.current) {
+        setError({ message: err instanceof Error ? err.message : String(err), types, reset });
+      }
     } finally {
       if (request === pageRequest.current) {
+        pageLoadingRef.current = false;
         setLoading(false);
         setLoadingMore(false);
       }
@@ -190,20 +194,23 @@ export function App() {
   }, [loadRoute]);
 
   const handleRefresh = async () => {
-    if (loading || loadingMore) return;
+    if (pageLoadingRef.current) return;
     setBrowseList([]);
     await loadPages(PAGE_TYPES, true);
   };
 
   const handleLoadMore = useCallback((types: EventPageType[]) => {
-    if (loadingMoreRef.current) return;
+    if (pageLoadingRef.current) return;
     const loadable = types.filter((type) => nextPageTokensRef.current[type]);
     if (loadable.length === 0) return;
-    loadingMoreRef.current = true;
-    loadPages(loadable, false).finally(() => {
-      loadingMoreRef.current = false;
-    });
+    void loadPages(loadable, false);
   }, [loadPages]);
+
+  const handleRetry = () => {
+    if (error && !pageLoadingRef.current) {
+      void loadPages(error.types, error.reset);
+    }
+  };
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
     if (filteredList) setBrowseList(filteredList);
@@ -280,9 +287,10 @@ export function App() {
             events={events}
             loading={loading}
             loadingMore={loadingMore}
-            error={error}
+            error={error?.message ?? null}
             onSelectEvent={handleSelectEvent}
             onRefresh={handleRefresh}
+            onRetry={handleRetry}
             onLoadMore={handleLoadMore}
             hasMore={hasMorePages}
           />

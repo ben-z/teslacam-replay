@@ -155,15 +155,6 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
-  const { recentCount, eventCount } = useMemo(() => {
-    let recent = 0, ev = 0;
-    for (const e of events) {
-      if (e.type === "RecentClips") recent++;
-      else ev++;
-    }
-    return { recentCount: recent, eventCount: ev };
-  }, [events]);
-
   // Compute playhead position on the timeline
   const playheadInfo = useMemo(() => {
     if (!selectedEvent || displayTime == null || !selectedEvent.clips[0]) return null;
@@ -186,7 +177,7 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
       <div className={`timeline ${compact ? "timeline--compact" : ""}`}>
         <div className="timeline-overview">
           <div className="timeline-scroll" ref={scrollRef}>
-            <div className="timeline-empty">No recordings in the loaded pages</div>
+            <div className="timeline-empty">No recorded video in the loaded pages</div>
             {footer}
           </div>
         </div>
@@ -200,18 +191,31 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
         {!compact && (
           <div className="timeline-toolbar">
             <div className="timeline-summary">
-              <strong>{recentCount}</strong> recent recording{recentCount !== 1 ? "s" : ""}
-              {eventCount > 0 && <>, <strong>{eventCount}</strong> event{eventCount !== 1 ? "s" : ""}</>}
-              {" "}across <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
+              <strong>{events.length}</strong> loaded recording{events.length !== 1 ? "s" : ""}
+              {" "}· Video on <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
               <span className="timeline-coverage-note">Approximate recording coverage</span>
             </div>
-            {eventCount > 0 && (
-              <div className="timeline-legend">
-                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
-                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
-                <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
-              </div>
-            )}
+            <div className="timeline-legend">
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--recent" /> Recent</span>
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--sentry" /> Sentry</span>
+              <span className="timeline-legend-item"><span className="timeline-legend-dot timeline-legend-dot--saved" /> Saved</span>
+            </div>
+          </div>
+        )}
+
+        {!compact && (
+          <div className="timeline-axis">
+            <div className="timeline-axis-inner">
+              {HOUR_TICKS.map((h) => (
+                <span
+                  key={h}
+                  className="timeline-axis-label"
+                  style={{ left: `${(h / 24) * 100}%` }}
+                >
+                  {formatHour(h)}
+                </span>
+              ))}
+            </div>
           </div>
         )}
 
@@ -230,22 +234,6 @@ export function Timeline({ events, onSelectEvent, selectedEvent, displayTime, is
           ))}
           {footer}
         </div>
-
-        {!compact && (
-          <div className="timeline-axis">
-            <div className="timeline-axis-inner">
-              {HOUR_TICKS.map((h) => (
-                <span
-                  key={h}
-                  className="timeline-axis-label"
-                  style={{ left: `${(h / 24) * 100}%` }}
-                >
-                  {formatHour(h)}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       {tooltip && (
