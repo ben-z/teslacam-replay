@@ -17,11 +17,12 @@ interface Props {
   hasMore: Record<EventPageType, boolean>;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
+  onRetry: () => void;
   onLoadMore: (types: EventPageType[]) => void;
 }
 
 type FilterType = "all" | "SavedClips" | "SentryClips";
-type ViewType = "events" | "recent";
+type ViewType = "events" | "timeline";
 
 const PAGE_SIZE = 48;
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -40,24 +41,6 @@ const DATE_GROUP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   year: "numeric",
 });
-const SCAN_FRONTIER_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  timeZone: "UTC",
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
-function eventStartMs(event: DashcamEvent): number {
-  return recordingWallTimeMs(event.clips[0]?.timestamp ?? event.timestamp);
-}
-
-function formatScanFrontier(ms: number | null): string {
-  if (ms == null) return "not started";
-  return SCAN_FRONTIER_FORMATTER.format(new Date(ms));
-}
-
 function formatTimestamp(ts: string): string {
   return TIMESTAMP_FORMATTER.format(new Date(recordingWallTimeMs(ts)));
 }
@@ -88,6 +71,7 @@ export function EventBrowser({
   hasMore: hasMorePages,
   onSelectEvent,
   onRefresh,
+  onRetry,
   onLoadMore,
 }: Props) {
   const [view, setView] = useState<ViewType>("events");
@@ -102,29 +86,28 @@ export function EventBrowser({
     debounceRef.current = setTimeout(() => {
       setSearch(searchInput);
       setVisibleCount(PAGE_SIZE);
+      document.querySelector(".browse-content")?.scrollTo(0, 0);
     }, 200);
     return () => clearTimeout(debounceRef.current);
   }, [searchInput]);
 
+  const loadedEvents = useMemo(() => events
+    .filter((event) => event.type !== "RecentClips" && (filter === "all" || event.type === filter))
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp)), [events, filter]);
+
   const filtered = useMemo(() => {
-    if (view === "recent") {
-      return events.filter((e) => e.type === "RecentClips").sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-    }
-    let result = events.filter((e) => e.type !== "RecentClips");
-    if (filter !== "all") {
-      result = result.filter((e) => e.type === filter);
-    }
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      result = result.filter(
-        (e) =>
-          e.city?.toLowerCase().includes(q) ||
-          e.id.includes(q) ||
-          formatReason(e.reason).toLowerCase().includes(q)
-      );
-    }
-    return result.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }, [events, view, filter, search]);
+    const query = search.trim().toLowerCase();
+    if (!query) return loadedEvents;
+    return loadedEvents.filter((event) =>
+      event.city?.toLowerCase().includes(query) ||
+      event.id.toLowerCase().includes(query) ||
+      formatReason(event.reason).toLowerCase().includes(query) ||
+      formatTimestamp(event.timestamp).toLowerCase().includes(query) ||
+      formatDateGroup(event.timestamp).toLowerCase().includes(query)
+    );
+  }, [loadedEvents, search]);
+  const oldestLoadedDate = loadedEvents.at(-1)?.timestamp.slice(0, 10);
+  const newestLoadedDate = loadedEvents[0]?.timestamp.slice(0, 10);
 
   const setFilterAndReset = useCallback((f: FilterType) => {
     setView("events");
@@ -134,13 +117,12 @@ export function EventBrowser({
   }, []);
 
   const counts = useMemo(() => {
-    let saved = 0, sentry = 0, recent = 0;
+    let saved = 0, sentry = 0;
     for (const e of events) {
       if (e.type === "SavedClips") saved++;
       else if (e.type === "SentryClips") sentry++;
-      else if (e.type === "RecentClips") recent++;
     }
-    return { total: saved + sentry, saved, sentry, recent };
+    return { total: saved + sentry, saved, sentry };
   }, [events]);
 
   // Count events per date (from full filtered list for accurate counts)
@@ -154,9 +136,9 @@ export function EventBrowser({
   }, [filtered]);
 
   const visible = filtered.slice(0, visibleCount);
-  const hasMoreLoaded = view !== "recent" && visibleCount < filtered.length;
+  const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
-    if (view === "recent") return ["RecentClips"];
+    if (view === "timeline") return ["SavedClips", "SentryClips", "RecentClips"];
     if (filter === "all") return ["SavedClips", "SentryClips"];
     return [filter];
   }, [filter, view]);
@@ -167,32 +149,10 @@ export function EventBrowser({
   const hasMoreRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
-  const recentScanLabel = !hasMorePages.RecentClips
-    ? "Recent scan complete"
-    : loadingMore
-      ? "Scanning older recent clips"
-      : "Ready to scan older clips";
-  const recentScan = useMemo(() => {
-    const recentEvents = events.filter((event) => event.type === "RecentClips");
-    let oldestRecentMs: number | null = null;
-    for (const event of recentEvents) {
-      const ms = eventStartMs(event);
-      if (ms > 0 && (oldestRecentMs == null || ms < oldestRecentMs)) {
-        oldestRecentMs = ms;
-      }
-    }
-
-    const timelineEvents = oldestRecentMs == null
-      ? recentEvents
-      : events.filter((event) =>
-        event.type === "RecentClips" || eventStartMs(event) >= oldestRecentMs
-      );
-
-    return {
-      timelineEvents,
-      frontierLabel: formatScanFrontier(oldestRecentMs),
-    };
-  }, [events]);
+  const timelineAvailability = hasMoreRemote ? "Older recordings are available" : "No older recordings";
+  const scopeSummary = search.trim()
+    ? `${filtered.length} matches in ${loadedEvents.length} loaded events`
+    : `${filtered.length} events loaded`;
   const handleCardSelect = useCallback(
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
@@ -210,16 +170,16 @@ export function EventBrowser({
   const recentTimelineScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    const root = view === "recent" ? recentTimelineScrollRef.current : null;
-    if (!sentinel || !hasMore || search.trim() || error) return;
-    if (view === "recent" && !root) return;
+    const root = view === "timeline" ? recentTimelineScrollRef.current : null;
+    if (!sentinel || !hasMore || (view === "events" && search.trim()) || error) return;
+    if (view === "timeline" && !root) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
           handleLoadMore();
         }
       },
-      { root, rootMargin: view === "recent" ? "120px" : "200px" }
+      { root, rootMargin: view === "timeline" ? "120px" : "200px" }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -237,7 +197,7 @@ export function EventBrowser({
               className="browse-refresh-btn"
               title="Refresh recordings"
             >
-              {loading ? "Loading..." : "Refresh"}
+              {loading || loadingMore ? "Loading…" : "Refresh"}
             </button>
           </div>
         </div>
@@ -253,11 +213,11 @@ export function EventBrowser({
             </button>
             {(
               <button
-                onClick={() => setView("recent")}
-                className={`browse-view-btn ${view === "recent" ? "active" : ""}`}
-                aria-pressed={view === "recent"}
+                onClick={() => setView("timeline")}
+                className={`browse-view-btn ${view === "timeline" ? "active" : ""}`}
+                aria-pressed={view === "timeline"}
               >
-                Recent ({counts.recent})
+                Timeline
               </button>
             )}
           </div>
@@ -306,12 +266,14 @@ export function EventBrowser({
       </header>
 
       <div className="browse-content">
-        {error && <div className="browse-error" role="alert">{error} <button onClick={onRefresh} disabled={loading || loadingMore}>Retry</button></div>}
+        {error && <div className="browse-error" role="alert">{error} <button onClick={onRetry} disabled={loading || loadingMore}>Retry</button></div>}
         {view === "events" && (
           <p className="browse-scope" aria-live="polite">
-            {loading ? "Loading recordings…" : `${filtered.length} matching events loaded`}
+            {loading ? "Loading recordings…" : scopeSummary}
+            {search.trim() && oldestLoadedDate && (
+              <> · Loaded dates: {oldestLoadedDate}{oldestLoadedDate !== newestLoadedDate && `–${newestLoadedDate}`}</>
+            )}
             {hasMoreRemote && " · Older events are available"}
-            {search.trim() && " · Search covers loaded events"}
           </p>
         )}
 
@@ -323,20 +285,19 @@ export function EventBrowser({
               Loading recordings
             </p>
           </div>
-        ) : view === "recent" ? (
+        ) : view === "timeline" ? (
           <div className="recent-view">
-            <div className="recent-scan-status" aria-live="polite">
-              <span className={`recent-scan-dot ${loadingMore ? "active" : ""}`} />
-              <span>{recentScanLabel}</span>
-              <span className="recent-scan-frontier">
-                Scanned back to {recentScan.frontierLabel}
-              </span>
-            </div>
+            {!error && (
+              <div className="recent-scan-status" aria-live="polite">
+                <span className={`recent-scan-dot ${loadingMore ? "active" : ""}`} />
+                <span>{loadingMore ? "Loading recordings…" : timelineAvailability}</span>
+              </div>
+            )}
             <Timeline
-              events={recentScan.timelineEvents}
+              events={events}
               onSelectEvent={onSelectEvent}
               scrollRef={recentTimelineScrollRef}
-              footer={hasMorePages.RecentClips ? (
+              footer={hasMoreRemote ? (
                 <>
                   <div className="browse-load-more browse-load-more--passive">
                     <button
@@ -345,7 +306,7 @@ export function EventBrowser({
                       disabled={loadingMore}
                       onClick={handleLoadMore}
                     >
-                      {loadingMore ? "Loading older clips..." : "Load older clips"}
+                      {loadingMore ? "Loading recordings…" : "Load older recordings"}
                     </button>
                   </div>
                   <div className="browse-load-more-sentinel" ref={sentinelRef} aria-hidden="true" />
@@ -370,7 +331,7 @@ export function EventBrowser({
             )}
             {hasMoreRemote && (
               <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={loadingMore}>
-                {loadingMore ? "Loading older events…" : "Load older events"}
+                {loadingMore ? "Loading recordings…" : "Load older events"}
               </button>
             )}
           </div>
@@ -409,7 +370,7 @@ export function EventBrowser({
                 >
                   {hasMoreLoaded
                     ? `Show ${filtered.length - visibleCount} more events`
-                    : loadingMore ? "Loading..." : "Load more events"}
+                    : loadingMore ? "Loading recordings…" : "Load more events"}
                 </button>
               </div>
             )}
@@ -502,8 +463,8 @@ const EventCard = memo(function EventCard({
               "No archived video"
             ) : (
               <>
-                {event.clips.length} segments &middot;{" "}
-                {cameraCount} cameras
+                {event.clips.length} segment{event.clips.length !== 1 ? "s" : ""} &middot;{" "}
+                {cameraCount} camera{cameraCount !== 1 ? "s" : ""}
               </>
             )}
           </div>

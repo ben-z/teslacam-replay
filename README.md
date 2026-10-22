@@ -5,12 +5,12 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 ## Features
 
 - **Multi-camera player** — Synchronized playback of all 6 cameras in Grid, or a single active camera in Focus. Switching cameras preserves playback position and speed.
-- **Event browser** — Browse Saved, Sentry, and Recent clips with search, filter, sort, and thumbnail previews
+- **Recording browser** — Browse Saved and Sentry events or view loaded recordings on a timeline. Search loaded events by displayed date, time, city, or reason.
 - **Timeline view** — Color-coded timeline showing all recording sessions across days
 - **HLS streaming** — On-demand video segmentation via ffmpeg for smooth playback without downloading entire files
 - **Telemetry overlay** — Speed, GPS coordinates, and other data extracted from H.264 SEI metadata
 - **Zoomable seek bar** — Scroll to zoom, drag to pan, minimap for orientation
-- **Keyboard shortcuts** — Space (play/pause), arrows (seek), F (layout), 1-6 (camera select), [ ] (prev/next event)
+- **Keyboard shortcuts** — Space (play/pause), arrows (seek), F (layout), T (driving data), 1-6 (camera select), [ ] (previous/next recording)
 - **URL routing** — Hash-based deep links, browser back/forward support
 
 ## Architecture

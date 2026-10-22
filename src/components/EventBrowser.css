@@ -84,7 +84,7 @@
 }
 .browse-view-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--bg);
   box-shadow: 0 1px 4px var(--accent-glow);
 }
 .browse-view-btn:hover:not(.active) {
@@ -114,7 +114,7 @@
 }
 .browse-filter-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--bg);
   box-shadow: 0 0 0 1px var(--accent), 0 1px 4px var(--accent-glow);
 }
 
@@ -517,10 +517,6 @@
 .recent-scan-dot.active {
   background: var(--recent-color);
   animation: scanPulse 1s ease-in-out infinite;
-}
-
-.recent-scan-frontier {
-  color: var(--text-dim);
 }
 
 @keyframes scanPulse {

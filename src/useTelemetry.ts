@@ -7,6 +7,7 @@ interface UseTelemetryResult {
   frame: TelemetryFrame | null;
   loading: boolean;
   error: string | null;
+  available: boolean | null;
 }
 
 export function useTelemetry(
@@ -48,5 +49,10 @@ export function useTelemetry(
     return telemetryFrameAt(data, localTimeMs);
   }, [data, displayTime, segmentIdx, segmentOffsets]);
 
-  return { frame, loading: Boolean(segTimestamp) && current === null, error: current?.error ?? null };
+  return {
+    frame,
+    loading: Boolean(segTimestamp) && current === null,
+    error: current?.error ?? null,
+    available: current === null || current.error !== null ? null : current.data !== null,
+  };
 }

@@ -26,7 +26,7 @@ function render(events: DashcamEvent[], props: Partial<Parameters<typeof Timelin
 describe("recording timeline", () => {
   it("keeps the older-page action reachable when the loaded page contains no recordings", () => {
     const html = render([], { footer: createElement("button", null, "Load older clips") });
-    expect(html).toContain("No recordings in the loaded pages");
+    expect(html).toContain("No recorded video in the loaded pages");
     expect(html).toContain('class="timeline-scroll"');
     expect(html).toContain("Load older clips");
   });

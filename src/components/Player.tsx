@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import Hls from "hls.js";
+import Hls, { type FragBufferedData } from "hls.js";
 import { hlsManifestUrl } from "../api";
 import type { DashcamEvent, CameraAngle } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
@@ -33,7 +33,6 @@ const SPEED_OPTIONS = [0.5, 1, 1.5, 2];
 const PARENT_TIME_UPDATE_INTERVAL = 500; // ms - compact timeline does not need every sync tick
 const NEXT_SEGMENT_PREFETCH_WINDOW = 15; // seconds before boundary
 const HLS_LOAD_TIMEOUT_MS = 120_000; // first-run server-side segmentation can take tens of seconds
-const SEGMENT_READY_TIMEOUT_MS = 60_000;
 const WALL_CLOCK_FORMATTER = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
@@ -84,7 +83,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   const [showShortcuts, setShowShortcuts] = useState(false);
   const shortcutsCloseRef = useRef<HTMLButtonElement>(null);
   const [showTelemetry, setShowTelemetry] = useState(true);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const eventKey = `${event.type}/${event.id}`;
   const [completedDurationState, setCompletedDurationState] = useState<{ eventKey: string; durations: CompletedDurations }>({ eventKey, durations: {} });
   const completedDurations = completedDurationState.eventKey === eventKey ? completedDurationState.durations : {};
@@ -102,7 +102,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   const playbackRateRef = useRef(1);
   const displayTimeRef = useRef(0);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
-  const loadTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const segmentLoadingRef = useRef(false);
   const canplayCleanupRef = useRef<(() => void) | null>(null);
   const segmentOffsetsRef = useRef<number[]>([0]);
@@ -184,7 +183,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   const loadedParticipantsRef = useRef("");
   const allCamerasFailed = participantCameras.length > 0 && participantCameras.every((camera) => videoErrors.has(camera));
   const audioAvailable = participantCameras.includes("front");
-  const { frame: currentTelemFrame, loading: telemetryLoading, error: telemetryError } =
+  const { frame: currentTelemFrame, loading: telemetryLoading, error: telemetryError, available: telemetryAvailable } =
     useTelemetry(event, participantCameras.length > 0 ? segmentIdx : -1, displayTime, segmentOffsets);
 
   const setRef = useCallback(
@@ -216,10 +215,29 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
   // --- HLS helpers ---
 
+  const clearBuffering = useCallback((cam: CameraAngle) => {
+    setBufferingCameras((previous) => {
+      if (!previous.has(cam)) return previous;
+      const next = new Set(previous);
+      next.delete(cam);
+      return next;
+    });
+  }, []);
+
+  const handleMediaReady = useCallback((cam: CameraAngle) => {
+    const video = videoElsRef.current.get(cam);
+    const source = hlsSourcesRef.current.get(cam);
+    const hls = hlsInstancesRef.current.get(cam);
+    if (!participantCamerasRef.current.includes(cam) || !video || video.readyState < 2 || !source || source.eventKey !== eventKeyRef.current) return;
+    if (hls ? hls.latestLevelDetails?.url !== source.url : video.src !== source.url) return;
+    clearBuffering(cam);
+  }, [clearBuffering]);
+
   const handleVideoError = useCallback((cam: CameraAngle) => {
     if (!participantCamerasRef.current.includes(cam)) return;
     const errors = new Set(videoErrorsRef.current);
     errors.add(cam);
+    clearBuffering(cam);
     videoErrorsRef.current = errors;
     setVideoErrors(errors);
     // Destroy HLS instance on fatal error — HLS.js can't recover in-place.
@@ -227,7 +245,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     const hls = hlsInstancesRef.current.get(cam);
     if (hls) { hls.destroy(); hlsInstancesRef.current.delete(cam); }
     if (participantCamerasRef.current.length > 0 && participantCamerasRef.current.every((camera) => errors.has(camera))) {
-      clearTimeout(loadTimeoutRef.current);
       canplayCleanupRef.current?.();
       canplayCleanupRef.current = null;
       segmentLoadingRef.current = false;
@@ -237,7 +254,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       videoElsRef.current.forEach((video) => video.pause());
       notifyTimeUpdate(displayTimeRef.current, false, true);
     }
-  }, [notifyTimeUpdate]);
+  }, [notifyTimeUpdate, clearBuffering]);
 
   const playCamera = useCallback((camera: CameraAngle, video: HTMLVideoElement) => {
     if (!participantCamerasRef.current.includes(camera) || videoErrorsRef.current.has(camera)) return;
@@ -248,7 +265,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       isPlayingRef.current = false;
       setIsPlaying(false);
       videoElsRef.current.forEach((element) => element.pause());
-      setPlaybackError(error instanceof Error ? error.message : String(error));
+      setPlayerError(`Playback could not start: ${error instanceof Error ? error.message : String(error)}`);
       notifyTimeUpdate(displayTimeRef.current, false, true);
     });
   }, [notifyTimeUpdate]);
@@ -276,12 +293,10 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     if (!video) return;
     hlsSourcesRef.current.set(cam, { url: new URL(url, location.href).href, eventKey: eventKeyRef.current, timestamp });
 
-    // Reuse existing HLS instance (avoids black flash between segments)
     const existing = hlsInstancesRef.current.get(cam);
     if (existing) {
-      existing.config.startPosition = startPosition;
-      existing.loadSource(url);
-      return;
+      hlsInstancesRef.current.delete(cam);
+      existing.destroy();
     }
 
     if (Hls.isSupported()) {
@@ -333,6 +348,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   }, [recordCompletedDuration]);
 
   const handleWaiting = useCallback((cam: CameraAngle) => {
+    if (!participantCamerasRef.current.includes(cam) || videoErrorsRef.current.has(cam)) return;
     setBufferingCameras((prev) => {
       if (prev.has(cam)) return prev;
       const next = new Set(prev);
@@ -342,19 +358,14 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   }, []);
 
   const handlePlaying = useCallback((cam: CameraAngle) => {
-    setBufferingCameras((prev) => {
-      if (!prev.has(cam)) return prev;
-      const next = new Set(prev);
-      next.delete(cam);
-      return next;
-    });
+    handleMediaReady(cam);
     setEndedCameras((prev) => {
       if (!prev.has(cam)) return prev;
       const next = new Set(prev);
       next.delete(cam);
       return next;
     });
-  }, []);
+  }, [handleMediaReady]);
 
   // --- Retry ---
 
@@ -368,6 +379,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     setVideoErrors(errors);
 
     const localTime = displayTimeRef.current - segmentOffsetsRef.current[segmentIdxRef.current];
+    handleWaiting(cam);
     attachHls(cam, hlsManifestUrl(event.type, event.id, seg.timestamp, cam), seg.timestamp, localTime);
 
     // Sync to current displayTime
@@ -377,7 +389,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       v.playbackRate = playbackRateRef.current;
       if (isPlayingRef.current) playCamera(cam, v);
     }
-  }, [event.clips, event.type, event.id, attachHls, playCamera]);
+  }, [event.clips, event.type, event.id, attachHls, playCamera, handleWaiting]);
 
   // Videos share a recording-clock position. Missing intervals retain their
   // original positions; the next segment starts at its recorded timestamp.
@@ -473,15 +485,14 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
       canplayCleanupRef.current?.();
       canplayCleanupRef.current = null;
-      clearTimeout(loadTimeoutRef.current);
       if (newSegment) {
         videoErrorsRef.current = new Set();
         setVideoErrors(videoErrorsRef.current);
       }
-      bufferingCamerasRef.current = new Set();
+      bufferingCamerasRef.current = new Set(participants.filter((camera) => !videoErrorsRef.current.has(camera)));
       setBufferingCameras(bufferingCamerasRef.current);
       setEndedCameras(new Set());
-      setPlaybackError(null);
+      setPlayerError(null);
       setSegmentLoading(true);
       segmentLoadingRef.current = true;
       const targetGlobalTime = segmentOffsetsRef.current[idx] + seekTime;
@@ -519,7 +530,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         readyFired = true;
         cleanups.forEach((cleanup) => cleanup());
         canplayCleanupRef.current = null;
-        clearTimeout(loadTimeoutRef.current);
         setSegmentLoading(false);
         segmentLoadingRef.current = false;
         const localTime = displayTimeRef.current - segmentOffsetsRef.current[idx];
@@ -532,6 +542,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
         }
       };
 
+      let bufferedAtPosition = false;
       for (const camera of playable) {
         const video = videoElsRef.current.get(camera);
         if (!video) continue;
@@ -542,30 +553,40 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           attachHls(camera, hlsManifestUrl(event.type, event.id, seg.timestamp, camera), seg.timestamp, seekTime);
         }
         const hls = hlsInstancesRef.current.get(camera);
-        const readyHandler = () => onReady();
-        video.addEventListener("canplay", readyHandler);
-        cleanups.push(() => video.removeEventListener("canplay", readyHandler));
+        const expectedSource = hlsSourcesRef.current.get(camera);
         if (hls) {
-          const handler = () => onReady();
+          const handler = (_event: string, data: FragBufferedData) => {
+            if (hlsSourcesRef.current.get(camera) !== expectedSource || data.frag.baseurl !== expectedSource?.url) return;
+            onReady();
+          };
           hls.on(Hls.Events.FRAG_BUFFERED, handler);
           cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, handler));
         }
+        if (!hls || sameSource) {
+          const readyHandler = () => {
+            if (hlsSourcesRef.current.get(camera) !== expectedSource || video.readyState < 3) return;
+            if (hls && hls.latestLevelDetails?.url !== expectedSource?.url) return;
+            onReady();
+          };
+          video.addEventListener("canplay", readyHandler);
+          cleanups.push(() => video.removeEventListener("canplay", readyHandler));
+        }
         video.currentTime = seekTime;
         video.playbackRate = playbackRateRef.current;
+        if (sameSource && (!hls || hls.latestLevelDetails?.url === expectedSource?.url) && video.readyState >= 2) {
+          for (let range = 0; range < video.buffered.length; range++) {
+            if (video.buffered.start(range) <= seekTime && video.buffered.end(range) > seekTime) {
+              clearBuffering(camera);
+              if (video.readyState >= 3) bufferedAtPosition = true;
+              break;
+            }
+          }
+        }
       }
       canplayCleanupRef.current = () => cleanups.forEach((cleanup) => cleanup());
-      const bufferedAtPosition = playable.some((camera) => {
-        const video = videoElsRef.current.get(camera);
-        if (!video || video.readyState < 3) return false;
-        for (let range = 0; range < video.buffered.length; range++) {
-          if (video.buffered.start(range) <= seekTime && video.buffered.end(range) > seekTime) return true;
-        }
-        return false;
-      });
       if (bufferedAtPosition) onReady();
-      else loadTimeoutRef.current = setTimeout(onReady, SEGMENT_READY_TIMEOUT_MS);
     },
-    [event.clips, event.type, event.id, eventKey, allEventCameras, attachHls, playCamera, notifyTimeUpdate]
+    [event.clips, event.type, event.id, eventKey, allEventCameras, attachHls, playCamera, notifyTimeUpdate, clearBuffering]
   );
 
   // Advance to next segment
@@ -625,7 +646,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       videoElsRef.current.forEach((v) => v.pause());
       notifyTimeUpdate(displayTimeRef.current, false, true);
     } else {
-      setPlaybackError(null);
+      setPlayerError(null);
       const atLastSegment = segmentIdxRef.current === event.clips.length - 1;
       const playable = participantCamerasRef.current.filter((camera) => !videoErrorsRef.current.has(camera));
       const atAvailableEnd = hasReachedPlaybackEnd(playable.map((camera) => ({ ended: Boolean(videoElsRef.current.get(camera)?.ended) })));
@@ -651,13 +672,23 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Fullscreen toggle
-  const toggleFullscreen = useCallback(() => {
-    if (!containerRef.current) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      containerRef.current.requestFullscreen().catch(() => {});
+  // The browser can leave fullscreen through Escape or its own controls.
+  useEffect(() => {
+    const changed = () => setIsFullscreen(Boolean(document.fullscreenElement && document.fullscreenElement === containerRef.current));
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    setPlayerError(null);
+    try {
+      if (!document.fullscreenEnabled) throw new Error("This browser does not support fullscreen.");
+      const container = containerRef.current;
+      if (!container) throw new Error("The player is not available.");
+      if (document.fullscreenElement === container) await document.exitFullscreen();
+      else await container.requestFullscreen();
+    } catch (error) {
+      setPlayerError(`The browser could not change fullscreen: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, []);
 
@@ -758,7 +789,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      clearTimeout(loadTimeoutRef.current);
       canplayCleanupRef.current?.();
       hlsInstancesRef.current.forEach((hls) => hls.destroy());
       hlsInstancesRef.current.clear();
@@ -782,12 +812,14 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const t = e.target as HTMLElement;
       if (showShortcuts) {
         if (e.key === "Escape") setShowShortcuts(false);
         return;
       }
-      if (t.closest("input, textarea, select, button, a, [role='slider']") || t.isContentEditable) return;
+      if (e.altKey || e.ctrlKey || e.metaKey || t.closest("input, textarea, select") || t.isContentEditable) return;
+      if (t.closest("button, a") && (e.key === " " || e.key === "Enter")) return;
       switch (e.key) {
         case " ":
           e.preventDefault();
@@ -821,16 +853,19 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           setLayout((l) => (l === "focus" ? "grid" : "focus"));
           break;
         case "Escape":
-          if (showShortcuts) { setShowShortcuts(false); } else { onBack(); }
+          if (document.fullscreenElement && document.fullscreenElement === containerRef.current) {
+            e.preventDefault();
+            void toggleFullscreen();
+          } else onBack();
           break;
         case "?":
-          setShowShortcuts((s) => !s);
+          if (allEventCameras.length > 0) setShowShortcuts((s) => !s);
           break;
         case "m":
           toggleMute();
           break;
         case "t":
-          setShowTelemetry((s) => !s);
+          if (telemetryAvailable !== false) setShowTelemetry((s) => !s);
           break;
         case "1": case "2": case "3": case "4": case "5": case "6": {
           const idx = parseInt(e.key) - 1;
@@ -844,7 +879,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
     };
     window.addEventListener("keydown", handle);
     return () => window.removeEventListener("keydown", handle);
-  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts]);
+  }, [togglePlay, seekTo, onBack, onNavigate, hasPrev, hasNext, toggleMute, allEventCameras, showShortcuts, toggleFullscreen, telemetryAvailable]);
 
   // Compute cell position based on layout
   // Uses allEventCameras index for stable grid positions (prevents layout shift on segment change)
@@ -978,44 +1013,131 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
 
   const navigation = (
     <div className="player-nav-group">
-          <button onClick={onBack} className="player-back-btn" aria-label="Back to browse">
-            &larr; Back
+      <button onClick={onBack} className="player-back-btn" aria-label="Back to browse">
+        &larr; Back
+      </button>
+      {onNavigate && (hasPrev || hasNext) && (
+        <div className="player-recording-nav" role="group" aria-label="Recording navigation">
+          <span className="player-nav-label">Recordings</span>
+          <button
+            onClick={() => onNavigate(-1)}
+            disabled={!hasPrev}
+            className="player-nav-btn"
+            title="Previous recording ([)"
+            aria-label="Previous recording"
+          >
+            &lsaquo;
           </button>
-          {onNavigate && (
-            <>
-              <button
-                onClick={() => onNavigate(-1)}
-                disabled={!hasPrev}
-                className="player-nav-btn"
-                title="Previous event ([)"
-                aria-label="Previous event"
-              >
-                &lsaquo;
-              </button>
-              <button
-                onClick={() => onNavigate(1)}
-                disabled={!hasNext}
-                className="player-nav-btn"
-                title="Next event (])"
-                aria-label="Next event"
-              >
-                &rsaquo;
-              </button>
-            </>
-          )}
-          <button onClick={onRefresh} className="player-back-btn player-refresh-btn" aria-label="Refresh recording" title="Reload this recording's event details">Refresh</button>
+          <button
+            onClick={() => onNavigate(1)}
+            disabled={!hasNext}
+            className="player-nav-btn"
+            title="Next recording (])"
+            aria-label="Next recording"
+          >
+            &rsaquo;
+          </button>
         </div>
+      )}
+      <button onClick={onRefresh} className="player-back-btn player-refresh-btn" aria-label="Refresh recording" title="Reload this recording's event details">Refresh</button>
+    </div>
+  );
+
+  const header = (
+    <header className="player-header">
+      {navigation}
+      <div className="player-header-info">
+        <span
+          className="player-badge"
+          style={{ background: badgeColor }}
+        >
+          {badgeLabel}
+        </span>
+        <span className="player-header-title">
+          {event.city || event.id}
+          <span className="player-header-date" title="Recorded local time">
+            {" "}&middot;{" "}
+            {headerDateDisplay}
+          </span>
+        </span>
+        {event.reason && (
+          <span className="player-header-reason">
+            {formatReason(event.reason)}
+          </span>
+        )}
+        {event.lat != null && event.lon != null && (
+          <a
+            href={`https://maps.google.com/?q=${event.lat},${event.lon}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="player-header-gps"
+            title={`${event.lat.toFixed(4)}, ${event.lon.toFixed(4)}`}
+          >
+            Map
+          </a>
+        )}
+      </div>
+
+      {allEventCameras.length > 0 && (
+        <div className="player-view-actions">
+          <div className="player-layout-toggle" role="group" aria-label="Layout">
+            {(["grid", "focus"] as const).map((l) => (
+              <button
+                key={l}
+                onClick={() => setLayout(l)}
+                className={`player-layout-btn ${layout === l ? "active" : ""}`}
+                aria-pressed={layout === l}
+              >
+                {l === "grid" ? "Grid" : "Focus"}
+              </button>
+            ))}
+          </div>
+          <button
+            className={`player-view-btn ${showTelemetry && telemetryAvailable !== false ? "active" : ""}`}
+            aria-pressed={showTelemetry && telemetryAvailable !== false}
+            disabled={telemetryAvailable === false}
+            title={telemetryAvailable === false ? "No driving data in this clip" : "Show driving data (T)"}
+            onClick={() => setShowTelemetry((visible) => !visible)}
+          >
+            {telemetryAvailable === false ? "No driving data" : "Driving data"}
+          </button>
+          <button
+            className={`player-view-btn ${isFullscreen ? "active" : ""}`}
+            aria-label={document.fullscreenEnabled ? (isFullscreen ? "Exit fullscreen" : "Enter fullscreen") : "Fullscreen unavailable in this browser"}
+            aria-pressed={isFullscreen}
+            disabled={!document.fullscreenEnabled}
+            title={document.fullscreenEnabled ? (isFullscreen ? "Exit fullscreen" : "Enter fullscreen") : "This browser does not support fullscreen"}
+            onClick={toggleFullscreen}
+          >
+            Fullscreen
+          </button>
+        </div>
+      )}
+      {allEventCameras.length > 0 && layout === "focus" && (
+        <label className="player-camera-picker">
+          Camera
+          <select className="player-camera-select" aria-label="Focused camera" value={focusCamera} onChange={(e) => setFocusCamera(e.target.value as CameraAngle)}>
+            {allEventCameras.map((camera) => <option key={camera} value={camera}>{CAMERA_LABELS[camera]}</option>)}
+          </select>
+        </label>
+      )}
+      {allEventCameras.length > 0 && <button
+        className="player-shortcuts-hint"
+        onClick={() => setShowShortcuts((s) => !s)}
+        aria-label="Keyboard shortcuts"
+      >
+        ?
+      </button>}
+    </header>
   );
 
   if (allEventCameras.length === 0) {
     return (
-      <div className="player-container">
-        <header className="player-header">
-          {navigation}
-          <span className="player-header-title">No archived video</span>
-        </header>
+      <div className="player-container" ref={containerRef}>
+        {header}
         <div className="player-empty">
-          <p>This event has no playable video files in the archive.</p>
+          <h2>No archived video</h2>
+          <p>This recording has no playable video files in the archive.</p>
         </div>
       </div>
     );
@@ -1024,71 +1146,10 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
   return (
     <div className="player-container" ref={containerRef}>
       {/* Header */}
-      <header className="player-header">
-        {navigation}
-        <div className="player-header-info">
-          <span
-            className="player-badge"
-            style={{ background: badgeColor }}
-          >
-            {badgeLabel}
-          </span>
-          <span className="player-header-title">
-            {event.city || event.id}
-            <span className="player-header-date" title="Recorded local time">
-              {" "}&middot;{" "}
-              {headerDateDisplay}
-            </span>
-          </span>
-          {event.reason && (
-            <span className="player-header-reason">
-              {formatReason(event.reason)}
-            </span>
-          )}
-          {event.lat != null && event.lon != null && (
-            <a
-              href={`https://maps.google.com/?q=${event.lat},${event.lon}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="player-header-gps"
-              title={`${event.lat.toFixed(4)}, ${event.lon.toFixed(4)}`}
-            >
-              Map
-            </a>
-          )}
-        </div>
-
-        <div className="player-layout-toggle" role="group" aria-label="Layout">
-          {(["grid", "focus"] as const).map((l) => (
-            <button
-              key={l}
-              onClick={() => setLayout(l)}
-              className={`player-layout-btn ${layout === l ? "active" : ""}`}
-              aria-pressed={layout === l}
-            >
-              {l === "grid" ? "Grid" : "Focus"}
-            </button>
-          ))}
-        </div>
-        {layout === "focus" && (
-          <label className="player-camera-picker">
-            Camera
-            <select className="player-camera-select" aria-label="Focused camera" value={focusCamera} onChange={(e) => setFocusCamera(e.target.value as CameraAngle)}>
-              {allEventCameras.map((camera) => <option key={camera} value={camera}>{CAMERA_LABELS[camera]}</option>)}
-            </select>
-          </label>
-        )}
-        <button
-          className="player-shortcuts-hint"
-          onClick={() => setShowShortcuts((s) => !s)}
-          aria-label="Keyboard shortcuts"
-        >
-          ?
-        </button>
-      </header>
+      {header}
 
       {telemetryError && <p className="player-media-status" role="alert">Telemetry could not be loaded: {telemetryError}</p>}
-      {playbackError && <p className="player-media-status" role="alert">Playback could not start: {playbackError}</p>}
+      {playerError && <p className="player-media-status" role="alert">{playerError}</p>}
       {allCamerasFailed && (
         <p className="player-media-status" role="alert">{layout === "focus" ? "This camera failed to load. Retry it or choose another camera." : "All cameras failed to load for this segment. Retry a camera to try again."}</p>
       )}
@@ -1105,12 +1166,12 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
                 ["Space", "Play / Pause"],
                 ["\u2190 \u2192", "Seek \u00b15 seconds"],
                 ["Shift+\u2190 \u2192", "Previous / Next segment"],
-                ["[ ]", "Previous / Next event"],
+                ["[ ]", "Previous / Next recording"],
                 ["F", "Toggle grid / focus layout"],
                 ["M", "Mute / Unmute"],
                 ["T", "Toggle telemetry HUD"],
                 ["1\u20136", "Switch camera"],
-                ["Esc", "Back to browse"],
+                ["Esc", "Exit fullscreen / Back to browse"],
               ] as const).map(([key, desc]) => (
                 <div key={key} className="player-shortcut-row">
                   <kbd>{key}</kbd>
@@ -1126,6 +1187,10 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
       <div className={`player-videos player-videos-${layout}`}>
         {ALL_CAMERAS.map((cam, allIdx) => {
           const isActive = activeCameras.includes(cam);
+          const video = videoElsRef.current.get(cam);
+          const hls = hlsInstancesRef.current.get(cam);
+          const source = hlsSourcesRef.current.get(cam);
+          const initialLoading = bufferingCameras.has(cam) && (!video || video.readyState < 2 || (hls && hls.latestLevelDetails?.url !== source?.url));
           const isFocused = cam === focusCamera && layout === "focus";
           const isOverlayCam = (layout === "focus" && cam === focusCamera) ||
             (layout === "grid" && cam === "front");
@@ -1153,18 +1218,20 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
                 muted={cam === "front" ? isMuted : true}
                 playsInline
                 aria-label={`${CAMERA_LABELS[cam]} camera`}
-                style={{ visibility: inRecordingGap ? "hidden" : undefined }}
+                style={{ visibility: inRecordingGap || initialLoading ? "hidden" : undefined }}
                 onError={(e) => {
                   // Only report error if video has media loaded (ignore errors from clearing src)
                   if ((e.target as HTMLVideoElement).currentSrc) handleVideoError(cam);
                 }}
                 onEnded={() => handleEnded(cam)}
                 onWaiting={() => handleWaiting(cam)}
+                onLoadedData={() => handleMediaReady(cam)}
+                onCanPlay={() => handleMediaReady(cam)}
                 onPlaying={() => handlePlaying(cam)}
               />
               <span className="player-cam-label">{CAMERA_LABELS[cam]}</span>
               {bufferingCameras.has(cam) && !videoErrors.has(cam) && (
-                <span className="player-video-buffering">Buffering...</span>
+                <span className="player-video-buffering" role="status">{initialLoading ? "Loading" : "Buffering"} {CAMERA_LABELS[cam]}...</span>
               )}
               {endedCameras.has(cam) && !videoErrors.has(cam) && (
                 <span className="player-video-ended">End of clip</span>
@@ -1234,14 +1301,10 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           <button
             onClick={() => seekTo(triggerTimeGlobal)}
             className="player-trigger-btn"
-            title="Jump to event trigger"
-            aria-label="Jump to event trigger"
+            title="Jump to event moment"
+            aria-label="Jump to event moment"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L1 21h22L12 2zm0 4l7.5 13h-15L12 6z"/>
-              <rect x="11" y="10" width="2" height="4"/>
-              <rect x="11" y="16" width="2" height="2"/>
-            </svg>
+            Event
           </button>
         )}
 
@@ -1304,7 +1367,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
               <div
                 className="player-timeline-trigger"
                 style={{ left: `${triggerPct}%` }}
-                title="Event trigger time"
+                title="Event moment"
               />
             )}
             {hoverTime != null && (
@@ -1360,7 +1423,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           )}
         </div>
 
-        <div className="player-segment-group" role="group" aria-label="Segment navigation">
+        {event.clips.length > 1 && <div className="player-segment-group" role="group" aria-label="Segment navigation">
+          <span className="player-nav-label">Clips</span>
           <button
             className="player-segment-btn"
             disabled={segmentIdx === 0}
@@ -1382,7 +1446,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext,
           >
             &rsaquo;
           </button>
-        </div>
+        </div>}
 
         <label className="player-speed-group">
           Speed
