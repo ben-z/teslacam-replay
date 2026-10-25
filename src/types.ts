@@ -4,7 +4,6 @@ export interface EventClip {
   timestamp: string;
   cameras: string[];
   durationSec: number; // estimated from timestamp gaps, ~60s
-  subfolder?: string; // for RecentClips: date subfolder if files are in one
 }
 
 export interface DashcamEvent {

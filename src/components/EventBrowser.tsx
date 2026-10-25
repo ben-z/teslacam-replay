@@ -148,6 +148,9 @@ export function EventBrowser({
   const canLoadRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
+  const timelineFailedTypes = failedTypes.filter((type) =>
+    !pagePositions[type] || timelinePage.loadTypes.includes(type));
+  const timelinePending = timelinePage.loadTypes.some((type) => pendingTypes.includes(type));
   const scopeSummary = search.trim()
     ? `${filtered.length} matches in ${loadedEvents.length} loaded recordings`
     : `${filtered.length} recordings loaded`;
@@ -165,14 +168,28 @@ export function EventBrowser({
 
   const timelineFooter = hasMoreRemote ? (
     <div className="browse-load-more">
-      <button
-        type="button"
-        className="browse-load-more-hint"
-        disabled={!canLoadRemote}
-        onClick={handleLoadMore}
-      >
-        Load older recordings
-      </button>
+      {timelineFailedTypes.map((type) => (
+        <button
+          type="button"
+          className="browse-load-more-hint"
+          aria-describedby={`browse-error-${type}`}
+          disabled={pendingTypes.includes(type)}
+          onClick={() => onRetry(type)}
+          key={type}
+        >
+          Retry {BADGE_STYLES[type].label}
+        </button>
+      ))}
+      {(timelineFailedTypes.length === 0 || canLoadRemote) && (
+        <button
+          type="button"
+          className="browse-load-more-hint"
+          disabled={!canLoadRemote}
+          onClick={handleLoadMore}
+        >
+          {timelinePending && !canLoadRemote ? "Loading older recordings…" : "Load older recordings"}
+        </button>
+      )}
     </div>
   ) : null;
 
@@ -264,7 +281,7 @@ export function EventBrowser({
           </p>
         )}
         {failedTypes.map((type) => (
-          <div className="browse-error" role="alert" key={type}>
+          <div className="browse-error" id={`browse-error-${type}`} role="alert" key={type}>
             {BADGE_STYLES[type].label}: {errorsByType[type]}
             {events.some((event) => event.type === type) && (
               <> Previously loaded {BADGE_STYLES[type].label} recordings are still shown.</>

@@ -436,7 +436,9 @@
 
 .browse-load-more {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  gap: 8px;
   padding: 24px 0;
 }
 

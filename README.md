@@ -119,18 +119,20 @@ TeslaCam/
 ├── SentryClips/
 │   └── 2026-01-15_14-20-00/
 │       └── ...
-├── RecentClips/
-│   ├── 2026-01-15_10-30-00-front.mp4
-│   └── 2026-01-16/
-│       └── 2026-01-16_10-30-00-front.mp4
-└── RecentClips-before-2026-01-16/
-    └── 2026-01-14_10-30-00-front.mp4
+└── RecentClips/
+    ├── 2026-01-15/
+    │   └── 2026-01-15_10-30-00-front.mp4
+    └── 2026-01-16/
+        └── 2026-01-16_10-30-00-front.mp4
 ```
 
-Recent footage can be stored directly in `RecentClips` or in its `YYYY-MM-DD`
-subfolders. Preserved archives named `RecentClips-before-YYYY-MM-DD` are included
-after the current archive. Browsing pages each folder separately and ignores the
-`metadata` subfolder. These roots are discovered when the server starts.
+Recent footage lives in `RecentClips/YYYY-MM-DD/`, using each video filename's
+recording date. Each Recent page loads one complete day of file metadata; Drive
+pagination is handled internally. Videos are downloaded only for playback. The
+root-level `metadata` folder is excluded from recording discovery. Flat files,
+duplicate date folders, and videos in the wrong day fail with an explicit error.
+Historical `RecentClips-before-YYYY-MM-DD` folders are not recording sources.
+Migrate their videos into the dated layout before deploying this reader.
 
 ## Related
 

@@ -4,131 +4,75 @@ import {
   type DriveEntry,
   type DriveFileSource,
   type GDriveLiteClient,
-  type DriveList,
 } from "./gdrive-lite.js";
-import { scanRecentClipsPage, type DashcamEvent } from "./scan.js";
-import { ALL_CAMERAS } from "../src/types.js";
-import { archiveDateBounds, maximumRemainingArchiveDate } from "./archive-date-bounds.js";
+import { scanRecentClips, type DashcamEvent } from "./scan.js";
+import { recordingWallTimeMs } from "../src/playback.js";
 
-const RECENT_ROOT_PATTERN = /^RecentClips(?:-before-\d{4}-\d{2}-\d{2})?$/;
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const CLIP_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-.+\.mp4$/;
-const RECENT_FILE_PAGE_SIZE = 1000;
-
-interface Cursor {
-  root: string;
-  pageToken?: string;
-  date?: { id: string; pageToken?: string };
-}
+const CLIP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-.+\.mp4$/;
 
 export class RecentArchive {
   constructor(private readonly drive: GDriveLiteClient) {}
-
-  private async roots(): Promise<DriveEntry[]> {
-    return (await this.drive.listRoot()).files
-      .filter((entry) => this.drive.isFolder(entry) && RECENT_ROOT_PATTERN.test(entry.name))
-      .sort((a, b) => {
-        if (a.name === b.name) return 0;
-        if (a.name === "RecentClips") return -1;
-        if (b.name === "RecentClips") return 1;
-        return b.name.localeCompare(a.name);
-      });
-  }
 
   async page(pageToken: string | undefined): Promise<{
     events: DashcamEvent[];
     nextPageToken?: string;
     nextPageDate: string | null;
   }> {
-    const roots = await this.roots();
-    if (roots.length === 0) throw new Error("No RecentClips archive folders found");
-    const cursor = pageToken ? this.decodeCursor(pageToken) : { root: roots[0].id };
-    const rootIndex = roots.findIndex((root) => root.id === cursor.root);
-    if (rootIndex < 0) throw invalidCursor();
-    const root = roots[rootIndex];
-    const page = await this.drive.listFolderPage(this.drive.folderRef(root), {
-      pageToken: cursor.pageToken,
-      pageSize: RECENT_FILE_PAGE_SIZE,
-      limit: RECENT_FILE_PAGE_SIZE,
-      orderBy: "name desc",
-    });
-    const dates = page.files.filter((entry) =>
-      this.drive.isFolder(entry) && DATE_FOLDER_PATTERN.test(entry.name)
-    );
-    let afterRootPage: Cursor | undefined;
-    const nextRoot = roots[rootIndex + 1];
-    if (page.nextPageToken) afterRootPage = { root: root.id, pageToken: page.nextPageToken };
-    else if (nextRoot) afterRootPage = { root: nextRoot.id };
-
-    if (!cursor.date) {
-      const files = page.files.filter((entry) => !this.drive.isFolder(entry));
-      const events = await scanRecentClipsPage(this.drive, files);
-      if (events.length || !dates.length) {
-        const next = dates.length ? { ...cursor, date: { id: dates[0].id } } : afterRootPage;
-        return this.result(events, next, page, dates, roots.slice(rootIndex + 1));
+    const requestedDate = pageToken ? parseDateCursor(pageToken) : undefined;
+    const root = await this.drive.resolvePath("/RecentClips", "folder");
+    const entries = (await this.drive.listFolder(this.drive.folderRef(root))).files;
+    const dates: DriveEntry[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (this.drive.isFolder(entry) && entry.name === "metadata") continue;
+      if (!this.drive.isFolder(entry) || !DATE_FOLDER_PATTERN.test(entry.name)) {
+        throw new Error(`Unsupported RecentClips entry: ${entry.name}; expected YYYY-MM-DD folders`);
       }
-      cursor.date = { id: dates[0].id };
+      recordingWallTimeMs(`${entry.name}_00-00-00`);
+      if (seen.has(entry.name)) throw new Error(`Duplicate RecentClips date folder: ${entry.name}`);
+      seen.add(entry.name);
+      dates.push(entry);
     }
-
-    // A date listing is paged independently so one request never scans the full archive.
-    const dateIndex = dates.findIndex((entry) => entry.id === cursor.date!.id);
-    if (dateIndex < 0) throw invalidCursor();
-    const date = dates[dateIndex];
-    const clips = await this.drive.listFolderPage(this.drive.folderRef(date), {
-      type: "files",
-      pageToken: cursor.date.pageToken,
-      pageSize: RECENT_FILE_PAGE_SIZE,
-      limit: RECENT_FILE_PAGE_SIZE,
-      orderBy: "name desc",
-    });
-    const events = await scanRecentClipsPage(this.drive, clips.files);
-    for (const event of events) {
-      for (const clip of event.clips) clip.subfolder = date.name;
-    }
-    const nextDate = dates[dateIndex + 1];
-    let next = afterRootPage;
-    if (clips.nextPageToken) {
-      next = { ...cursor, date: { id: date.id, pageToken: clips.nextPageToken } };
-    } else if (nextDate) {
-      next = { ...cursor, date: { id: nextDate.id } };
-    }
-    const remainingDates = dates.slice(dateIndex + (clips.nextPageToken ? 0 : 1));
-    return this.result(events, next, page, remainingDates, roots.slice(rootIndex + 1));
+    dates.sort((a, b) => b.name.localeCompare(a.name));
+    const index = requestedDate === undefined ? 0 : dates.findIndex((date) => date.name === requestedDate);
+    if (index < 0) throw invalidCursor();
+    if (!dates.length) return { events: [], nextPageDate: null };
+    const date = dates[index];
+    // A calendar day is the user-visible page; Drive pagination stays inside listFolder.
+    const events = await this.readDay(date);
+    const nextDate = dates[index + 1]?.name;
+    return {
+      events: events.sort((a, b) => b.id.localeCompare(a.id)),
+      nextPageToken: nextDate,
+      // Keep the common Timeline range on the day just loaded until the next day arrives.
+      nextPageDate: nextDate ? date.name : null,
+    };
   }
 
   async findEvent(id: string): Promise<DashcamEvent | null> {
-    for (const root of await this.roots()) {
-      const date = await this.findPath(`/${root.name}/${id.slice(0, 10)}`, "folder");
-      if (date) {
-        const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
-        const events = await scanRecentClipsPage(this.drive, files);
-        const event = events.find((entry) => entry.clips.some((clip) => clip.timestamp === id));
-        if (event) {
-          for (const clip of event.clips) clip.subfolder = date.name;
-          return event;
-        }
-      }
-      const flatFiles = await Promise.all(ALL_CAMERAS.map((camera) =>
-        this.findPath(`/${root.name}/${id}-${camera}.mp4`, "file")
-      ));
-      const files = flatFiles.filter((file): file is DriveEntry => file !== null);
-      if (files.length) {
-        const [event] = await scanRecentClipsPage(this.drive, files);
-        if (!event) throw new Error(`Resolved recording has no supported videos: ${root.name}/${id}`);
-        return event;
-      }
-    }
-    return null;
+    const date = await this.findPath(`/RecentClips/${id.slice(0, 10)}`, "folder");
+    if (!date) return null;
+    const events = await this.readDay(date);
+    return events.find((event) => event.clips.some((clip) => clip.timestamp === id)) ?? null;
   }
 
   async findClipSource(segment: string, camera: string): Promise<DriveFileSource | null> {
-    for (const root of await this.roots()) {
-      for (const directory of [root.name, `${root.name}/${segment.slice(0, 10)}`]) {
-        const file = await this.findPath(`/${directory}/${segment}-${camera}.mp4`, "file");
-        if (file) return this.drive.fileSource(file);
+    const file = await this.findPath(`/RecentClips/${segment.slice(0, 10)}/${segment}-${camera}.mp4`, "file");
+    return file ? this.drive.fileSource(file) : null;
+  }
+
+  private async readDay(date: DriveEntry): Promise<DashcamEvent[]> {
+    const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
+    for (const file of files) {
+      const match = file.name.match(CLIP_FILE_PATTERN);
+      if (this.drive.isFolder(file) || !match) throw new Error(`Unsupported RecentClips file: ${date.name}/${file.name}`);
+      recordingWallTimeMs(match[1]);
+      if (match[1].slice(0, 10) !== date.name) {
+        throw new Error(`RecentClips file is in the wrong date folder: ${date.name}/${file.name}`);
       }
     }
-    return null;
+    return scanRecentClips(this.drive, files);
   }
 
   private async findPath(path: string, type: "folder" | "file"): Promise<DriveEntry | null> {
@@ -139,65 +83,16 @@ export class RecentArchive {
       throw error;
     }
   }
+}
 
-  private rootDateBounds(page: DriveList) {
-    const names = page.files.filter((entry) => this.drive.isFolder(entry)
-      ? DATE_FOLDER_PATTERN.test(entry.name)
-      : CLIP_FILE_PATTERN.test(entry.name)).map((entry) => entry.name);
-    return archiveDateBounds(names);
+function parseDateCursor(token: string): string {
+  if (!DATE_FOLDER_PATTERN.test(token)) throw invalidCursor();
+  try {
+    recordingWallTimeMs(`${token}_00-00-00`);
+  } catch {
+    throw invalidCursor();
   }
-
-  private async result(
-    events: DashcamEvent[],
-    next: Cursor | undefined,
-    rootPage: DriveList,
-    remainingDates: DriveEntry[],
-    laterRoots: DriveEntry[],
-  ) {
-    const candidates: (string | null | undefined)[] = remainingDates.length
-      ? [archiveDateBounds(remainingDates.map((entry) => entry.name)).newest]
-      : [];
-    if (rootPage.nextPageToken) candidates.push(this.rootDateBounds(rootPage).oldest);
-    if (next) {
-      // The identical bounded query reuses the sidecar's listing cache when traversed.
-      // Root migration names do not establish the dates of their contents.
-      for (const root of laterRoots) {
-        const head = await this.drive.listFolderPage(this.drive.folderRef(root), {
-          pageSize: RECENT_FILE_PAGE_SIZE,
-          limit: RECENT_FILE_PAGE_SIZE,
-          orderBy: "name desc",
-        });
-        const newest = this.rootDateBounds(head).newest;
-        candidates.push(newest ?? (head.nextPageToken ? null : undefined));
-      }
-    }
-    return {
-      events: events.sort((a, b) => b.id.localeCompare(a.id)),
-      nextPageToken: next ? Buffer.from(JSON.stringify(next)).toString("base64url") : undefined,
-      nextPageDate: next ? maximumRemainingArchiveDate(candidates) : null,
-    };
-  }
-
-  private decodeCursor(token: string): Cursor {
-    let value: unknown;
-    try {
-      value = JSON.parse(Buffer.from(token, "base64url").toString());
-    } catch {
-      throw invalidCursor();
-    }
-    if (!value || typeof value !== "object" || !("root" in value) || typeof value.root !== "string") {
-      throw invalidCursor();
-    }
-    if ("pageToken" in value && typeof value.pageToken !== "string") throw invalidCursor();
-    if ("date" in value) {
-      const date = value.date;
-      if (!date || typeof date !== "object" || !("id" in date) || typeof date.id !== "string") {
-        throw invalidCursor();
-      }
-      if ("pageToken" in date && typeof date.pageToken !== "string") throw invalidCursor();
-    }
-    return value as Cursor;
-  }
+  return token;
 }
 
 function invalidCursor(): HTTPException {

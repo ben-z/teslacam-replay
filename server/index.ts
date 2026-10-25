@@ -21,7 +21,7 @@ import { createGDriveLiteFromEnv, DriveNotFoundError, type DriveEntry, type Driv
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 import { RecentArchive } from "./recent-archive.js";
 import { mergeRecentFragments } from "../src/events.js";
-import { archiveDateBounds } from "./archive-date-bounds.js";
+import { oldestArchiveDate } from "./archive-date-bounds.js";
 import type { DashcamEvent as PublicDashcamEvent } from "../src/types.js";
 
 const appOrigin = process.env.APP_ORIGIN;
@@ -163,7 +163,6 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
         ...clip.sourceByCamera,
       },
       durationSec: Math.max(prev.durationSec, clip.durationSec),
-      subfolder: prev.subfolder ?? clip.subfolder,
     });
   }
   const clips = Array.from(clipsByTimestamp.values())
@@ -231,7 +230,6 @@ function publicEvent(event: DashcamEvent): PublicDashcamEvent {
       timestamp: clip.timestamp,
       cameras: clip.cameras,
       durationSec: clip.durationSec,
-      subfolder: clip.subfolder,
     })),
   };
 }
@@ -298,7 +296,7 @@ async function getEventPage(
   return {
     events,
     nextPageToken: page.nextPageToken,
-    nextPageDate: page.nextPageToken ? archiveDateBounds(folders.map((entry) => entry.name)).oldest : null,
+    nextPageDate: page.nextPageToken ? oldestArchiveDate(folders.map((entry) => entry.name)) : null,
   };
 }
 

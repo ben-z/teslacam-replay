@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { timelinePaging } from "./timelinePaging";
+import { buildTimeline } from "./components/Timeline";
 import type { EventPagePositions } from "./api";
 import type { DashcamEvent } from "./types";
 
@@ -32,6 +33,26 @@ describe("common Timeline date range", () => {
     expect(timelinePaging(recordings, {
       ...positions, RecentClips: { nextPageToken: "same-day-next", nextPageDate: "2026-10-24" },
     })).toEqual(timelinePaging(recordings, positions));
+  });
+
+  it("keeps older Saved footage hidden until the corresponding Recent day has loaded", () => {
+    const saved = { ...event("2026-10-23_12-00-00"), type: "SavedClips" as const };
+    const initial = [...recordings, saved];
+    const pages: EventPagePositions = {
+      SavedClips: { nextPageToken: "saved", nextPageDate: "2026-10-17" },
+      SentryClips: { nextPageToken: null, nextPageDate: null },
+      RecentClips: { nextPageToken: "2026-10-23", nextPageDate: "2026-10-24" },
+    };
+    const first = timelinePaging(initial, pages);
+    expect(first).toEqual({ fromDate: "2026-10-24", loadTypes: ["RecentClips"], incomplete: true });
+    expect(buildTimeline(initial, first.fromDate).sessionList).toEqual(recordings);
+
+    const loaded = [...initial, event("2026-10-23_10-00-00")];
+    const next = timelinePaging(loaded, {
+      ...pages, RecentClips: { nextPageToken: "2026-10-22", nextPageDate: "2026-10-23" },
+    });
+    expect(next.fromDate).toBe("2026-10-23");
+    expect(buildTimeline(loaded, next.fromDate).sessionList).toContain(saved);
   });
 
   it("loads every source tied at the newest day", () => {
