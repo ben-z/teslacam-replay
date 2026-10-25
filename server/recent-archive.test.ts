@@ -10,6 +10,7 @@ function setup(paths: Record<string, boolean>, listedFiles: Record<string, strin
     name: name.split("/").at(-1)!,
     mimeType: folder ? FOLDER_MIME : "video/mp4",
     size: folder ? undefined : "1234",
+    hasThumbnail: false,
   } satisfies DriveEntry]));
   const requests: URL[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {

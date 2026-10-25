@@ -1,4 +1,4 @@
-import { Fragment, memo, useState, useMemo, useCallback, useEffect } from "react";
+import { Fragment, memo, useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   thumbnailUrl,
   EVENT_PAGE_TYPES,
@@ -401,6 +401,7 @@ export function EventBrowser({
                     <EventCard
                       event={event}
                       onSelect={handleCardSelect}
+                      active={active}
                     />
                   </Fragment>
                 );
@@ -440,10 +441,13 @@ const BADGE_STYLES: Record<string, { label: string; color: string }> = {
 const EventCard = memo(function EventCard({
   event,
   onSelect,
+  active,
 }: {
   event: DashcamEvent;
   onSelect: (event: DashcamEvent) => void;
+  active: boolean;
 }) {
+  const openButton = useRef<HTMLButtonElement>(null);
   const badge = BADGE_STYLES[event.type];
   const formattedTimestamp = useMemo(
     () => formatTimestamp(event.timestamp),
@@ -453,34 +457,44 @@ const EventCard = memo(function EventCard({
     if (event.cameraCount != null) return event.cameraCount;
     return new Set(event.clips.flatMap((c) => c.cameras)).size;
   }, [event]);
-  const [thumbState, setThumbState] = useState<"loading" | "loaded" | "error">(
-    event.hasThumbnail ? "loading" : "error"
-  );
-  useEffect(() => {
-    setThumbState(event.hasThumbnail ? "loading" : "error");
-  }, [event.type, event.id, event.hasThumbnail, event.thumbnailVersion]);
+  const previewUrl = thumbnailUrl(event.type, event.id, event.thumbnailVersion);
+  const previewKey = `${event.hasThumbnail}:${previewUrl}`;
+  const [preview, setPreview] = useState<{
+    key: string; status: "loading" | "loaded" | "error"; attempt: number;
+  } | null>(null);
+  const image = preview?.key === previewKey
+    ? preview
+    : { key: previewKey, status: "loading" as const, attempt: 0 };
+  const thumbState = event.hasThumbnail ? image.status : "absent";
+  const requestUrl = image.attempt === 0
+    ? previewUrl
+    : `${previewUrl}${previewUrl.includes("?") ? "&" : "?"}attempt=${image.attempt}`;
 
   const handleClick = useCallback(() => onSelect(event), [event, onSelect]);
 
   return (
     <article className="browse-card">
-      <button onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${event.city ? ` in ${event.city}` : ""}`}>
-        <div className={`browse-card-thumb${thumbState === "error" ? " browse-card-thumb--empty" : ""}`}>
-          {event.hasThumbnail && thumbState !== "error" ? (
+      <button ref={openButton} onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${event.city ? ` in ${event.city}` : ""}`}>
+        <div className="browse-card-thumb">
+          {active && event.hasThumbnail && thumbState !== "error" ? (
             <>
               {thumbState === "loading" && <div className="browse-card-shimmer" />}
               <img
-                src={thumbnailUrl(event.type, event.id, event.thumbnailVersion)}
+                key={`${previewKey}:${image.attempt}`}
+                src={requestUrl}
                 alt=""
                 className={`browse-card-img ${thumbState === "loaded" ? "loaded" : ""}`}
                 loading="lazy"
                 decoding="async"
-                onLoad={() => setThumbState("loaded")}
-                onError={() => setThumbState("error")}
+                onLoad={() => setPreview({ ...image, status: "loaded" })}
+                onError={() => setPreview({ ...image, status: "error" })}
               />
             </>
           ) : (
-            <div className="browse-card-placeholder">No preview</div>
+            <div className="browse-card-placeholder">
+              {event.clips.length > 0 && <svg width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z" /></svg>}
+              {thumbState === "error" && <span>Preview couldn’t load</span>}
+            </div>
           )}
           <span
             className="browse-card-badge"
@@ -516,6 +530,17 @@ const EventCard = memo(function EventCard({
           </div>
         </div>
       </button>
+      {active && thumbState === "error" && (
+        <button
+          type="button"
+          className="browse-card-preview-retry"
+          aria-label={`Retry ${badge.label} preview for ${formattedTimestamp}`}
+          onClick={() => {
+            openButton.current!.focus();
+            setPreview({ ...image, status: "loading", attempt: image.attempt + 1 });
+          }}
+        >Retry</button>
+      )}
       {event.lat != null && event.lon != null && (
         <a href={`https://maps.google.com/?q=${event.lat},${event.lon}`} target="_blank" rel="noopener noreferrer" className="browse-card-gps" aria-label={`Open location of ${formattedTimestamp} in Google Maps`}>Map</a>
       )}

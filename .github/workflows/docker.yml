@@ -27,7 +27,7 @@ env:
   IMAGE_REGISTRY: ghcr.io
   APP_IMAGE_NAME: ben-z/teslacam-replay
   GDRIVE_IMAGE_NAME: ben-z/teslacam-replay-gdrive-serve-lite
-  GDRIVE_SOURCE_SHA: 62bc0a9cbf9de12d5f534ed269185af4594dce45
+  GDRIVE_SOURCE_SHA: 9ccfe0cbb911d35be498cd1fd318cc4f233061d4
 
 jobs:
   prepare:

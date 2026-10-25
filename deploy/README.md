@@ -3,7 +3,7 @@
 TeslaCam Replay owns its AKS namespace, manifests, images, and deployment
 workflow. The production pod contains the app and a loopback-only
 `gdrive-serve-lite` sidecar pinned to commit
-`62bc0a9cbf9de12d5f534ed269185af4594dce45`.
+`9ccfe0cbb911d35be498cd1fd318cc4f233061d4`.
 
 The app is served over Tailscale at `https://teslacam-replay.benzhang.dev`
 with trusted HTTPS. Tailscale grants control access to the frontend and footage

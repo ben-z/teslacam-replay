@@ -3,6 +3,7 @@ import {
   scanEventFolder,
   scanRecentClips,
   getClipSource,
+  getEventThumbnail,
   type TeslacamDrive,
 } from "./scan";
 import {
@@ -20,8 +21,11 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
 function createMockDrive(files: MockFiles): TeslacamDrive & {
   entry: (path: string, isFolder?: boolean) => DriveEntry;
   listCalls: string[];
+  thumbnails: Map<string, { thumbnailVersion: string; thumbnailUrl: string }>;
 } {
   const listCalls: string[] = [];
+  const thumbnails = new Map<string, { thumbnailVersion: string; thumbnailUrl: string }>();
+  const client = new GDriveLiteClient({ baseUrl: "http://gdrive.test" });
 
   function entry(path: string, isFolder = false): DriveEntry {
     const name = path.split("/").pop() || "";
@@ -31,6 +35,8 @@ function createMockDrive(files: MockFiles): TeslacamDrive & {
       mimeType: isFolder ? FOLDER_MIME : mimeTypeFor(name),
       size: isFolder ? undefined : String(files[path]?.length ?? 0),
       url: isFolder ? undefined : `/file/${encodeURIComponent(path)}/${encodeURIComponent(name)}`,
+      hasThumbnail: thumbnails.has(path),
+      ...thumbnails.get(path),
     };
   }
 
@@ -64,6 +70,8 @@ function createMockDrive(files: MockFiles): TeslacamDrive & {
   return {
     entry,
     listCalls,
+    thumbnails,
+    thumbnailSource: (file) => client.thumbnailSource(file),
     async listFolder(folder: DriveFolderRef): Promise<DriveList> {
       return listPath(folder.id === "root" ? "" : folder.id);
     },
@@ -172,7 +180,6 @@ describe("scanEventFolder", () => {
     expect(event?.lon).toBeCloseTo(-122.4194);
     expect(event?.reason).toBe("user_interaction_dashcam_icon_tapped");
     expect(event?.timestamp).toBe("2025-06-01T18:17:49");
-    expect(event?.hasThumbnail).toBe(true);
     expect(event?.thumbnailSource?.url).toContain("thumb.png");
     expect(event?.clips).toHaveLength(3);
     expect(event?.clips[0].cameras).toEqual([
@@ -298,7 +305,7 @@ describe("scanEventFolder", () => {
     expect(event?.timestamp).toBe("2026-06-14T19:05:54");
     expect(event?.city).toBe("Redwood City");
     expect(event?.reason).toBe("user_interaction_dashcam_icon_tapped");
-    expect(event?.hasThumbnail).toBe(true);
+    expect(getEventThumbnail(event!)?.url).toContain("thumb.png");
     expect(event?.clips).toEqual([]);
     expect(event?.totalDurationSec).toBe(0);
     expect(event?.cameraCount).toBe(0);
@@ -332,7 +339,7 @@ describe("scanEventFolder", () => {
       "right_pillar",
     ]);
     expect(event?.cameraCount).toBe(6);
-    expect(event?.hasThumbnail).toBe(false);
+    expect(getEventThumbnail(event!)).toBeUndefined();
   });
 });
 
@@ -341,7 +348,7 @@ describe("scanRecentClips", () => {
     const drive = createMockDrive(fixture());
     const files = (await drive.listFolder(drive.folderRef(drive.entry("RecentClips/2026-02-01", true)))).files;
     drive.listCalls.length = 0;
-    const events = scanRecentClips({ fileSource: drive.fileSource }, files);
+    const events = scanRecentClips({ fileSource: drive.fileSource, thumbnailSource: drive.thumbnailSource }, files);
 
     expect(events.map((event) => event.id)).toEqual([
       "2026-02-01_10-00-00",

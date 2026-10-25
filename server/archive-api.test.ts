@@ -30,6 +30,7 @@ class DriveProvider {
   readonly requests: URL[] = [];
   readonly resolveFailures = new Map<string, number>();
   readonly reads = new Map<string, { body: string; status: number }>();
+  readonly thumbnails = new Map<string, { body: string; status: number }>();
 
   add(filePath: string, folder = false): DriveEntry {
     const parentPath = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
@@ -39,6 +40,7 @@ class DriveProvider {
       name: filePath.split("/").at(-1)!,
       mimeType: folder ? FOLDER_MIME : "video/mp4",
       size: folder ? undefined : "1234",
+      hasThumbnail: false,
     };
     this.entries.set(filePath, entry);
     this.children.get(parentId)!.push(entry);
@@ -58,6 +60,11 @@ class DriveProvider {
     const url = new URL(input instanceof Request ? input.url : input);
     this.requests.push(url);
     if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+    if (url.pathname.startsWith("/thumbnail/")) {
+      const image = this.thumbnails.get(url.pathname.split("/")[2]);
+      if (!image) throw new Error(`Missing thumbnail fixture: ${url.pathname}`);
+      return new Response(image.body, { status: image.status, headers: { "Content-Type": "image/jpeg" } });
+    }
     if (url.pathname.startsWith("/file/")) {
       const file = this.reads.get(url.pathname.split("/")[2]);
       if (!file) throw new Error(`Missing file-read fixture: ${url}`);
@@ -152,6 +159,95 @@ function hls(segment: string, camera: string): string {
 }
 
 describe("RecentClips archive API", () => {
+  it("serves each Recent recording's native still without reading its videos", async () => {
+    const folder = "RecentClips/2026-10-02";
+    provider.add(folder, true);
+    const ids = ["2026-10-02_10-00-00", "2026-10-02_11-00-00"];
+    const files = ids.map((id, index) => {
+      const file = provider.add(`${folder}/${id}-front.mp4`);
+      file.hasThumbnail = true;
+      file.thumbnailVersion = String(index + 1);
+      file.thumbnailUrl = `/thumbnail/${file.id}?resourceKey=PREVIEW_PRIVATE`;
+      provider.thumbnails.set(file.id, { body: `still-${index}`, status: 200 });
+      return file;
+    });
+    await start();
+    const loaded = await page();
+    expect(loaded.events).toHaveLength(2);
+    expect(provider.requests.some((url) => /^\/(file|thumbnail)\//.test(url.pathname))).toBe(false);
+    for (const [index, id] of ids.entries()) {
+      const event = loaded.events.find((item: { id: string }) => item.id === id);
+      expect(event.hasThumbnail).toBe(true);
+      expect(event.thumbnailVersion).toMatch(/^[a-f0-9]{16}$/);
+      expect(JSON.stringify(event)).not.toMatch(/PREVIEW_PRIVATE|thumbnailSource|sourceByCamera|thumbnailUrl|drive\.test/);
+      const response = await request(`/api/events/RecentClips/${id}/thumbnail?v=${event.thumbnailVersion}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("image/jpeg");
+      expect(response.headers.get("Cache-Control")).toBe("private, max-age=86400");
+      expect(await response.text()).toBe(`still-${index}`);
+      expect(provider.requests.some((url) => url.pathname === `/thumbnail/${files[index].id}`
+        && url.searchParams.get("resourceKey") === "PREVIEW_PRIVATE")).toBe(true);
+    }
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(ensureHlsSegments).not.toHaveBeenCalled();
+    expect(extractTelemetryFromBuffer).not.toHaveBeenCalled();
+  });
+
+  it("updates a native preview's version without changing its video identity", async () => {
+    const id = "2026-10-02_10-00-00";
+    provider.add("RecentClips/2026-10-02", true);
+    const file = provider.add(`RecentClips/2026-10-02/${id}-front.mp4`);
+    provider.add(`RecentClips/2026-10-02/${id}-back.mp4`);
+    provider.add(`RecentClips/2026-10-02/${id}-right_repeater.mp4`);
+    Object.assign(file, { hasThumbnail: true, thumbnailVersion: "1", thumbnailUrl: `/thumbnail/${file.id}` });
+    provider.thumbnails.set(file.id, { body: "old still", status: 200 });
+    await start();
+    const first = (await page()).events[0];
+    expect(first.clips[0].cameras).toEqual(["front", "right_repeater", "back"]);
+    expect(await (await request(`/api/events/RecentClips/${id}/thumbnail`)).text()).toBe("old still");
+    expect((await request(hls(id, "front"))).status).toBe(200);
+    const videoIdentity = ensureHlsSegments.mock.calls.at(-1)![0];
+    file.thumbnailVersion = "2";
+    provider.thumbnails.set(file.id, { body: "new still", status: 200 });
+    const second = (await page()).events[0];
+    expect(second.thumbnailVersion).not.toBe(first.thumbnailVersion);
+    expect(await (await request(`/api/events/RecentClips/${id}/thumbnail`)).text()).toBe("new still");
+    expect((await request(hls(id, "front"))).status).toBe(200);
+    expect(ensureHlsSegments.mock.calls.at(-1)![0]).toEqual(videoIdentity);
+    file.hasThumbnail = false;
+    const absent = (await page()).events[0];
+    expect(absent.hasThumbnail).toBe(false);
+    expect(absent.thumbnailVersion).toBeUndefined();
+    expect((await request(`/api/events/RecentClips/${id}/thumbnail`)).status).toBe(404);
+  });
+
+  it("reports native image failures without attempting another representation or video read", async () => {
+    const id = "2026-10-02_10-00-00";
+    provider.add("RecentClips/2026-10-02", true);
+    const file = provider.add(`RecentClips/2026-10-02/${id}-front.mp4`);
+    Object.assign(file, { hasThumbnail: true, thumbnailVersion: "1", thumbnailUrl: `/thumbnail/${file.id}` });
+    provider.thumbnails.set(file.id, { body: "provider unavailable", status: 503 });
+    await start();
+    await page();
+    const failed = await request(`/api/events/RecentClips/${id}/thumbnail`);
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toEqual({ error: "Cannot read thumbnail: HTTP 503" });
+    expect(provider.requests.filter((url) => url.pathname.startsWith("/thumbnail/"))).toHaveLength(1);
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+  });
+
+  it.each(["missing availability", "external image URL"])("fails explicitly for %s", async (fault) => {
+    provider.add("RecentClips/2026-10-02", true);
+    const file = provider.add("RecentClips/2026-10-02/2026-10-02_10-00-00-front.mp4");
+    if (fault === "missing availability") delete file.hasThumbnail;
+    else Object.assign(file, { hasThumbnail: true, thumbnailUrl: "https://lh3.googleusercontent.com/SIGNED_PRIVATE" });
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(await response.json())).not.toContain("SIGNED_PRIVATE");
+    expect(provider.requests.every((url) => url.origin === "http://drive.test")).toBe(true);
+  });
+
   it("browses dated clips, ignores metadata, and plays the retained file ID", async () => {
     provider.add("RecentClips/metadata", true);
     provider.add("RecentClips/metadata/thumb.png");
@@ -361,6 +457,46 @@ describe("RecentClips archive API", () => {
     for (const segment of [early, middle, late]) provider.remove(`${date}/${segment}-front.mp4`);
     expect((await request(`/api/events/RecentClips/${late}?refresh=1`)).status).toBe(404);
     for (const alias of [early, middle, late]) expect((await request(`/api/events/RecentClips/${alias}`)).status).toBe(404);
+  });
+
+  it("shares telemetry across Recent aliases and invalidates refreshed source versions", async () => {
+    const early = "2026-10-02_10-00-00";
+    const middle = "2026-10-02_10-01-00";
+    const late = "2026-10-02_10-02-00";
+    provider.add("RecentClips/2026-10-02", true);
+    provider.add(`RecentClips/2026-10-02/${early}-front.mp4`);
+    const front = provider.add(`RecentClips/2026-10-02/${middle}-front.mp4`);
+    provider.add(`RecentClips/2026-10-02/${middle}-back.mp4`);
+    provider.add(`RecentClips/2026-10-02/${late}-front.mp4`);
+    provider.reads.set(front.id, { body: "original video bytes", status: 200 });
+    await start();
+    for (const alias of [early, middle, late]) {
+      expect((await request(`/api/events/RecentClips/${alias}`)).status).toBe(200);
+    }
+    await page();
+
+    const beforeAliases = provider.requests.length;
+    for (const alias of [early, middle, late]) {
+      const response = await request(`/api/video/RecentClips/${alias}/${middle}/telemetry`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ hasSei: false });
+    }
+    expect(provider.requests).toHaveLength(beforeAliases + 1);
+    expect(extractTelemetryFromBuffer).toHaveBeenCalledTimes(1);
+    expect(extractTelemetryFromBuffer).toHaveBeenNthCalledWith(1, Buffer.from("original video bytes"));
+
+    front.modifiedTime = "2026-10-02T11:00:00Z";
+    provider.reads.set(front.id, { body: "updated video bytes", status: 200 });
+    expect((await request(`/api/events/RecentClips/${middle}?refresh=1`)).status).toBe(200);
+    const afterRefresh = provider.requests.length;
+    for (const alias of [early, middle, late]) {
+      const response = await request(`/api/video/RecentClips/${alias}/${middle}/telemetry`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ hasSei: false });
+    }
+    expect(provider.requests).toHaveLength(afterRefresh + 1);
+    expect(extractTelemetryFromBuffer).toHaveBeenCalledTimes(2);
+    expect(extractTelemetryFromBuffer).toHaveBeenNthCalledWith(2, Buffer.from("updated video bytes"));
   });
 
   it("uses indexed Saved snapshots until explicit refresh replaces removed cameras and folders", async () => {
