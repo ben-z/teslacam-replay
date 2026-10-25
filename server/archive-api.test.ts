@@ -102,6 +102,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   vi.stubEnv("GDRIVE_BASE_URL", "http://drive.test");
   vi.stubEnv("APP_ORIGIN", undefined);
+  vi.stubEnv("GDRIVE_EVENT_ORDER_BY", undefined);
   for (const name of ["GDRIVE_USER", "GDRIVE_PASS", "BASIC_AUTH_USER", "BASIC_AUTH_PASSWORD", "SERVE_FRONTEND"]) {
     vi.stubEnv(name, "");
   }
@@ -169,7 +170,7 @@ describe("RecentClips archive API", () => {
     expect(provider.requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(resolveCount);
   });
 
-  it("pages within dates and then through preserved roots without scanning ahead", async () => {
+  it("pages through dates and preserved roots without scanning later date-folder contents", async () => {
     provider.add("RecentClips/2026-10-02", true);
     provider.add("RecentClips/2026-10-01", true);
     provider.add("RecentClips/2026-09-30", true);
@@ -189,7 +190,8 @@ describe("RecentClips archive API", () => {
     expect(first.events).toHaveLength(2);
     expect(provider.listsFor("RecentClips/2026-10-02")).toHaveLength(1);
     expect(provider.listsFor("RecentClips/2026-10-01")).toHaveLength(0);
-    expect(provider.listsFor(LEGACY)).toHaveLength(0);
+    // Looking at the bounded root metadata establishes a date hint without scanning its contents.
+    expect(provider.listsFor(LEGACY)).toHaveLength(1);
     const ids = first.events.map((event: { id: string }) => event.id);
     let token = first.nextPageToken;
     const tokens = new Set<string>();
@@ -201,7 +203,7 @@ describe("RecentClips archive API", () => {
       token = next.nextPageToken;
     }
     expect(ids).toEqual(files.map((file) => file.split("/").at(-1)!.slice(0, 19)));
-    expect(provider.listsFor(LEGACY)).toHaveLength(2);
+    expect(provider.listsFor(LEGACY).filter((url) => url.searchParams.has("pageToken"))).toHaveLength(1);
   });
 
   it("discovers the supported archive prefix and resolves legacy playback without browsing", async () => {
@@ -539,6 +541,166 @@ describe("RecentClips archive API", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("remaining archive calendar dates", () => {
+  it("bounds Saved pages by listed folder labels even when events are empty or have different metadata times", async () => {
+    provider.add("SavedClips", true);
+    provider.add("SavedClips/2026-10-24_10-00-00", true);
+    const folder = "SavedClips/2026-10-23_10-00-00";
+    provider.add(folder, true);
+    provider.add(`${folder}/2026-10-12_10-00-00-front.mp4`);
+    const metadata = provider.add(`${folder}/event.json`);
+    provider.reads.set(metadata.id, { body: JSON.stringify({ timestamp: "1999-01-01T00:00:00" }), status: 200 });
+    provider.add("SavedClips/2026-10-22_10-00-00", true);
+    await start();
+    const first = await (await request("/api/events/page?type=SavedClips")).json();
+    expect(first).toMatchObject({
+      events: [{ timestamp: "1999-01-01T00:00:00", clips: [{ timestamp: "2026-10-12_10-00-00" }] }],
+      nextPageToken: "2", nextPageDate: "2026-10-23",
+    });
+    const last = await (await request(`/api/events/page?type=SavedClips&pageToken=${first.nextPageToken}`)).json();
+    expect(last).toEqual({ type: "SavedClips", events: [], nextPageToken: null, nextPageDate: null });
+  });
+
+  it("leaves an ignored Saved page unknown without scanning ahead or treating it as exhaustion", async () => {
+    provider.add("SavedClips", true);
+    provider.add("SavedClips/metadata-z", true);
+    provider.add("SavedClips/metadata-y", true);
+    provider.add("SavedClips/2026-10-24_10-00-00", true);
+    await start();
+    const first = await (await request("/api/events/page?type=SavedClips")).json();
+    expect(first).toEqual({ type: "SavedClips", events: [], nextPageToken: "2", nextPageDate: null });
+    expect(provider.listsFor("SavedClips")).toHaveLength(1);
+    expect(provider.listsFor("SavedClips/2026-10-24_10-00-00")).toHaveLength(0);
+  });
+
+  it.each(["name asc", "modifiedTime desc", ""])("rejects nonchronological event ordering: %s", async (order) => {
+    vi.stubEnv("GDRIVE_EVENT_ORDER_BY", order);
+    await expect(start()).rejects.toThrow("GDRIVE_EVENT_ORDER_BY must be 'name desc'");
+    expect(serve).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newer pending date folder visible when the returned flat recording is older", async () => {
+    provider.add("RecentClips/2026-10-24", true);
+    provider.add("RecentClips/2026-09-01_10-00-00-front.mp4");
+    provider.add(`${LEGACY}/metadata`, true);
+    await start();
+    const first = await page();
+    expect(first.events.map((event: { id: string }) => event.id)).toEqual(["2026-09-01_10-00-00"]);
+    expect(first.nextPageDate).toBe("2026-10-24");
+    expect(first.nextPageToken).toBeTruthy();
+    expect(provider.listsFor("RecentClips/2026-10-24")).toHaveLength(0);
+    expect(provider.listsFor(`${LEGACY}/metadata`)).toHaveLength(0);
+  });
+
+  it("uses every later root's actual entry dates instead of migration labels", async () => {
+    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
+    provider.add(`${LEGACY}/metadata`, true);
+    provider.add(`${LEGACY}/2026-10-27`, true);
+    provider.add(`${LEGACY}/2026-09-30_10-00-00-front.mp4`);
+    const earlierRoot = "RecentClips-before-2026-09-01";
+    provider.add(earlierRoot, true);
+    provider.add(`${earlierRoot}/2026-10-30_10-00-00-front.mp4`);
+    await start();
+    const first = await page();
+    expect(first.nextPageDate).toBe("2026-10-30");
+    expect(provider.listsFor(`${LEGACY}/2026-10-27`)).toHaveLength(0);
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.listsFor(earlierRoot)).toHaveLength(1);
+    const query = provider.listsFor(LEGACY)[0].searchParams;
+    expect([query.get("pageSize"), query.get("limit"), query.get("orderBy")]).toEqual(["1000", "1000", "name desc"]);
+  });
+
+  it("propagates an unknown later root head even when the current pending date is known", async () => {
+    provider.add("RecentClips/2026-10-24", true);
+    provider.add("RecentClips/2026-09-01_10-00-00-front.mp4");
+    provider.add(`${LEGACY}/metadata-z`, true);
+    provider.add(`${LEGACY}/metadata-y`, true);
+    provider.add(`${LEGACY}/2026-10-30_10-00-00-front.mp4`);
+    await start();
+    const first = await page();
+    expect(first.nextPageToken).toBeTruthy();
+    expect(first.nextPageDate).toBeNull();
+    expect(provider.listsFor(LEGACY)).toHaveLength(1);
+    expect(provider.listsFor("RecentClips/2026-10-24")).toHaveLength(0);
+  });
+
+  it("bounds a continued current root page by raw names, then the remaining root head", async () => {
+    for (const day of ["26", "25", "24"]) provider.add(`RecentClips/2026-10-${day}_10-00-00-front.mp4`);
+    provider.add(`${LEGACY}/2026-10-23_10-00-00-front.mp4`);
+    await start();
+    const first = await page();
+    expect(first.nextPageDate).toBe("2026-10-25");
+    const second = await page(first.nextPageToken);
+    expect(second.nextPageDate).toBe("2026-10-23");
+    const last = await page(second.nextPageToken);
+    expect(last.nextPageToken).toBeNull();
+    expect(last.nextPageDate).toBeNull();
+  });
+
+  it("keeps empty continued Recent pages unknown and bounded", async () => {
+    provider.add("RecentClips/metadata-z", true);
+    provider.add("RecentClips/metadata-y", true);
+    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
+    await start();
+    const first = await page();
+    expect(first.events).toEqual([]);
+    expect(first.nextPageToken).toBeTruthy();
+    expect(first.nextPageDate).toBeNull();
+    expect(provider.listsFor("RecentClips")).toHaveLength(1);
+    expect(provider.listsFor("RecentClips/metadata-z")).toHaveLength(0);
+  });
+
+  it("retains the pending date through a 1000-file continuation without rereading date contents for hints", async () => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    for (let minute = 0; minute < 1001; minute++) {
+      const timestamp = new Date(Date.UTC(2026, 9, 24, 0, minute)).toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-");
+      provider.add(`${directory}/${timestamp}-front.mp4`);
+    }
+    provider.add(`${LEGACY}/2026-09-30_10-00-00-front.mp4`);
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
+        provider.requests.push(url);
+        const files = [...provider.children.get(folder.id)!].sort((a, b) => b.name.localeCompare(a.name));
+        const offset = Number(url.searchParams.get("pageToken") || "0");
+        return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset === 0 ? "1000" : undefined });
+      }
+      return provider.fetch(input);
+    });
+    await start();
+    const first = await page();
+    expect(first.nextPageDate).toBe("2026-10-24");
+    expect(provider.listsFor(directory)).toHaveLength(1);
+    const cursor = JSON.parse(Buffer.from(first.nextPageToken, "base64url").toString());
+    expect(cursor).toEqual({ root: provider.entries.get("RecentClips")!.id, date: { id: folder.id, pageToken: "1000" } });
+    const second = await page(first.nextPageToken);
+    expect(second.nextPageDate).toBe("2026-09-30");
+    expect(provider.listsFor(directory)).toHaveLength(2);
+    expect(second.events).toHaveLength(1);
+  });
+
+  it("surfaces a failed remaining-root metadata lookup without advancing the caller's cursor", async () => {
+    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
+    provider.add(`${LEGACY}/2026-10-21_10-00-00-front.mp4`);
+    const legacyId = provider.entries.get(LEGACY)!.id;
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === legacyId) return new Response("Provider unavailable", { status: 503 });
+      return provider.fetch(input);
+    });
+    await start();
+    const failure = await request("/api/events/page?type=RecentClips");
+    expect(failure.status).toBe(500);
+    expect(await failure.json()).toEqual({ error: `Failed to list Drive folder ${legacyId}: 503` });
+    vi.stubGlobal("fetch", provider.fetch.bind(provider));
+    const retried = await page();
+    expect(retried.nextPageDate).toBe("2026-10-21");
+    expect(retried.events.map((event: { id: string }) => event.id)).toEqual(["2026-10-24_10-00-00"]);
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
 });
 

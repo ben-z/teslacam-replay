@@ -6,7 +6,7 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 
 - **Multi-camera player** — Recordings open with a single active camera in Focus. Choose Grid for synchronized playback of all 6 cameras. Switching cameras preserves playback position and speed.
 - **Recording browser** — Browse Saved, Sentry, and Recent recordings or view loaded recordings on a timeline. Search loaded recordings by displayed date, time, city, or reason.
-- **Timeline view** — Color-coded timeline showing all recording sessions across days
+- **Timeline view** — A common loaded date range across Recent, Saved, and Sentry footage; loading older history prioritizes sources that have not reached the same archive day
 - **HLS streaming** — ffmpeg segments footage on demand so the browser loads video in chunks
 - **Driving data on demand** — Select Driving data or press T to show speed, GPS coordinates, and other data extracted from H.264 SEI metadata
 - **Zoomable seek bar** — Scroll to zoom, drag to pan, minimap for orientation
@@ -97,7 +97,7 @@ Tags available: `latest` and full commit SHA (e.g., `sha-a1b2c3d4e5f6...`).
 | `GDRIVE_READ_TIMEOUT_MS` | No | Timeout for larger file proxy reads used by thumbnails/telemetry (default: `300000`) |
 | `EVENT_PAGE_SIZE` | No | Number of Saved/Sentry event folders requested per browse page (default: `48`; the app requests `24`) |
 | `EVENT_PAGE_SCAN_CONCURRENCY` | No | Number of event folders scanned concurrently while building one page (default: `8`) |
-| `GDRIVE_EVENT_ORDER_BY` | No | Drive order for Saved/Sentry event folders (default: `name desc`) |
+| `GDRIVE_EVENT_ORDER_BY` | No | Must be `name desc` so archive-day paging can advance chronologically |
 | `PORT` | No | Server port (default: `3001`) |
 | `SERVE_FRONTEND` | No | Set to `true` to serve the frontend from `dist/` (default: `true` in Docker) |
 

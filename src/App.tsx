@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import {
   fetchEvent,
   fetchEventPage,
+  EVENT_PAGE_TYPES,
+  type EventPagePositions,
   type EventPageType,
 } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
@@ -55,20 +57,13 @@ function parseHash(): { type: string; id: string } | null {
 }
 
 const PAGE_LOAD_LIMIT = 24;
-const PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
-type PageTokens = Record<EventPageType, string | null>;
 type PageRequest = { type: EventPageType; pageToken: string | null };
 type PageLoadError = { message: string; pageToken: string | null };
-const EMPTY_PAGE_TOKENS: PageTokens = {
-  SavedClips: null,
-  SentryClips: null,
-  RecentClips: null,
-};
 
 export function App() {
   const [events, setEvents] = useState<DashcamEvent[]>([]);
-  const [pendingTypes, setPendingTypes] = useState<EventPageType[]>(PAGE_TYPES);
-  const [nextPageTokens, setNextPageTokens] = useState<PageTokens>(EMPTY_PAGE_TOKENS);
+  const [pendingTypes, setPendingTypes] = useState<EventPageType[]>(EVENT_PAGE_TYPES);
+  const [pagePositions, setPagePositions] = useState<EventPagePositions>({});
   const [pageErrors, setPageErrors] = useState<Partial<Record<EventPageType, PageLoadError>>>({});
   const [eventError, setEventError] = useState<string | null>(null);
   const routeRequest = useRef(0);
@@ -82,10 +77,10 @@ export function App() {
   const pushedHashRef = useRef(false);
   const browseFocusRef = useRef<HTMLElement | null>(null);
   const eventsRef = useRef(events);
-  const nextPageTokensRef = useRef(nextPageTokens);
+  const pagePositionsRef = useRef(pagePositions);
   const pendingPageTypesRef = useRef(new Set<EventPageType>());
   eventsRef.current = events;
-  nextPageTokensRef.current = nextPageTokens;
+  pagePositionsRef.current = pagePositions;
 
   useEffect(() => {
     if (view !== "browse") return;
@@ -148,11 +143,14 @@ export function App() {
           ? eventsRef.current.filter((event) => event.type !== type)
           : eventsRef.current;
         const merged = updatedRecordings.reduce(replaceEventSnapshot, mergeEvents(previous, result.events));
-        const nextTokens = { ...nextPageTokensRef.current, [type]: result.nextPageToken };
+        const nextPositions = {
+          ...pagePositionsRef.current,
+          [type]: { nextPageToken: result.nextPageToken, nextPageDate: result.nextPageDate },
+        };
         eventsRef.current = merged;
-        nextPageTokensRef.current = nextTokens;
+        pagePositionsRef.current = nextPositions;
         setEvents(merged);
-        setNextPageTokens(nextTokens);
+        setPagePositions(nextPositions);
       } catch (err) {
         setPageErrors((previous) => ({
           ...previous,
@@ -168,7 +166,7 @@ export function App() {
   useEffect(() => {
     if (view === "browse" && !browseRequested.current) {
       browseRequested.current = true;
-      void loadPages(PAGE_TYPES.map((type) => ({ type, pageToken: null })));
+      void loadPages(EVENT_PAGE_TYPES.map((type) => ({ type, pageToken: null })));
     }
   }, [view, loadPages]);
 
@@ -194,13 +192,16 @@ export function App() {
   const handleRefresh = async () => {
     if (pendingPageTypesRef.current.size > 0) return;
     setBrowseList([]);
-    await loadPages(PAGE_TYPES.map((type) => ({ type, pageToken: null })));
+    await loadPages(EVENT_PAGE_TYPES.map((type) => ({ type, pageToken: null })));
   };
 
   const handleLoadMore = useCallback((types: EventPageType[]) => {
-    const loadable = types.filter((type) => nextPageTokensRef.current[type] && !pageErrors[type]);
-    if (loadable.length === 0) return;
-    void loadPages(loadable.map((type) => ({ type, pageToken: nextPageTokensRef.current[type] })));
+    const pages: PageRequest[] = [];
+    for (const type of types) {
+      const token = pagePositionsRef.current[type]?.nextPageToken;
+      if (token && !pageErrors[type]) pages.push({ type, pageToken: token });
+    }
+    void loadPages(pages);
   }, [loadPages, pageErrors]);
 
   const handleRetry = (type: EventPageType) => {
@@ -269,12 +270,6 @@ export function App() {
     [navList, selectedIdx, loadRoute]
   );
 
-  const hasMorePages = useMemo(() => ({
-    SavedClips: Boolean(nextPageTokens.SavedClips),
-    SentryClips: Boolean(nextPageTokens.SentryClips),
-    RecentClips: Boolean(nextPageTokens.RecentClips),
-  }), [nextPageTokens]);
-
   return (
     <ErrorBoundary>
       <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -287,7 +282,7 @@ export function App() {
             onRefresh={handleRefresh}
             onRetry={handleRetry}
             onLoadMore={handleLoadMore}
-            hasMore={hasMorePages}
+            pagePositions={pagePositions}
           />
         </div>
         {view === "player" && (selectedEvent ? (

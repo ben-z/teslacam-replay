@@ -74,7 +74,7 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 tesl
 - **Drive access**: `gdrive-lite.ts` talks to `gdrive-serve-lite`; file IDs and direct read URLs are retained while building pages so playback does not re-resolve paths
 - **Event index**: In-memory index of pages/events touched by the current server process; gdrive-serve-lite owns listing and pagination
 - **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching below the configured `CACHE_DIR`
-- **Page-first browsing**: `/api/events/page` scans only the requested Drive page, then the player routes use the in-memory event index or single-folder resolution
+- **Page-first browsing**: `/api/events/page` scans a bounded Drive page and returns its cursor plus `nextPageDate`, the newest archive-entry day that may remain. Recent paging also reads bounded listing heads of later roots; migration folder names do not prove their capture dates. Timeline uses a common loaded-day window and prioritizes unfinished sources at that day. Player routes use the in-memory event index or single-folder resolution.
 
 ### Multi-Camera Sync
 - 6 cameras: front, back, left_repeater, right_repeater, left_pillar, right_pillar
@@ -93,7 +93,7 @@ Start `gdrive-serve-lite` separately, then copy `.env.example` to `.env` and con
 - `GDRIVE_LIST_TIMEOUT_MS`, `GDRIVE_METADATA_TIMEOUT_MS`, `GDRIVE_READ_TIMEOUT_MS`: Optional request timeout knobs for large/slow Drive roots
 - `EVENT_PAGE_SIZE`: Event folders requested per page (default 48)
 - `EVENT_PAGE_SCAN_CONCURRENCY`: Event-folder scans per page (default 8)
-- `GDRIVE_EVENT_ORDER_BY`: Saved/Sentry folder ordering (default `name desc`)
+- `GDRIVE_EVENT_ORDER_BY`: Saved/Sentry folder ordering; must be `name desc` for archive-day paging
 - `PORT`: Server port (default 3001)
 
 ### Testing Patterns
