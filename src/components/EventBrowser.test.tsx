@@ -14,6 +14,7 @@ function positions(hasMore: Record<EventPageType, boolean>): EventPagePositions 
 
 function render(events: DashcamEvent[], overrides: Partial<ComponentProps<typeof EventBrowser>> = {}) {
   return renderToStaticMarkup(<EventBrowser
+    active={true}
     events={events}
     pendingTypes={[]}
     errorsByType={{}}

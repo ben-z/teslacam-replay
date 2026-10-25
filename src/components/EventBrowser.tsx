@@ -9,10 +9,11 @@ import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
 import { recordingWallTimeMs } from "../playback";
-import { timelinePaging } from "../timelinePaging";
+import { earlierTimelineDate, timelinePaging, TIMELINE_WINDOW_DAYS } from "../timelinePaging";
 import "./EventBrowser.css";
 
 interface Props {
+  active: boolean;
   events: DashcamEvent[];
   pendingTypes: EventPageType[];
   errorsByType: Partial<Record<EventPageType, string>>;
@@ -67,6 +68,7 @@ function dateKey(ts: string): string {
 }
 
 export function EventBrowser({
+  active,
   events,
   pendingTypes,
   errorsByType,
@@ -81,6 +83,7 @@ export function EventBrowser({
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [timelineFromDate, setTimelineFromDate] = useState<string>();
   const pending = pendingTypes.length > 0;
   const failedTypes = SOURCE_TYPES.filter((type) => errorsByType[type] !== undefined);
 
@@ -132,7 +135,8 @@ export function EventBrowser({
 
   const visible = filtered.slice(0, visibleCount);
   const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
-  const timelinePage = useMemo(() => timelinePaging(events, pagePositions), [events, pagePositions]);
+  const timelinePage = useMemo(() => timelinePaging(events, pagePositions, timelineFromDate),
+    [events, pagePositions, timelineFromDate]);
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
     if (view === "timeline" || filter === "all") return SOURCE_TYPES;
     return [filter];
@@ -144,13 +148,23 @@ export function EventBrowser({
   const remoteTypesToLoad = (view === "timeline" ? timelinePage.loadTypes : knownRemoteTypes)
     .filter((type) => !pendingTypes.includes(type) && errorsByType[type] === undefined);
   const scopeIncomplete = pageTypesToLoad.some((type) => pendingTypes.includes(type) || errorsByType[type] !== undefined);
-  const hasMoreRemote = view === "timeline" ? timelinePage.incomplete : knownRemoteTypes.length > 0;
+  const hasMoreRemote = view === "timeline" ? timelinePage.hasOlder : knownRemoteTypes.length > 0;
   const canLoadRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
   const timelineFailedTypes = failedTypes.filter((type) =>
-    !pagePositions[type] || timelinePage.loadTypes.includes(type));
-  const timelinePending = timelinePage.loadTypes.some((type) => pendingTypes.includes(type));
+    !pagePositions[type] || timelinePage.loadTypes.includes(type) || timelinePage.manualTypes.includes(type));
+  const timelinePending = [...timelinePage.loadTypes, ...timelinePage.manualTypes].some((type) => pendingTypes.includes(type));
+  const initialPagesReady = SOURCE_TYPES.every((type) => pagePositions[type] || errorsByType[type] !== undefined);
+  useEffect(() => {
+    if (!active || view !== "timeline" || !initialPagesReady || !timelinePage.requestedFromDate
+      || !timelinePage.rangeIncomplete) return;
+    const failed = SOURCE_TYPES.some((type) => errorsByType[type] !== undefined
+      && (!pagePositions[type] || timelinePage.loadTypes.includes(type) || timelinePage.manualTypes.includes(type)));
+    if (failed) return;
+    const next = timelinePage.loadTypes.filter((type) => !pendingTypes.includes(type));
+    if (next.length > 0) onLoadMore(next);
+  }, [active, view, initialPagesReady, timelinePage, pendingTypes, errorsByType, pagePositions, onLoadMore]);
   const scopeSummary = search.trim()
     ? `${filtered.length} matches in ${loadedEvents.length} loaded recordings`
     : `${filtered.length} recordings loaded`;
@@ -166,30 +180,54 @@ export function EventBrowser({
     }
   }, [hasMoreLoaded, canLoadRemote, onLoadMore, remoteTypesToLoad]);
 
+  let timelineLoadLabel = "Load older recordings";
+  let timelineActionPending = !canLoadRemote;
+  if (timelinePage.requestedFromDate) {
+    timelineLoadLabel = timelinePage.rangeIncomplete ? "Loading timeline…" : `Earlier ${TIMELINE_WINDOW_DAYS} days`;
+    timelineActionPending = timelinePage.rangeIncomplete;
+  } else if (timelinePending && !canLoadRemote) {
+    timelineLoadLabel = "Loading older recordings…";
+  }
+  if (timelinePage.manualTypes.length > 0) {
+    const labels = timelinePage.manualTypes.map((type) => BADGE_STYLES[type].label).join(", ");
+    timelineActionPending = timelinePage.manualTypes.every((type) => pendingTypes.includes(type));
+    timelineLoadLabel = timelineActionPending
+      ? `Checking older ${labels} recordings…`
+      : `Check older ${labels} recordings`;
+  }
+  if (timelineFailedTypes.length > 0) {
+    timelineLoadLabel = `Retry ${timelineFailedTypes.map((type) => BADGE_STYLES[type].label).join(", ")}`;
+    timelineActionPending = timelineFailedTypes.every((type) => pendingTypes.includes(type));
+  }
+  let timelineRangeStatus = "Archive loaded for this range.";
+  if (timelineFailedTypes.length > 0) timelineRangeStatus = "Archive loading paused. Retry the failed source to continue.";
+  else if (timelinePage.manualTypes.length > 0) timelineRangeStatus = "Check older recordings below to establish this range.";
+  else if (timelinePage.rangeIncomplete) timelineRangeStatus = "Loading archive for this range…";
+
   const timelineFooter = hasMoreRemote ? (
     <div className="browse-load-more">
-      {timelineFailedTypes.map((type) => (
-        <button
-          type="button"
-          className="browse-load-more-hint"
-          aria-describedby={`browse-error-${type}`}
-          disabled={pendingTypes.includes(type)}
-          onClick={() => onRetry(type)}
-          key={type}
-        >
-          Retry {BADGE_STYLES[type].label}
-        </button>
-      ))}
-      {(timelineFailedTypes.length === 0 || canLoadRemote) && (
-        <button
-          type="button"
-          className="browse-load-more-hint"
-          disabled={!canLoadRemote}
-          onClick={handleLoadMore}
-        >
-          {timelinePending && !canLoadRemote ? "Loading older recordings…" : "Load older recordings"}
-        </button>
-      )}
+      <button
+        type="button"
+        className="browse-load-more-hint"
+        aria-describedby={timelineFailedTypes.length > 0
+          ? timelineFailedTypes.map((type) => `browse-error-${type}`).join(" ")
+          : undefined}
+        aria-disabled={timelineActionPending || undefined}
+        onClick={() => {
+          if (timelineActionPending) return;
+          if (timelineFailedTypes.length > 0) {
+            for (const type of timelineFailedTypes) {
+              if (!pendingTypes.includes(type)) onRetry(type);
+            }
+          } else if (timelinePage.manualTypes.length > 0) {
+            onLoadMore(timelinePage.manualTypes.filter((type) => !pendingTypes.includes(type)));
+          } else if (timelinePage.requestedFromDate) {
+            setTimelineFromDate(earlierTimelineDate(timelinePage.requestedFromDate, TIMELINE_WINDOW_DAYS));
+          } else handleLoadMore();
+        }}
+      >
+        {timelineLoadLabel}
+      </button>
     </div>
   ) : null;
 
@@ -303,12 +341,14 @@ export function EventBrowser({
           <>
             <div className="recent-scan-status" aria-live="polite">
               <span>
-                {timelinePage.fromDate
-                  ? <>Showing loaded recordings from {timelinePage.fromDate} onward.</>
-                  : timelinePage.incomplete || scopeIncomplete
+                {timelinePage.requestedFromDate && timelinePage.newestDate
+                  ? <>Timeline range: {timelinePage.requestedFromDate}–{timelinePage.newestDate}.
+                    {" "}{timelineRangeStatus}
+                    {timelinePage.rangeIncomplete && timelinePage.fromDate
+                      && ` Showing loaded recordings from ${timelinePage.fromDate} onward.`}</>
+                  : timelinePage.rangeIncomplete || scopeIncomplete
                     ? "The common time range is not available yet."
                     : "No older recordings."}
-                {timelinePage.incomplete && timelinePage.fromDate && " More recordings in this range may remain."}
               </span>
             </div>
             {!scopeIncomplete || events.some((event) => event.clips.length > 0) ? (

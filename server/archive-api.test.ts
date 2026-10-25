@@ -592,12 +592,14 @@ describe("remaining archive calendar dates", () => {
     expect((await page(first.nextPageToken)).nextPageToken).toBeNull();
   });
 
-  it("finishes a day with more than 1000 files in one user-visible page", async () => {
+  it("finishes a dense day with 8064 camera files in one user-visible page", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
-    for (let minute = 0; minute < 1001; minute++) {
+    for (let minute = 0; minute < 1344; minute++) {
       const timestamp = new Date(Date.UTC(2026, 9, 24, 0, minute)).toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-");
-      provider.add(`${directory}/${timestamp}-front.mp4`);
+      for (const camera of ["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"]) {
+        provider.add(`${directory}/${timestamp}-${camera}.mp4`);
+      }
     }
     provider.add("RecentClips/2026-10-23", true);
     vi.stubGlobal("fetch", async (input: string | URL | Request) => {
@@ -606,22 +608,42 @@ describe("remaining archive calendar dates", () => {
         provider.requests.push(url);
         const files = provider.children.get(folder.id)!;
         const offset = Number(url.searchParams.get("pageToken") || "0");
-        return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset === 0 ? "1000" : undefined });
+        return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset + 1000 < files.length ? String(offset + 1000) : undefined });
       }
       return provider.fetch(input);
     });
     await start();
     const first = await page();
     expect(first.events).toHaveLength(1);
-    expect(first.events[0].clips).toHaveLength(1001);
+    expect(first.events[0].clips).toHaveLength(1344);
     expect(first.nextPageDate).toBe("2026-10-24");
     expect(first.nextPageToken).toBe("2026-10-23");
     const requests = provider.listsFor(directory);
-    expect(requests).toHaveLength(2);
-    expect(requests.map((url) => url.searchParams.get("pageToken"))).toEqual([null, "1000"]);
+    expect(requests).toHaveLength(9);
+    expect(first.events[0].clips.every((clip: { cameras: string[] }) => clip.cameras.length === 6)).toBe(true);
+    expect(requests.map((url) => url.searchParams.get("pageToken"))).toEqual([null, ...Array.from({ length: 8 }, (_, index) => String((index + 1) * 1000))]);
     expect(requests.every((url) => url.searchParams.get("limit") === "1000")).toBe(true);
     expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
     expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+  });
+
+  it("rejects repeated provider tokens before publishing a dated page", async () => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    const file = provider.add(`${directory}/2026-10-24_12-00-00-front.mp4`);
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
+        provider.requests.push(url);
+        return Response.json({ folderId: folder.id, files: [file], nextPageToken: "private-repeated-token" });
+      }
+      return provider.fetch(input);
+    });
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Repeated Drive folder page token" });
+    expect(provider.listsFor(directory)).toHaveLength(2);
   });
 
   it("returns an error after an incomplete day fails, then retries the same date without losing files", async () => {
@@ -637,6 +659,10 @@ describe("remaining archive calendar dates", () => {
     const failure = await request("/api/events/page?type=RecentClips");
     expect(failure.status).toBe(500);
     expect((await failure.json()).error).toContain("503");
+    provider.resolveFailures.set(directory, 503);
+    // A partially indexed day would bypass this failing folder lookup.
+    expect((await request("/api/events/RecentClips/2026-10-24_00-00-00")).status).toBe(500);
+    provider.resolveFailures.delete(directory);
     vi.stubGlobal("fetch", provider.fetch.bind(provider));
     const retried = await page();
     expect(retried.events).toHaveLength(3);

@@ -39,6 +39,9 @@ export async function fetchEventPage(
   if (page.nextPageToken === null && page.nextPageDate !== null) {
     throw new Error("An exhausted recording source cannot have an older-page date.");
   }
+  if (pageToken !== null && page.nextPageToken === pageToken) {
+    throw new Error("The recording page did not advance. Refresh recordings to continue.");
+  }
   return page;
 }
 

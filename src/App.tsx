@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Component, lazy, Suspense } from "react";
 import type { ReactNode } from "react";
 import {
   fetchEvent,
@@ -8,9 +8,11 @@ import {
   type EventPageType,
 } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
-import { Player } from "./components/Player";
 import type { DashcamEvent, ViewMode } from "./types";
 import { mergeEvents, replaceEventSnapshot } from "./events";
+
+const loadPlayer = () => import("./components/Player");
+const Player = lazy(async () => ({ default: (await loadPlayer()).Player }));
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -100,7 +102,7 @@ export function App() {
     setSelectedEvent(null);
     setEventError(null);
     try {
-      const found = await fetchEvent(route.type, route.id, refresh);
+      const [found] = await Promise.all([fetchEvent(route.type, route.id, refresh), loadPlayer()]);
       if (request !== routeRequest.current) return;
       const merged = refresh
         ? replaceEventSnapshot(eventsRef.current, found)
@@ -275,6 +277,7 @@ export function App() {
       <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <div hidden={view !== "browse"} style={{ height: "100%" }}>
           <EventBrowser
+            active={view === "browse"}
             events={events}
             pendingTypes={pendingTypes}
             errorsByType={Object.fromEntries(Object.entries(pageErrors).map(([type, error]) => [type, error.message]))}
@@ -287,14 +290,16 @@ export function App() {
         </div>
         {view === "player" && (selectedEvent ? (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            <Player
-              event={selectedEvent}
-              onBack={handleBack}
-              onRefresh={() => { void loadRoute(selectedEvent, true); }}
-              onNavigate={handleNavigate}
-              hasPrev={selectedIdx > 0}
-              hasNext={selectedIdx < navList.length - 1}
-            />
+            <Suspense fallback={<div className="event-loading" role="status">Loading player…</div>}>
+              <Player
+                event={selectedEvent}
+                onBack={handleBack}
+                onRefresh={() => { void loadRoute(selectedEvent, true); }}
+                onNavigate={handleNavigate}
+                hasPrev={selectedIdx > 0}
+                hasNext={selectedIdx < navList.length - 1}
+              />
+            </Suspense>
           </div>
         ) : (
           <div className="event-loading" role="status">
