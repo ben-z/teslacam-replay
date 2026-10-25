@@ -263,6 +263,38 @@ describe("RecentClips archive API", () => {
     }
   });
 
+  it.each(["0", "-1", "invalid", undefined])("rejects invalid video size %s before playback", async (size) => {
+    const day = "2026-10-20";
+    const segment = `${day}_12-00-00`;
+    provider.add(`RecentClips/${day}`, true);
+    const file = provider.add(`RecentClips/${day}/${segment}-front.mp4`);
+    file.size = size;
+    await start();
+    const listing = await request("/api/events/page?type=RecentClips");
+    expect(listing.status).toBe(500);
+    expect(await listing.json()).toMatchObject({ error: expect.stringContaining("no valid video size") });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const playback = await request(hls(segment, "front"));
+      expect(playback.status).toBe(500);
+      expect(await playback.text()).toBe("Internal Server Error");
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("no valid video size") }));
+    } finally {
+      log.mockRestore();
+    }
+    expect(ensureHlsSegments).not.toHaveBeenCalled();
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+  });
+
+  it("rejects unsupported camera files rather than counting footage the player cannot show", async () => {
+    provider.add("RecentClips/2026-10-20", true);
+    provider.add("RecentClips/2026-10-20/2026-10-20_12-00-00-cabin.mp4");
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining("Unsupported RecentClips camera") });
+  });
+
   it("rejects flat files instead of silently hiding footage uploaded in an unsupported layout", async () => {
     provider.add("RecentClips/2026-10-02_12-00-00-front.mp4");
     await start();

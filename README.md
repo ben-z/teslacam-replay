@@ -130,7 +130,8 @@ Recent footage lives in `RecentClips/YYYY-MM-DD/`, using each video filename's
 recording date. Each Recent page loads one complete day of file metadata; Drive
 pagination is handled internally. Videos are downloaded only for playback. The
 root-level `metadata` folder is excluded from recording discovery. Flat files,
-duplicate date folders, and videos in the wrong day fail with an explicit error.
+duplicate date folders, videos in the wrong day, unsupported cameras and invalid
+video sizes fail with an explicit error.
 Historical `RecentClips-before-YYYY-MM-DD` folders are not recording sources.
 Migrate their videos into the dated layout before deploying this reader.
 

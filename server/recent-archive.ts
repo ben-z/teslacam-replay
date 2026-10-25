@@ -7,9 +7,10 @@ import {
 } from "./gdrive-lite.js";
 import { scanRecentClips, type DashcamEvent } from "./scan.js";
 import { recordingWallTimeMs } from "../src/playback.js";
+import { ALL_CAMERAS } from "../src/types.js";
 
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const CLIP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-.+\.mp4$/;
+const CLIP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$/;
 
 export class RecentArchive {
   constructor(private readonly drive: GDriveLiteClient) {}
@@ -59,20 +60,32 @@ export class RecentArchive {
 
   async findClipSource(segment: string, camera: string): Promise<DriveFileSource | null> {
     const file = await this.findPath(`/RecentClips/${segment.slice(0, 10)}/${segment}-${camera}.mp4`, "file");
-    return file ? this.drive.fileSource(file) : null;
+    if (!file) return null;
+    this.validateFile(file, segment.slice(0, 10));
+    return this.drive.fileSource(file);
   }
 
   private async readDay(date: DriveEntry): Promise<DashcamEvent[]> {
     const files = (await this.drive.listFolder(this.drive.folderRef(date))).files;
-    for (const file of files) {
-      const match = file.name.match(CLIP_FILE_PATTERN);
-      if (this.drive.isFolder(file) || !match) throw new Error(`Unsupported RecentClips file: ${date.name}/${file.name}`);
-      recordingWallTimeMs(match[1]);
-      if (match[1].slice(0, 10) !== date.name) {
-        throw new Error(`RecentClips file is in the wrong date folder: ${date.name}/${file.name}`);
-      }
-    }
+    for (const file of files) this.validateFile(file, date.name);
     return scanRecentClips(this.drive, files);
+  }
+
+  private validateFile(file: DriveEntry, date: string): void {
+    const match = file.name.match(CLIP_FILE_PATTERN);
+    if (this.drive.isFolder(file) || !match) {
+      throw new Error(`Unsupported RecentClips file: ${date}/${file.name}`);
+    }
+    recordingWallTimeMs(match[1]);
+    if (match[1].slice(0, 10) !== date) {
+      throw new Error(`RecentClips file is in the wrong date folder: ${date}/${file.name}`);
+    }
+    if (!ALL_CAMERAS.some((camera) => camera === match[2])) {
+      throw new Error(`Unsupported RecentClips camera: ${date}/${file.name}`);
+    }
+    if (!file.size || !/^[1-9]\d*$/.test(file.size)) {
+      throw new Error(`RecentClips recording has no valid video size: ${date}/${file.name}`);
+    }
   }
 
   private async findPath(path: string, type: "folder" | "file"): Promise<DriveEntry | null> {
