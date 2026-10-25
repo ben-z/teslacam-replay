@@ -21,6 +21,7 @@ import { createGDriveLiteFromEnv, DriveNotFoundError, type DriveEntry, type Driv
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 import { RecentArchive } from "./recent-archive.js";
 import { mergeRecentFragments } from "../src/events.js";
+import { archiveDateBounds } from "./archive-date-bounds.js";
 import type { DashcamEvent as PublicDashcamEvent } from "../src/types.js";
 
 const appOrigin = process.env.APP_ORIGIN;
@@ -128,6 +129,9 @@ app.use("*", compress());
 const EVENT_PAGE_SIZE = positiveInt(process.env.EVENT_PAGE_SIZE, 48);
 const EVENT_PAGE_SCAN_CONCURRENCY = positiveInt(process.env.EVENT_PAGE_SCAN_CONCURRENCY, 8);
 const EVENT_FOLDER_ORDER_BY = process.env.GDRIVE_EVENT_ORDER_BY ?? "name desc";
+if (EVENT_FOLDER_ORDER_BY !== "name desc") {
+  throw new Error("GDRIVE_EVENT_ORDER_BY must be 'name desc' for chronological archive paging");
+}
 const EVENT_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
 
 const eventIndex = new Map<string, DashcamEvent>();
@@ -265,7 +269,7 @@ async function getEventPage(
   type: EventType,
   pageToken: string | undefined,
   limit: number
-): Promise<{ events: DashcamEvent[]; nextPageToken?: string }> {
+): Promise<{ events: DashcamEvent[]; nextPageToken?: string; nextPageDate: string | null }> {
   if (type === "RecentClips") {
     const page = await recentArchive.page(pageToken);
     return { ...page, events: rememberEvents(page.events, "page") };
@@ -277,7 +281,7 @@ async function getEventPage(
     pageToken,
     pageSize: Math.min(1000, limit),
     limit: Math.min(1000, limit),
-    orderBy: EVENT_FOLDER_ORDER_BY || undefined,
+    orderBy: EVENT_FOLDER_ORDER_BY,
   });
   const folders = page.files.filter((entry) =>
     drive.isFolder(entry) && EVENT_FOLDER_PATTERN.test(entry.name)
@@ -291,7 +295,11 @@ async function getEventPage(
     .filter((event): event is DashcamEvent => Boolean(event))
     .sort((a, b) => b.id.localeCompare(a.id));
   rememberEvents(events, "snapshot");
-  return { events, nextPageToken: page.nextPageToken };
+  return {
+    events,
+    nextPageToken: page.nextPageToken,
+    nextPageDate: page.nextPageToken ? archiveDateBounds(folders.map((entry) => entry.name)).oldest : null,
+  };
 }
 
 async function findEvent(type: string, id: string): Promise<DashcamEvent | null> {
@@ -372,6 +380,7 @@ app.get("/api/events/page", async (c) => {
       type,
       events: publicEvents(page.events),
       nextPageToken: page.nextPageToken ?? null,
+      nextPageDate: page.nextPageDate,
     });
   } catch (err) {
     if (err instanceof HTTPException) throw err;

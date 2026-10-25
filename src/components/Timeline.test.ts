@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { Timeline } from "./Timeline";
+import { buildTimeline, Timeline } from "./Timeline";
 import type { DashcamEvent, EventClip } from "../types";
 
 function event(clips: EventClip[]): DashcamEvent {
@@ -74,5 +74,115 @@ describe("recording timeline", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("shows the part of a midnight-crossing clip inside the requested date range", () => {
+    const crossing = event([clip("2026-10-23_23-59-30", 60)]);
+    const endingAtMidnight = {
+      ...event([clip("2026-10-23_23-59-00", 60)]),
+      id: "2026-10-23_23-59-00",
+    };
+    const result = buildTimeline([endingAtMidnight, crossing], "2026-10-24");
+
+    expect(result.days.map((day) => day.dateStr)).toEqual(["2026-10-24"]);
+    expect(result.days[0].sessions).toHaveLength(1);
+    expect(result.days[0].sessions[0].ranges[0].startHour).toBe(0);
+    expect(result.days[0].sessions[0].ranges[0].endHour).toBeCloseTo(30 / 3600);
+    expect(result.sessionList).toEqual([crossing]);
+    const html = render([endingAtMidnight, crossing], { fromDate: "2026-10-24" });
+    expect(html).toContain("1 recording on 2026-10-24");
+    expect(html).not.toContain("recording on 2026-10-23");
+  });
+
+  it("retains complete original recordings for selection and excludes hidden neighbors", () => {
+    const shown = event([
+      clip("2026-10-23_23-59-00", 60),
+      clip("2026-10-24_00-00-00", 60),
+    ]);
+    const hidden = {
+      ...event([clip("2026-10-22_12-00-00", 60)]),
+      id: "2026-10-22_12-00-00",
+    };
+    const recordings = [hidden, shown];
+    const before = structuredClone(recordings);
+    for (const recording of recordings) {
+      for (const entry of recording.clips) {
+        Object.freeze(entry.cameras);
+        Object.freeze(entry);
+      }
+      Object.freeze(recording.clips);
+      Object.freeze(recording);
+    }
+    Object.freeze(recordings);
+
+    const result = buildTimeline(recordings, "2026-10-24");
+    expect(result.sessionList).toHaveLength(1);
+    expect(result.sessionList[0]).toBe(shown);
+    expect(result.days[0].sessions[0].event).toBe(shown);
+    expect(result.days[0].sessions[0].event.clips).toHaveLength(2);
+    expect(recordings).toEqual(before);
+  });
+
+  it("uses clip dates rather than recording metadata to decide what is visible", () => {
+    const visible = {
+      ...event([clip("2026-10-24_12-00-00", 60)]),
+      id: "2026-10-24_12-00-00",
+      timestamp: "2020-01-01T00:00:00",
+    };
+    const hidden = {
+      ...event([clip("2026-10-22_12-00-00", 60)]),
+      id: "2026-10-22_12-00-00",
+      timestamp: "2030-01-01T00:00:00",
+    };
+    const result = buildTimeline([hidden, visible], "2026-10-24");
+    expect(result.sessionList).toEqual([visible]);
+    expect(result.days.map((day) => day.dateStr)).toEqual(["2026-10-24"]);
+  });
+
+  it("counts a recording once across visible days without counting hidden or video-free entries", () => {
+    const spanning = event([clip("2026-10-22_23-00-00", 26 * 3600)]);
+    const hidden = {
+      ...event([clip("2026-10-21_12-00-00", 60)]),
+      id: "2026-10-21_12-00-00",
+    };
+    const noVideo = { ...event([]), id: "2026-10-24_13-00-00" };
+    const result = buildTimeline([spanning, hidden, noVideo], "2026-10-23");
+    expect(result.days.map((day) => day.dateStr)).toEqual(["2026-10-24", "2026-10-23"]);
+    expect(result.days[1].sessions[0].ranges).toEqual([{ startHour: 0, endHour: 24 }]);
+    expect(result.days[0].sessions[0].ranges).toEqual([{ startHour: 0, endHour: 1 }]);
+    expect(result.sessionList).toEqual([spanning]);
+    const html = render([spanning, hidden, noVideo], { fromDate: "2026-10-23" });
+    expect(html).toContain("<strong>1</strong> recording shown");
+    expect(html).toContain("Video on <strong>2</strong> days");
+  });
+
+  it("keeps paging available when loaded footage falls before the date range", () => {
+    const html = render([event([clip("2026-10-21_12-00-00", 60)])], {
+      fromDate: "2026-10-24",
+      footer: createElement("button", null, "Load earlier recordings"),
+    });
+    expect(html).toContain("No loaded video in this date range");
+    expect(html).toContain("<button>Load earlier recordings</button>");
+    expect(html).not.toContain("No recorded video in the loaded pages");
+  });
+
+  it("keeps recording types with the same timestamp distinct in the visible navigation list", () => {
+    const saved = { ...event([clip("2026-10-24_12-00-00", 60)]), type: "SavedClips" as const };
+    const sentry = { ...saved, type: "SentryClips" as const };
+    const result = buildTimeline([saved, sentry], "2026-10-24");
+    expect(new Set(result.sessionList)).toEqual(new Set([saved, sentry]));
+    expect(result.sessionList[0]).toBe(saved);
+    expect(result.sessionList[1]).toBe(sentry);
+    expect(render([saved, sentry], { fromDate: "2026-10-24" })).toContain("<strong>2</strong> recordings shown");
+  });
+
+  it("keeps all clip ranges when no date guard is requested", () => {
+    const recordings = [event([clip("2026-10-21_23-59-30", 60)])];
+    expect(render(recordings)).toBe(render(recordings, { fromDate: "2026-10-21" }));
+    expect(buildTimeline(recordings).days.map((day) => day.dateStr)).toEqual(["2026-10-22", "2026-10-21"]);
+  });
+
+  it.each(["2026-2-01", "2026-02-30", "2026-10-24T00:00:00", "not-a-date"])("rejects invalid date guard %s", (fromDate) => {
+    expect(() => buildTimeline([], fromDate)).toThrow(/Invalid/);
   });
 });

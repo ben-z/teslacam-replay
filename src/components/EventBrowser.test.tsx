@@ -3,13 +3,21 @@ import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 import type { DashcamEvent } from "../types";
 import { EventBrowser } from "./EventBrowser";
+import { EVENT_PAGE_TYPES, type EventPagePositions, type EventPageType } from "../api";
+
+function positions(hasMore: Record<EventPageType, boolean>): EventPagePositions {
+  return Object.fromEntries(EVENT_PAGE_TYPES.map((type) => [type, {
+    nextPageToken: hasMore[type] ? `older-${type}` : null,
+    nextPageDate: hasMore[type] ? "2026-10-22" : null,
+  }]));
+}
 
 function render(events: DashcamEvent[], overrides: Partial<ComponentProps<typeof EventBrowser>> = {}) {
   return renderToStaticMarkup(<EventBrowser
     events={events}
     pendingTypes={[]}
     errorsByType={{}}
-    hasMore={{ SavedClips: false, SentryClips: false, RecentClips: false }}
+    pagePositions={positions({ SavedClips: false, SentryClips: false, RecentClips: false })}
     onSelectEvent={() => {}}
     onRefresh={() => {}}
     onRetry={() => {}}
@@ -107,7 +115,7 @@ describe("recording list archive scope", () => {
   it("allows an idle continuation while another source is pending", () => {
     const markup = render([recording("SavedClips")], {
       pendingTypes: ["SentryClips"],
-      hasMore: { SavedClips: true, SentryClips: true, RecentClips: false },
+      pagePositions: positions({ SavedClips: true, SentryClips: true, RecentClips: false }),
     });
     expect(markup).toContain("Loading Sentry recordings…");
     expect(markup).toContain('class="browse-load-more-hint">Load more recordings</button>');
@@ -118,7 +126,7 @@ describe("recording list archive scope", () => {
   it("keeps a pending continuation visible without reporting exhaustion", () => {
     const markup = render([recording("SavedClips")], {
       pendingTypes: ["SavedClips"],
-      hasMore: { SavedClips: true, SentryClips: false, RecentClips: false },
+      pagePositions: positions({ SavedClips: true, SentryClips: false, RecentClips: false }),
     });
     expect(markup).toContain('class="browse-load-more-hint" disabled="">Load more recordings</button>');
     expect(markup).toContain("Older recordings are available");
@@ -152,7 +160,7 @@ describe("recording list archive scope", () => {
   it("keeps failed continuation pages behind their explicit Retry action", () => {
     const markup = render([recording("RecentClips")], {
       errorsByType: { RecentClips: "Older page failed." },
-      hasMore: { SavedClips: false, SentryClips: false, RecentClips: true },
+      pagePositions: positions({ SavedClips: false, SentryClips: false, RecentClips: true }),
     });
     expect(markup).toContain(">Retry Recent</button>");
     expect(markup).not.toContain("Load more recordings");

@@ -1,19 +1,22 @@
 import { Fragment, memo, useState, useMemo, useCallback, useEffect } from "react";
 import {
   thumbnailUrl,
+  EVENT_PAGE_TYPES,
+  type EventPagePositions,
   type EventPageType,
 } from "../api";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
 import { recordingWallTimeMs } from "../playback";
+import { timelinePaging } from "../timelinePaging";
 import "./EventBrowser.css";
 
 interface Props {
   events: DashcamEvent[];
   pendingTypes: EventPageType[];
   errorsByType: Partial<Record<EventPageType, string>>;
-  hasMore: Record<EventPageType, boolean>;
+  pagePositions: EventPagePositions;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
   onRefresh: () => void;
   onRetry: (type: EventPageType) => void;
@@ -24,7 +27,7 @@ type FilterType = "all" | EventPageType;
 type ViewType = "events" | "timeline";
 
 const PAGE_SIZE = 48;
-const SOURCE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
+const SOURCE_TYPES = EVENT_PAGE_TYPES;
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   weekday: "short",
   month: "short",
@@ -67,7 +70,7 @@ export function EventBrowser({
   events,
   pendingTypes,
   errorsByType,
-  hasMore: hasMorePages,
+  pagePositions,
   onSelectEvent,
   onRefresh,
   onRetry,
@@ -129,21 +132,22 @@ export function EventBrowser({
 
   const visible = filtered.slice(0, visibleCount);
   const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
+  const timelinePage = useMemo(() => timelinePaging(events, pagePositions), [events, pagePositions]);
   const pageTypesToLoad = useMemo<EventPageType[]>(() => {
     if (view === "timeline" || filter === "all") return SOURCE_TYPES;
     return [filter];
   }, [filter, view]);
   const knownRemoteTypes = useMemo(
-    () => pageTypesToLoad.filter((type) => hasMorePages[type] && errorsByType[type] === undefined),
-    [hasMorePages, pageTypesToLoad, errorsByType]
+    () => pageTypesToLoad.filter((type) => pagePositions[type]?.nextPageToken && errorsByType[type] === undefined),
+    [pagePositions, pageTypesToLoad, errorsByType]
   );
-  const remoteTypesToLoad = knownRemoteTypes.filter((type) => !pendingTypes.includes(type));
+  const remoteTypesToLoad = (view === "timeline" ? timelinePage.loadTypes : knownRemoteTypes)
+    .filter((type) => !pendingTypes.includes(type) && errorsByType[type] === undefined);
   const scopeIncomplete = pageTypesToLoad.some((type) => pendingTypes.includes(type) || errorsByType[type] !== undefined);
-  const hasMoreRemote = knownRemoteTypes.length > 0;
+  const hasMoreRemote = view === "timeline" ? timelinePage.incomplete : knownRemoteTypes.length > 0;
   const canLoadRemote = remoteTypesToLoad.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
-  const timelineAvailability = hasMoreRemote ? "Older recordings are available" : "No older recordings";
   const scopeSummary = search.trim()
     ? `${filtered.length} matches in ${loadedEvents.length} loaded recordings`
     : `${filtered.length} recordings loaded`;
@@ -280,15 +284,20 @@ export function EventBrowser({
 
         {view === "timeline" ? (
           <>
-            {!scopeIncomplete && (
-              <div className="recent-scan-status" aria-live="polite">
-                <span className="recent-scan-dot" />
-                <span>{timelineAvailability}</span>
-              </div>
-            )}
+            <div className="recent-scan-status" aria-live="polite">
+              <span>
+                {timelinePage.fromDate
+                  ? <>Showing loaded recordings from {timelinePage.fromDate} onward.</>
+                  : timelinePage.incomplete || scopeIncomplete
+                    ? "The common time range is not available yet."
+                    : "No older recordings."}
+                {timelinePage.incomplete && timelinePage.fromDate && " More recordings in this range may remain."}
+              </span>
+            </div>
             {!scopeIncomplete || events.some((event) => event.clips.length > 0) ? (
               <Timeline
                 events={events}
+                fromDate={timelinePage.fromDate}
                 onSelectEvent={onSelectEvent}
                 footer={timelineFooter}
               />

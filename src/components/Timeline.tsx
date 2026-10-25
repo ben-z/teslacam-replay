@@ -5,6 +5,7 @@ import "./Timeline.css";
 
 interface Props {
   events: DashcamEvent[];
+  fromDate?: string;
   onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[]) => void;
   footer?: ReactNode;
 }
@@ -62,63 +63,74 @@ function formatDurationShort(min: number): string {
   return `${min}m`;
 }
 
-export function Timeline({ events, onSelectEvent, footer }: Props) {
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
-
-  const sessionList = useMemo(
-    () => [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
-    [events],
-  );
-
-  const days: DayData[] = useMemo(() => {
-    const dayMap = new Map<number, Map<string, SessionBlock>>();
-    for (const event of events) {
-      const key = `${event.type}/${event.id}`;
-      for (const clip of event.clips) {
-        if (!Number.isFinite(clip.durationSec) || clip.durationSec <= 0) {
-          throw new Error(`Invalid clip duration: ${event.type}/${event.id}/${clip.timestamp}`);
+/** Draw calendar ranges while retaining full source recordings for selection. */
+export function buildTimeline(events: DashcamEvent[], fromDate?: string): { days: DayData[]; sessionList: DashcamEvent[] } {
+  if (fromDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) {
+    throw new Error(`Invalid Timeline start date: ${fromDate}`);
+  }
+  const fromDay = fromDate === undefined ? undefined : recordingWallTimeMs(`${fromDate}T00:00:00`);
+  const dayMap = new Map<number, Map<string, SessionBlock>>();
+  for (const event of events) {
+    const key = `${event.type}/${event.id}`;
+    for (const clip of event.clips) {
+      if (!Number.isFinite(clip.durationSec) || clip.durationSec <= 0) {
+        throw new Error(`Invalid clip duration: ${event.type}/${event.id}/${clip.timestamp}`);
+      }
+      const start = recordingWallTimeMs(clip.timestamp);
+      const end = start + clip.durationSec * 1000;
+      const firstDay = Math.floor(start / DAY_MS) * DAY_MS;
+      for (let day = fromDay === undefined ? firstDay : Math.max(firstDay, fromDay); day < end; day += DAY_MS) {
+        if (!dayMap.has(day)) dayMap.set(day, new Map());
+        const sessions = dayMap.get(day)!;
+        if (!sessions.has(key)) {
+          sessions.set(key, { startHour: 24, endHour: 0, durationMin: 0, event, ranges: [] });
         }
-        const start = recordingWallTimeMs(clip.timestamp);
-        const end = start + clip.durationSec * 1000;
-        for (let day = Math.floor(start / DAY_MS) * DAY_MS; day < end; day += DAY_MS) {
-          if (!dayMap.has(day)) dayMap.set(day, new Map());
-          const sessions = dayMap.get(day)!;
-          if (!sessions.has(key)) {
-            sessions.set(key, { startHour: 24, endHour: 0, durationMin: 0, event, ranges: [] });
-          }
-          const session = sessions.get(key)!;
-          session.ranges.push({
-            startHour: (Math.max(start, day) - day) / 3_600_000,
-            endHour: (Math.min(end, day + DAY_MS) - day) / 3_600_000,
-          });
-        }
+        const session = sessions.get(key)!;
+        session.ranges.push({
+          startHour: (Math.max(start, day) - day) / 3_600_000,
+          endHour: (Math.min(end, day + DAY_MS) - day) / 3_600_000,
+        });
       }
     }
-    return [...dayMap.entries()].sort(([a], [b]) => b - a).map(([day, sessions]) => ({
-      dateStr: new Date(day).toISOString().slice(0, 10),
-      weekday: WEEKDAY_FORMATTER.format(day),
-      dateLabel: DATE_LABEL_FORMATTER.format(day),
-      sessions: [...sessions.values()].map((session) => {
-        const merged: SessionBlock["ranges"] = [];
-        for (const range of session.ranges.sort((a, b) => a.startHour - b.startHour)) {
-          const last = merged.at(-1);
-          if (last && range.startHour <= last.endHour) last.endHour = Math.max(last.endHour, range.endHour);
-          else merged.push({ ...range });
-        }
-        return {
-          ...session,
-          ranges: merged,
-          startHour: merged[0].startHour,
-          endHour: merged.at(-1)!.endHour,
-          durationMin: Math.round(merged.reduce((sum, range) => sum + range.endHour - range.startHour, 0) * 60),
-        };
-      }).sort((a, b) => {
-        const aOrder = a.event.type === "RecentClips" ? 0 : 1;
-        const bOrder = b.event.type === "RecentClips" ? 0 : 1;
-        return aOrder - bOrder || a.startHour - b.startHour;
-      }),
-    }));
-  }, [events]);
+  }
+  const days: DayData[] = [...dayMap.entries()].sort(([a], [b]) => b - a).map(([day, sessions]) => ({
+    dateStr: new Date(day).toISOString().slice(0, 10),
+    weekday: WEEKDAY_FORMATTER.format(day),
+    dateLabel: DATE_LABEL_FORMATTER.format(day),
+    sessions: [...sessions.values()].map((session) => {
+      const merged: SessionBlock["ranges"] = [];
+      for (const range of session.ranges.sort((a, b) => a.startHour - b.startHour)) {
+        const last = merged.at(-1);
+        if (last && range.startHour <= last.endHour) last.endHour = Math.max(last.endHour, range.endHour);
+        else merged.push({ ...range });
+      }
+      return {
+        ...session,
+        ranges: merged,
+        startHour: merged[0].startHour,
+        endHour: merged.at(-1)!.endHour,
+        durationMin: Math.round(merged.reduce((sum, range) => sum + range.endHour - range.startHour, 0) * 60),
+      };
+    }).sort((a, b) => {
+      const aOrder = a.event.type === "RecentClips" ? 0 : 1;
+      const bOrder = b.event.type === "RecentClips" ? 0 : 1;
+      return aOrder - bOrder || a.startHour - b.startHour;
+    }),
+  }));
+  const visibleEvents = new Map<string, DashcamEvent>();
+  for (const day of days) {
+    for (const { event } of day.sessions) visibleEvents.set(`${event.type}/${event.id}`, event);
+  }
+  return {
+    days,
+    sessionList: [...visibleEvents.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+  };
+}
+
+export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
+
+  const { days, sessionList } = useMemo(() => buildTimeline(events, fromDate), [events, fromDate]);
 
   const handleSessionClick = useCallback((session: SessionBlock) => {
     onSelectEvent?.(session.event, sessionList);
@@ -151,7 +163,7 @@ export function Timeline({ events, onSelectEvent, footer }: Props) {
   if (days.length === 0) {
     return (
       <div className="timeline">
-        <div className="timeline-empty">No recorded video in the loaded pages</div>
+        <div className="timeline-empty">{fromDate === undefined ? "No recorded video in the loaded pages" : "No loaded video in this date range"}</div>
         {footer}
       </div>
     );
@@ -162,7 +174,7 @@ export function Timeline({ events, onSelectEvent, footer }: Props) {
       <div className="timeline-overview">
         <div className="timeline-toolbar">
           <div className="timeline-summary">
-            <strong>{events.length}</strong> loaded recording{events.length !== 1 ? "s" : ""}
+            <strong>{sessionList.length}</strong> recording{sessionList.length !== 1 ? "s" : ""} shown
             {" "}· Video on <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
             <span className="timeline-coverage-note">Approximate recording coverage</span>
           </div>
