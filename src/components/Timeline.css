@@ -66,31 +66,30 @@
   overflow: hidden;
 }
 
+.timeline-ranges {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 .timeline-segment {
-  position: absolute;
-  inset-block: 0;
-  background: var(--seg-color);
+  fill: var(--seg-color);
   opacity: 0.6;
-  border-radius: 2px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
+  pointer-events: visiblePainted;
   cursor: pointer;
   transition: opacity 0.15s;
 }
-.timeline-segment:hover,
-.timeline-segment:focus-visible {
+.timeline-segment:hover {
   opacity: 1;
 }
 .timeline-segment--recent { --seg-color: var(--recent-color); }
 .timeline-segment--sentry { --seg-color: var(--sentry-color); }
 .timeline-segment--saved { --seg-color: var(--saved-color); }
 
-/* Event segments (sentry/saved) render above the recent base layer */
 .timeline-segment--sentry,
 .timeline-segment--saved {
   opacity: 0.85;
-  z-index: 1;
 }
 
 .timeline-hour-mark {

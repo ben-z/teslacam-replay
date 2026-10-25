@@ -45,19 +45,41 @@ describe("recording timeline", () => {
       clip("2026-10-21_10-00-00", 30),
       clip("2026-10-21_10-05-00", 30),
     ])]);
-    expect(html.match(/class="timeline-segment /g)).toHaveLength(2);
+    expect(html.match(/class="timeline-segment /g)).toHaveLength(1);
     expect(html.match(/class="timeline-session-button"/g)).toHaveLength(1);
+    const path = html.match(/<path[^>]+d="([^"]+)"/)!;
+    const ranges = Array.from(path[1].matchAll(/M([^,]+),0H([^V]+)V1H[^Z]+Z/g));
+    expect(ranges).toHaveLength(2);
+    expect(Number(ranges[0][1])).toBe(10);
+    expect(Number(ranges[0][2])).toBeCloseTo(10 + 30 / 3600);
+    expect(Number(ranges[1][1])).toBeCloseTo(10 + 5 / 60);
+    expect(Number(ranges[1][2])).toBeCloseTo(10 + 5 / 60 + 30 / 3600);
     expect(html).toContain('aria-label="Open recent recording at 10:00 AM on 2026-10-21"');
     expect(html).toContain("about 1m");
   });
 
   it("uses native buttons for precise list selection instead of enlarging short bars", () => {
     const html = render([event([clip("2026-10-21_10-00-00", 1)])]);
-    expect(html).toMatch(/<button type="button"[^>]*class="timeline-segment /);
+    expect(html).not.toMatch(/<button[^>]*class="timeline-segment /);
+    expect(html).toMatch(/<svg[^>]*viewBox="0 0 24 1"[^>]*aria-hidden="true"/);
     expect(html).toMatch(/<button type="button"[^>]*class="timeline-session-button"/);
-    const width = html.match(/class="timeline-segment [^>]*style="left:[^;]+;width:([^%]+)%"/);
-    expect(Number(width![1])).toBeCloseTo(100 / 86400, 8);
+    const range = html.match(/<path[^>]+d="M([^,]+),0H([^V]+)V1H[^Z]+Z"/)!;
+    expect(Number(range[2]) - Number(range[1])).toBeCloseTo(1 / 3600, 10);
     expect(html).toContain("about &lt;1m");
+  });
+
+  it("keeps a fragmented day to one visual path and one accessible action per recording", () => {
+    const clips = Array.from({ length: 1000 }, (_, index) => {
+      const timestamp = new Date(Date.UTC(2026, 9, 21, 0, 0, index * 2)).toISOString()
+        .slice(0, 19).replace("T", "_").replaceAll(":", "-");
+      return clip(timestamp, 1);
+    });
+    const html = render([event(clips)]);
+    expect(html.match(/<path /g)).toHaveLength(1);
+    expect(html.match(/<button /g)).toHaveLength(1);
+    expect(html.match(/class="timeline-session-button"/g)).toHaveLength(1);
+    expect(html.match(/M[0-9.]+,0H/g)).toHaveLength(1000);
+    expect(buildTimeline([event(clips)]).days[0].sessions[0].event.clips).toHaveLength(1000);
   });
 
   it("preserves exact minute labels when fractional-hour arithmetic rounds below a minute", () => {

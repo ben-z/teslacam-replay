@@ -136,7 +136,8 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
     onSelectEvent?.(session.event, sessionList);
   }, [onSelectEvent, sessionList]);
 
-  const handleBarMouseMove = useCallback((e: React.MouseEvent, day: DayData) => {
+  const handleBarPointerMove = useCallback((e: React.PointerEvent, day: DayData) => {
+    if (e.pointerType === "touch") return;
     const rect = e.currentTarget.getBoundingClientRect();
     const hour = ((e.clientX - rect.left) / rect.width) * 24;
     if (hour < 0 || hour > 24) {
@@ -145,8 +146,13 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
     }
 
     const hitTest = (s: SessionBlock) => s.ranges.some((range) => hour >= range.startHour && hour <= range.endHour);
-    const session = day.sessions.find((s) => hitTest(s) && s.event.type !== "RecentClips")
-      || day.sessions.find(hitTest);
+    let session: SessionBlock | undefined;
+    for (let index = day.sessions.length - 1; index >= 0; index--) {
+      if (hitTest(day.sessions[index])) {
+        session = day.sessions[index];
+        break;
+      }
+    }
     const timeStr = formatTimeDetailed(hour);
     if (!session) {
       setTooltip({ x: e.clientX, y: e.clientY - 32, text: timeStr });
@@ -203,7 +209,7 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
           key={day.dateStr}
           day={day}
           onSessionClick={handleSessionClick}
-          onBarMouseMove={handleBarMouseMove}
+          onBarPointerMove={handleBarPointerMove}
           onTooltipClear={handleTooltipClear}
         />
       ))}
@@ -224,12 +230,12 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
 const TimelineDayRow = memo(function TimelineDayRow({
   day,
   onSessionClick,
-  onBarMouseMove,
+  onBarPointerMove,
   onTooltipClear,
 }: {
   day: DayData;
   onSessionClick: (session: SessionBlock) => void;
-  onBarMouseMove: (e: React.MouseEvent, day: DayData) => void;
+  onBarPointerMove: (e: React.PointerEvent, day: DayData) => void;
   onTooltipClear: () => void;
 }) {
   return (
@@ -242,29 +248,22 @@ const TimelineDayRow = memo(function TimelineDayRow({
         <div className="timeline-bar-container">
           <div
             className="timeline-bar-inner"
-            onMouseMove={(e) => onBarMouseMove(e, day)}
-            onMouseLeave={onTooltipClear}
+            onPointerMove={(e) => onBarPointerMove(e, day)}
+            onPointerLeave={onTooltipClear}
           >
             <div className="timeline-track">
-              {day.sessions.flatMap((session) => session.ranges.map((range, index) => {
-                const left = (range.startHour / 24) * 100;
-                const width = ((range.endHour - range.startHour) / 24) * 100;
-                const typeClass = EVENT_TYPE_CLASS[session.event.type];
-                const key = `${session.event.type}/${session.event.id}`;
-                const label = `${typeClass} recording at ${formatTimeDetailed(range.startHour)} on ${day.dateStr}, about ${formatDurationShort(session.durationMin)}`;
-                return (
-                  <button
-                    type="button"
-                    key={`${key}/${index}`}
-                    tabIndex={-1}
-                    aria-label={`Open ${label}`}
-                    className={`timeline-segment timeline-segment--${typeClass}`}
-                    style={{ left: `${left}%`, width: `${width}%` }}
+              {/* Exact pointer regions; the recording list provides accessible actions. */}
+              <svg className="timeline-ranges" viewBox="0 0 24 1" preserveAspectRatio="none" aria-hidden="true">
+                {day.sessions.map((session) => (
+                  <path
+                    key={`${session.event.type}/${session.event.id}`}
+                    className={`timeline-segment timeline-segment--${EVENT_TYPE_CLASS[session.event.type]}`}
+                    d={session.ranges.map(({ startHour, endHour }) =>
+                      `M${startHour},0H${endHour}V1H${startHour}Z`).join("")}
                     onClick={() => onSessionClick(session)}
-                    title={label}
                   />
-                );
-              }))}
+                ))}
+              </svg>
             </div>
             {HOUR_TICKS.map((h) => (
               <div
