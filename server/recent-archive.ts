@@ -70,29 +70,35 @@ export class RecentArchive {
       cursor.date = { id: dates[0].id };
     }
 
-    // A date listing is paged independently so one request never scans the full archive.
+    // Finish the selected day before advancing; older date folders remain untouched.
     const dateIndex = dates.findIndex((entry) => entry.id === cursor.date!.id);
     if (dateIndex < 0) throw invalidCursor();
     const date = dates[dateIndex];
-    const clips = await this.drive.listFolderPage(this.drive.folderRef(date), {
-      type: "files",
-      pageToken: cursor.date.pageToken,
-      pageSize: RECENT_FILE_PAGE_SIZE,
-      limit: RECENT_FILE_PAGE_SIZE,
-      orderBy: "name desc",
-    });
-    const events = await scanRecentClipsPage(this.drive, clips.files);
+    const files: DriveEntry[] = [];
+    let filePageToken = cursor.date.pageToken;
+    const seenTokens = new Set(filePageToken ? [filePageToken] : []);
+    do {
+      const clips = await this.drive.listFolderPage(this.drive.folderRef(date), {
+        type: "files",
+        pageToken: filePageToken,
+        pageSize: RECENT_FILE_PAGE_SIZE,
+        limit: RECENT_FILE_PAGE_SIZE,
+        orderBy: "name desc",
+      });
+      files.push(...clips.files);
+      filePageToken = clips.nextPageToken;
+      if (filePageToken && seenTokens.has(filePageToken)) {
+        throw new Error(`Repeated RecentClips date-folder page token: ${date.name}`);
+      }
+      if (filePageToken) seenTokens.add(filePageToken);
+    } while (filePageToken);
+    const events = await scanRecentClipsPage(this.drive, files);
     for (const event of events) {
       for (const clip of event.clips) clip.subfolder = date.name;
     }
     const nextDate = dates[dateIndex + 1];
-    let next = afterRootPage;
-    if (clips.nextPageToken) {
-      next = { ...cursor, date: { id: date.id, pageToken: clips.nextPageToken } };
-    } else if (nextDate) {
-      next = { ...cursor, date: { id: nextDate.id } };
-    }
-    const remainingDates = dates.slice(dateIndex + (clips.nextPageToken ? 0 : 1));
+    const next = nextDate ? { ...cursor, date: { id: nextDate.id } } : afterRootPage;
+    const remainingDates = dates.slice(dateIndex + 1);
     return this.result(events, next, page, remainingDates, roots.slice(rootIndex + 1));
   }
 

@@ -187,8 +187,8 @@ describe("RecentClips archive API", () => {
     for (const file of files) provider.add(file);
     await start();
     const first = await page();
-    expect(first.events).toHaveLength(2);
-    expect(provider.listsFor("RecentClips/2026-10-02")).toHaveLength(1);
+    expect(first.events).toHaveLength(3);
+    expect(provider.listsFor("RecentClips/2026-10-02")).toHaveLength(2);
     expect(provider.listsFor("RecentClips/2026-10-01")).toHaveLength(0);
     // Looking at the bounded root metadata establishes a date hint without scanning its contents.
     expect(provider.listsFor(LEGACY)).toHaveLength(1);
@@ -653,12 +653,14 @@ describe("remaining archive calendar dates", () => {
     expect(provider.listsFor("RecentClips/metadata-z")).toHaveLength(0);
   });
 
-  it("retains the pending date through a 1000-file continuation without rereading date contents for hints", async () => {
+  it("finishes a dense day in one response without reading older date contents", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
-    for (let minute = 0; minute < 1001; minute++) {
+    for (let minute = 0; minute < 1344; minute++) {
       const timestamp = new Date(Date.UTC(2026, 9, 24, 0, minute)).toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-");
-      provider.add(`${directory}/${timestamp}-front.mp4`);
+      for (const camera of ["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"]) {
+        provider.add(`${directory}/${timestamp}-${camera}.mp4`);
+      }
     }
     provider.add(`${LEGACY}/2026-09-30_10-00-00-front.mp4`);
     vi.stubGlobal("fetch", async (input: string | URL | Request) => {
@@ -667,20 +669,101 @@ describe("remaining archive calendar dates", () => {
         provider.requests.push(url);
         const files = [...provider.children.get(folder.id)!].sort((a, b) => b.name.localeCompare(a.name));
         const offset = Number(url.searchParams.get("pageToken") || "0");
-        return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset === 0 ? "1000" : undefined });
+        return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset + 1000 < files.length ? String(offset + 1000) : undefined });
       }
       return provider.fetch(input);
     });
     await start();
     const first = await page();
-    expect(first.nextPageDate).toBe("2026-10-24");
-    expect(provider.listsFor(directory)).toHaveLength(1);
+    expect(first.nextPageDate).toBe("2026-09-30");
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0].clips).toHaveLength(1344);
+    expect(provider.listsFor(directory)).toHaveLength(9);
+    expect(first.events[0].clips.every((clip: { cameras: string[] }) => clip.cameras.length === 6)).toBe(true);
     const cursor = JSON.parse(Buffer.from(first.nextPageToken, "base64url").toString());
-    expect(cursor).toEqual({ root: provider.entries.get("RecentClips")!.id, date: { id: folder.id, pageToken: "1000" } });
-    const second = await page(first.nextPageToken);
-    expect(second.nextPageDate).toBe("2026-09-30");
+    expect(cursor).toEqual({ root: provider.entries.get(LEGACY)!.id });
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+  });
+
+  it("finishes an existing mid-day cursor and advances to the next date", async () => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    const older = provider.add("RecentClips/2026-10-23", true);
+    const timestamps = Array.from({ length: 5 }, (_, minute) => `2026-10-24_12-0${minute}-00`);
+    for (const timestamp of timestamps) provider.add(`${directory}/${timestamp}-front.mp4`);
+    await start();
+    const token = Buffer.from(JSON.stringify({ root: provider.entries.get("RecentClips")!.id,
+      date: { id: folder.id, pageToken: "2" } })).toString("base64url");
+    const result = await page(token);
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].clips.map((clip: { timestamp: string }) => clip.timestamp)).toEqual(timestamps.slice(0, 3));
+    expect(provider.listsFor(directory).map((url) => url.searchParams.get("pageToken"))).toEqual(["2", "4"]);
+    expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
+    expect(JSON.parse(Buffer.from(result.nextPageToken, "base64url").toString())).toEqual({
+      root: provider.entries.get("RecentClips")!.id, date: { id: older.id },
+    });
+  });
+
+  it("groups camera files split between provider pages into one complete clip", async () => {
+    const directory = "RecentClips/2026-10-24";
+    provider.add(directory, true);
+    const timestamp = "2026-10-24_12-00-00";
+    const cameras = ["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"];
+    for (const camera of cameras) provider.add(`${directory}/${timestamp}-${camera}.mp4`);
+    await start();
+    const result = await page();
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].clips).toHaveLength(1);
+    expect(new Set(result.events[0].clips[0].cameras)).toEqual(new Set(cameras));
+    expect(provider.listsFor(directory)).toHaveLength(3);
+  });
+
+  it.each([false, true])("rejects repeated date-folder provider cursors (mid-day=%s)", async (midDay) => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    const file = provider.add(`${directory}/2026-10-24_12-00-00-front.mp4`);
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
+        provider.requests.push(url);
+        return Response.json({ folderId: folder.id, files: [file], nextPageToken: "private-repeated-token" });
+      }
+      return provider.fetch(input);
+    });
+    await start();
+    const token = midDay ? Buffer.from(JSON.stringify({ root: provider.entries.get("RecentClips")!.id,
+      date: { id: folder.id, pageToken: "private-repeated-token" } })).toString("base64url") : undefined;
+    const response = await request(`/api/events/page?type=RecentClips${token ? `&pageToken=${token}` : ""}`);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Repeated RecentClips date-folder page token: 2026-10-24" });
+    expect(provider.listsFor(directory)).toHaveLength(midDay ? 1 : 2);
+  });
+
+  it("fails a later date page without returning or indexing an earlier partial result", async () => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    const timestamps = ["2026-10-24_08-00-00", "2026-10-24_09-00-00", "2026-10-24_10-00-00"];
+    for (const timestamp of timestamps) provider.add(`${directory}/${timestamp}-front.mp4`);
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id && url.searchParams.has("pageToken")) {
+        provider.requests.push(url);
+        return new Response("Drive unavailable", { status: 503 });
+      }
+      return provider.fetch(input);
+    });
+    await start();
+    const failed = await request("/api/events/page?type=RecentClips");
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: `Failed to list Drive folder ${folder.id}: 503` });
     expect(provider.listsFor(directory)).toHaveLength(2);
-    expect(second.events).toHaveLength(1);
+    // An indexed partial recording would bypass this failing folder resolution.
+    provider.resolveFailures.set(directory, 503);
+    expect((await request(`/api/events/RecentClips/${timestamps[2]}`)).status).toBe(500);
+    provider.resolveFailures.delete(directory);
+    vi.stubGlobal("fetch", provider.fetch.bind(provider));
+    const retried = await page();
+    expect(retried.events.map((event: { id: string }) => event.id)).toEqual([...timestamps].reverse());
   });
 
   it("surfaces a failed remaining-root metadata lookup without advancing the caller's cursor", async () => {
