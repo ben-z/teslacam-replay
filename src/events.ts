@@ -1,6 +1,6 @@
 import type { DashcamEvent } from "./types";
 
-export function mergeRecentFragments<T extends DashcamEvent>(
+export function mergeRecentFragments<T extends Pick<DashcamEvent, "id" | "type" | "clips">>(
   existing: T[],
   incoming: T,
   merge: (first: T, later: T) => T,

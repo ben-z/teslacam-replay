@@ -19,6 +19,9 @@ export interface DriveEntry {
   resourceKey?: string;
   shortcutDetails?: DriveShortcutDetails;
   url?: string;
+  hasThumbnail?: boolean;
+  thumbnailVersion?: string;
+  thumbnailUrl?: string;
 }
 
 export interface DriveFolderRef {
@@ -41,6 +44,10 @@ export interface DriveFileSource {
   sizeBytes?: number;
   modifiedTime?: string;
   resourceKey?: string;
+}
+
+export interface DriveThumbnailSource extends DriveFileSource {
+  version?: string;
 }
 
 interface ListResponse {
@@ -95,8 +102,12 @@ export class GDriveLiteClient {
   }
 
   streamSource(source: DriveFileSource): { url: string; headers: Record<string, string>; identity: string } {
+    const url = new URL(source.url);
+    if (url.origin !== new URL(this.baseUrl).origin || url.username || url.password) {
+      throw new Error("Drive file sources must use the configured proxy origin");
+    }
     return {
-      url: source.url,
+      url: url.href,
       headers: this.authHeaders(),
       identity: JSON.stringify([source.id, source.modifiedTime ?? null, source.sizeBytes ?? null]),
     };
@@ -129,7 +140,7 @@ export class GDriveLiteClient {
   }
 
   async resolvePath(path: string, type: "folder" | "file" | "any" = "folder"): Promise<DriveEntry> {
-    const params = new URLSearchParams({ path, type });
+    const params = new URLSearchParams({ path, type, links: "1" });
     return this.metadataRequest("resolve", this.url(`/api/resolve?${params.toString()}`), this.metadataTimeoutMs, async (res) => {
       if (!res.ok) {
         if (res.status === 404) throw new DriveNotFoundError(`Drive path not found: ${path}`);
@@ -150,8 +161,9 @@ export class GDriveLiteClient {
   }
 
   async fetchSource(source: DriveFileSource): Promise<Response> {
-    return fetch(source.url, {
-      headers: this.authHeaders(),
+    const stream = this.streamSource(source);
+    return fetch(stream.url, {
+      headers: stream.headers,
       signal: AbortSignal.timeout(this.readTimeoutMs),
     });
   }
@@ -168,6 +180,25 @@ export class GDriveLiteClient {
       modifiedTime: file.modifiedTime,
       resourceKey,
     };
+  }
+
+  thumbnailSource(file: DriveEntry): DriveThumbnailSource | undefined {
+    if (typeof file.hasThumbnail !== "boolean") {
+      throw new Error("Drive thumbnail availability is missing; update gdrive-serve-lite");
+    }
+    if (!file.hasThumbnail) return undefined;
+    if (!file.thumbnailUrl) throw new Error("Drive thumbnail URL is missing");
+    const { id, resourceKey } = targetIDAndKey(file);
+    const source: DriveThumbnailSource = {
+      id,
+      name: file.name,
+      url: this.absoluteUrl(file.thumbnailUrl),
+      modifiedTime: file.modifiedTime,
+      resourceKey,
+      version: file.thumbnailVersion,
+    };
+    this.streamSource(source);
+    return source;
   }
 
   folderRef(file: DriveEntry): DriveFolderRef {

@@ -12,6 +12,7 @@ import { Readable } from "stream";
 import {
   scanEventFolder,
   getClipSource,
+  getEventThumbnail,
   type DashcamEvent,
   type EventType,
 } from "./scan.js";
@@ -162,6 +163,7 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
         ...prev.sourceByCamera,
         ...clip.sourceByCamera,
       },
+      thumbnailSource: clip.cameras.includes("front") ? clip.thumbnailSource : prev.thumbnailSource,
       durationSec: Math.max(prev.durationSec, clip.durationSec),
       subfolder: prev.subfolder ?? clip.subfolder,
     });
@@ -174,8 +176,6 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
     ...incoming,
     id: existing.id,
     timestamp: clips[0].timestamp.replace("_", "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2"),
-    hasThumbnail: existing.hasThumbnail || incoming.hasThumbnail,
-    thumbnailSource: existing.thumbnailSource ?? incoming.thumbnailSource,
     clips,
     totalDurationSec: clips.reduce((sum, clip) => sum + clip.durationSec, 0),
     cameraCount,
@@ -212,6 +212,7 @@ function rememberEvents(events: DashcamEvent[], mode: "page" | "snapshot"): Dash
 }
 
 function publicEvent(event: DashcamEvent): PublicDashcamEvent {
+  const thumbnail = getEventThumbnail(event);
   return {
     id: event.id,
     type: event.type,
@@ -221,11 +222,11 @@ function publicEvent(event: DashcamEvent): PublicDashcamEvent {
     lon: event.lon,
     reason: event.reason,
     camera: event.camera,
-    hasThumbnail: event.hasThumbnail,
+    hasThumbnail: thumbnail !== undefined,
     totalDurationSec: event.totalDurationSec,
     cameraCount: event.cameraCount,
-    thumbnailVersion: event.thumbnailSource
-      ? createHash("sha256").update(drive.streamSource(event.thumbnailSource).identity).digest("hex").slice(0, 16)
+    thumbnailVersion: thumbnail
+      ? createHash("sha256").update(JSON.stringify([drive.streamSource(thumbnail).identity, thumbnail.version])).digest("hex").slice(0, 16)
       : undefined,
     clips: event.clips.map((clip) => ({
       timestamp: clip.timestamp,
@@ -417,7 +418,7 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
   const { type, id } = c.req.param();
   if (!validateParams(type, id)) return c.json({ error: "Invalid params" }, 400);
   const event = await findEvent(type, id);
-  const source = event?.thumbnailSource;
+  const source = event ? getEventThumbnail(event) : undefined;
   if (!source) return c.json({ error: "Thumbnail not found" }, 404);
 
   const res = await drive.fetchSource(source);
@@ -425,7 +426,7 @@ app.get("/api/events/:type/:id/thumbnail", async (c) => {
 
   const headers = readHeaders(res);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "image/png");
-  headers.set("Cache-Control", "public, max-age=86400");
+  headers.set("Cache-Control", "private, max-age=86400");
   return new Response(res.body, { status: res.status, headers });
 });
 
@@ -466,7 +467,7 @@ app.get("/api/video/:type/:eventId/:segment/telemetry", async (c) => {
   const camera = clip?.cameras.includes("front") ? "front" : clip?.cameras[0] ?? "front";
   const source = await findClipSource(type, eventId, segment, camera);
   if (!source) return c.json({ error: "Video source not found" }, 404);
-  const cacheKey = JSON.stringify([type, eventId, segment, drive.streamSource(source).identity]);
+  const cacheKey = drive.streamSource(source).identity;
   const cached = telemetryCache.get(cacheKey);
   if (cached) return c.json(cached);
 
