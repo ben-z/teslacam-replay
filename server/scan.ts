@@ -1,15 +1,16 @@
-import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList } from "./gdrive-lite.js";
+import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList, DriveThumbnailSource } from "./gdrive-lite.js";
 import { recordingWallTimeMs } from "../src/playback.js";
 import type { DashcamEvent as PublicDashcamEvent, EventClip as PublicEventClip } from "../src/types.js";
 
 export interface EventClip extends PublicEventClip {
   sourceByCamera?: Record<string, DriveFileSource>;
+  thumbnailSource?: DriveThumbnailSource;
 }
 
 export type EventType = PublicDashcamEvent["type"];
 
-export interface DashcamEvent extends PublicDashcamEvent {
-  thumbnailSource?: DriveFileSource;
+export interface DashcamEvent extends Omit<PublicDashcamEvent, "hasThumbnail" | "thumbnailVersion"> {
+  thumbnailSource?: DriveThumbnailSource;
   clips: EventClip[];
   cameraCount: number;
 }
@@ -18,6 +19,7 @@ export interface TeslacamDrive {
   listFolder(folder: DriveFolderRef): Promise<DriveList>;
   readText(file: DriveEntry): Promise<string>;
   fileSource(file: DriveEntry): DriveFileSource;
+  thumbnailSource(file: DriveEntry): DriveThumbnailSource | undefined;
   folderRef(file: DriveEntry): DriveFolderRef;
   isFolder(file: DriveEntry): boolean;
 }
@@ -98,7 +100,6 @@ export async function scanEventFolder(
     lon: eventMeta.est_lon ? Number(eventMeta.est_lon) : undefined,
     reason: eventMeta.reason || undefined,
     camera: eventMeta.camera || undefined,
-    hasThumbnail: Boolean(thumbnail),
     thumbnailSource: thumbnail ? drive.fileSource(thumbnail) : undefined,
     clips,
     totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
@@ -200,6 +201,7 @@ function recentEventsFromSegmentMap(
       timestamp,
       cameras: sortCameras(Array.from(cameras.keys())),
       sourceByCamera: sourceByCamera(drive, cameras),
+      thumbnailSource: cameras.has("front") ? drive.thumbnailSource(cameras.get("front")!) : undefined,
       durationSec: estimateDuration(timestamp, session[i + 1]?.[0]),
       subfolder,
     }));
@@ -209,12 +211,16 @@ function recentEventsFromSegmentMap(
       id: firstTimestamp,
       type: "RecentClips" as const,
       timestamp: folderNameToISO(firstTimestamp),
-      hasThumbnail: false,
       clips,
       totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
       cameraCount: countUniqueCameras(clips),
     };
   });
+}
+
+export function getEventThumbnail(event: DashcamEvent): DriveThumbnailSource | undefined {
+  if (event.type !== "RecentClips") return event.thumbnailSource;
+  return event.clips.find((clip) => clip.thumbnailSource)?.thumbnailSource;
 }
 
 function addSegment(

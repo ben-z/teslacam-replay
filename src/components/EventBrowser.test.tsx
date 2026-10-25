@@ -39,6 +39,17 @@ function recording(type: DashcamEvent["type"]): DashcamEvent {
 }
 
 describe("recording list archive scope", () => {
+  it("loads advertised previews lazily only while browsing is active", () => {
+    const event = { ...recording("RecentClips"), hasThumbnail: true, thumbnailVersion: "preview-version" };
+    const active = render([event]);
+    expect(active).toContain('loading="lazy"');
+    expect(active).toContain("thumbnail?v=preview-version");
+    expect(active).not.toContain("No preview");
+    const hidden = render([event], { active: false });
+    expect(hidden).not.toContain("<img");
+    expect(hidden).not.toContain("thumbnail?v=");
+    expect(hidden).not.toContain("No archived video");
+  });
   it("includes every loaded recording type in All and its count", () => {
     const markup = render([recording("SavedClips"), recording("SentryClips"), recording("RecentClips")]);
     expect(markup).toContain("Recordings (3)");

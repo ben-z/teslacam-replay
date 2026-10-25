@@ -9,6 +9,47 @@ afterEach(() => {
 
 const file = { id: "clip", name: "front.mp4", mimeType: "video/mp4" };
 
+describe("private source boundaries", () => {
+  it("requests linked preview sources when resolving a bookmarked file", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: string | URL) => {
+      const url = new URL(input);
+      expect(url.pathname).toBe("/prefix/api/resolve");
+      expect(url.searchParams.get("type")).toBe("file");
+      expect(url.searchParams.get("links")).toBe("1");
+      return Response.json({ file: {
+        ...file,
+        hasThumbnail: true,
+        thumbnailVersion: "preview-17",
+        resourceKey: "preview-key",
+        ...(url.searchParams.get("links") === "1"
+          ? { thumbnailUrl: "/prefix/thumbnail/clip?resourceKey=preview-key" }
+          : {}),
+      } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test/prefix" });
+    const resolved = await drive.resolvePath("/RecentClips-before-2026-10-02/clip-front.mp4", "file");
+    const thumbnail = drive.thumbnailSource(resolved);
+    expect(thumbnail).toMatchObject({
+      id: "clip",
+      url: "http://drive.test/prefix/thumbnail/clip?resourceKey=preview-key",
+      resourceKey: "preview-key",
+      version: "preview-17",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["https://lh3.googleusercontent.com/SIGNED_PRIVATE", "http://user:pass@drive.test/file/clip"]) (
+    "rejects an unsafe source before forwarding credentials", async (url) => {
+      vi.stubGlobal("fetch", vi.fn());
+      const drive = new GDriveLiteClient({ baseUrl: "http://drive.test", username: "user", password: "pass" });
+      const source = { id: "clip", name: "front.mp4", url };
+      expect(() => drive.streamSource(source)).toThrow("configured proxy origin");
+      await expect(drive.fetchSource(source)).rejects.toThrow("configured proxy origin");
+      expect(fetch).not.toHaveBeenCalled();
+    });
+});
+
 type Operation = "resolve" | "list-page" | "read-text";
 const operations: Operation[] = ["resolve", "list-page", "read-text"];
 const privateFile = { id: "FILE_PRIVATE", name: "BODY_PRIVATE", mimeType: "application/json", resourceKey: "RESOURCE_PRIVATE" };
