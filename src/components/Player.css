@@ -81,6 +81,10 @@
   color: #000;
 }
 
+.player-header-title:focus-visible {
+  outline-offset: -2px;
+}
+
 .player-header-title {
   font-size: 14px;
   font-weight: 600;

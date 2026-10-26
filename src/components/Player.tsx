@@ -68,6 +68,7 @@ const BADGE_MAP = {
 } as const;
 
 export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext }: Props) {
+  const recordingTitleRef = useRef<HTMLHeadingElement>(null);
   const [layout, setLayout] = useState<Layout>("focus");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -97,6 +98,12 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   const hlsSourcesRef = useRef<Map<CameraAngle, { url: string; eventKey: string; timestamp: string }>>(new Map());
   const eventKeyRef = useRef(eventKey);
   eventKeyRef.current = eventKey;
+
+  useEffect(() => {
+    if (document.hasFocus() && document.activeElement === document.body) {
+      recordingTitleRef.current?.focus({ preventScroll: true });
+    }
+  }, []);
 
   // Refs for mutable state (avoid stale closures)
   const videoElsRef = useRef<Map<CameraAngle, HTMLVideoElement>>(new Map());
@@ -1079,13 +1086,18 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
         >
           {badgeLabel}
         </span>
-        <span className="player-header-title">
+        <h1
+          ref={recordingTitleRef}
+          tabIndex={-1}
+          className="player-header-title"
+          aria-label={`${badgeLabel} recording from ${headerDateDisplay}${event.city ? ` in ${event.city}` : ""}`}
+        >
           {event.city}
           <span className={event.city ? "player-header-date" : undefined} title="Recorded local time">
             {event.city && <> &middot; </>}
             {headerDateDisplay}
           </span>
-        </span>
+        </h1>
         {event.reason && (
           <span className="player-header-reason">
             {formatReason(event.reason)}
