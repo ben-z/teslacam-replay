@@ -115,12 +115,14 @@ describe("recording list archive scope", () => {
     expect(markup).not.toContain("No recordings in the loaded pages");
   });
 
-  it("disables only a retry whose own source is pending", () => {
+  it("keeps a pending source retry focusable and reports its loading status", () => {
     const markup = render([], {
       pendingTypes: ["SavedClips"],
       errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
     });
-    expect(markup).toContain('<button disabled="">Retry Saved</button>');
+    expect(markup).toContain('<button aria-disabled="true">Retry Saved</button>');
+    expect(markup).toContain('role="status">Retrying Saved recordings…');
+    expect(markup).not.toContain("Saved listing failed.");
     expect(markup).toContain("<button>Retry Recent</button>");
   });
 

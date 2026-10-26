@@ -420,7 +420,7 @@
   cursor: pointer;
 }
 .browse-clear-filters-btn:hover:not(:disabled),
-.browse-error button:hover:not(:disabled) {
+.browse-error button:hover:not(:disabled):not([aria-disabled="true"]) {
   color: var(--text);
   border-color: var(--text-dim);
 }
@@ -458,7 +458,8 @@
 }
 .browse-load-more-hint:disabled,
 .browse-load-more-hint[aria-disabled="true"],
-.browse-error button:disabled {
+.browse-error button:disabled,
+.browse-error button[aria-disabled="true"] {
   cursor: default;
   opacity: 0.7;
 }

@@ -78,6 +78,7 @@ export function App() {
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
   const pushedHashRef = useRef(false);
   const browseFocusRef = useRef<HTMLElement | null>(null);
+  const recordingBackRef = useRef<HTMLButtonElement>(null);
   const eventsRef = useRef(events);
   const pagePositionsRef = useRef(pagePositions);
   const pendingPageTypesRef = useRef(new Set<EventPageType>());
@@ -90,6 +91,13 @@ export function App() {
     browseFocusRef.current = null;
     if (opener?.isConnected) opener.focus({ preventScroll: true });
   }, [view]);
+
+  useEffect(() => {
+    if (view !== "player" || selectedEvent || !document.hasFocus()) return;
+    if (document.activeElement === document.body || document.activeElement === browseFocusRef.current) {
+      recordingBackRef.current?.focus({ preventScroll: true });
+    }
+  }, [view, selectedEvent, eventError]);
 
   const selectEvent = useCallback((event: DashcamEvent) => {
     setSelectedEvent(event);
@@ -130,11 +138,6 @@ export function App() {
     if (requested.length === 0) return;
     const catalogAtStart = eventsRef.current;
     setPendingTypes([...pendingPageTypesRef.current]);
-    setPageErrors((previous) => {
-      const errors = { ...previous };
-      for (const { type } of requested) delete errors[type];
-      return errors;
-    });
     await Promise.all(requested.map(async ({ type, pageToken }) => {
       try {
         const result = await fetchEventPage(type, pageToken, PAGE_LOAD_LIMIT);
@@ -153,6 +156,12 @@ export function App() {
         pagePositionsRef.current = nextPositions;
         setEvents(merged);
         setPagePositions(nextPositions);
+        setPageErrors((previous) => {
+          if (previous[type] === undefined) return previous;
+          const errors = { ...previous };
+          delete errors[type];
+          return errors;
+        });
       } catch (err) {
         setPageErrors((previous) => ({
           ...previous,
@@ -305,7 +314,7 @@ export function App() {
           <div className="event-loading" role="status">
             <p>{eventError ?? "Loading recording…"}</p>
             {eventError && <button onClick={() => { const route = parseHash(); if (route) void loadRoute(route, true); }}>Retry recording</button>}
-            <button onClick={handleBack}>Back to recordings</button>
+            <button ref={recordingBackRef} onClick={handleBack}>Back to recordings</button>
           </div>
         ))}
       </div>
