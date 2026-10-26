@@ -7,6 +7,15 @@
   overflow: hidden;
 }
 
+.player-container-with-data {
+  overflow-y: auto;
+}
+
+.player-container-with-data .player-videos {
+  flex: 1 0 45vh;
+  min-height: 180px;
+}
+
 .player-header {
   flex-shrink: 0;
   display: flex;
