@@ -195,20 +195,15 @@ describe("RecentClips archive API", () => {
 
   it("updates a native preview's version without changing its video identity", async () => {
     const id = "2026-10-02_10-00-00";
-    const file = provider.add(`RecentClips/${id}-front.mp4`);
-    provider.add(`RecentClips/${id}-back.mp4`);
-    provider.add(`RecentClips/${id}-right_repeater.mp4`);
+    provider.add("RecentClips/2026-10-02", true);
+    const file = provider.add(`RecentClips/2026-10-02/${id}-front.mp4`);
+    provider.add(`RecentClips/2026-10-02/${id}-back.mp4`);
+    provider.add(`RecentClips/2026-10-02/${id}-right_repeater.mp4`);
     Object.assign(file, { hasThumbnail: true, thumbnailVersion: "1", thumbnailUrl: `/thumbnail/${file.id}` });
     provider.thumbnails.set(file.id, { body: "old still", status: 200 });
     await start();
-    const firstPage = await page();
-    const first = firstPage.events[0];
-    expect(first.clips[0].cameras).toEqual(["front", "right_repeater"]);
-    expect(firstPage.nextPageToken).toEqual(expect.any(String));
-    const backFragment = (await page(firstPage.nextPageToken)).events[0];
-    expect(backFragment.hasThumbnail).toBe(true);
-    expect(backFragment.thumbnailVersion).toBe(first.thumbnailVersion);
-    expect(backFragment.clips[0].cameras).toEqual(expect.arrayContaining(["front", "back", "right_repeater"]));
+    const first = (await page()).events[0];
+    expect(first.clips[0].cameras).toEqual(["front", "right_repeater", "back"]);
     expect(await (await request(`/api/events/RecentClips/${id}/thumbnail`)).text()).toBe("old still");
     expect((await request(hls(id, "front"))).status).toBe(200);
     const videoIdentity = ensureHlsSegments.mock.calls.at(-1)![0];
@@ -262,7 +257,7 @@ describe("RecentClips archive API", () => {
     await start();
     expect(provider.listsFor("RecentClips")).toHaveLength(0);
     const result = await page();
-    expect(result.events).toMatchObject([{ id: segment, clips: [{ subfolder: "2026-10-02", cameras: ["back"] }] }]);
+    expect(result.events).toMatchObject([{ id: segment, clips: [{ cameras: ["back"] }] }]);
     expect(result.events[0].clips[0].sourceByCamera).toBeUndefined();
     expect(provider.listsFor("RecentClips/metadata")).toHaveLength(0);
     const resolveCount = provider.requests.filter((url) => url.pathname === "/api/resolve").length;
@@ -271,77 +266,62 @@ describe("RecentClips archive API", () => {
     expect(provider.requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(resolveCount);
   });
 
-  it("pages through dates and preserved roots without scanning later date-folder contents", async () => {
-    provider.add("RecentClips/2026-10-02", true);
-    provider.add("RecentClips/2026-10-01", true);
-    provider.add("RecentClips/2026-09-30", true);
+  it("loads one complete calendar day per page without scanning older days or legacy roots", async () => {
+    for (const date of ["2026-10-02", "2026-10-01", "2026-09-30"]) provider.add(`RecentClips/${date}`, true);
     const files = [
       "RecentClips/2026-10-02/2026-10-02_10-00-00-front.mp4",
       "RecentClips/2026-10-02/2026-10-02_09-00-00-front.mp4",
       "RecentClips/2026-10-02/2026-10-02_08-00-00-front.mp4",
       "RecentClips/2026-10-01/2026-10-01_10-00-00-front.mp4",
       "RecentClips/2026-09-30/2026-09-30_11-00-00-front.mp4",
-      `${LEGACY}/2026-09-30_10-00-00-front.mp4`,
-      `${LEGACY}/2026-09-29_10-00-00-front.mp4`,
-      `${LEGACY}/2026-09-28_10-00-00-front.mp4`,
     ];
     for (const file of files) provider.add(file);
+    provider.add(`${LEGACY}/2026-09-29_10-00-00-front.mp4`);
     await start();
     const first = await page();
     expect(first.events).toHaveLength(3);
+    expect(first.nextPageToken).toBe("2026-10-01");
+    expect(first.nextPageDate).toBe("2026-10-02");
     expect(provider.listsFor("RecentClips/2026-10-02")).toHaveLength(2);
     expect(provider.listsFor("RecentClips/2026-10-01")).toHaveLength(0);
-    // Looking at the bounded root metadata establishes a date hint without scanning its contents.
-    expect(provider.listsFor(LEGACY)).toHaveLength(1);
-    const ids = first.events.map((event: { id: string }) => event.id);
-    let token = first.nextPageToken;
-    const tokens = new Set<string>();
-    while (token) {
-      expect(tokens.has(token)).toBe(false);
-      tokens.add(token);
-      const next = await page(token);
-      ids.push(...next.events.map((event: { id: string }) => event.id));
-      token = next.nextPageToken;
-    }
-    expect(ids).toEqual(files.map((file) => file.split("/").at(-1)!.slice(0, 19)));
-    expect(provider.listsFor(LEGACY).filter((url) => url.searchParams.has("pageToken"))).toHaveLength(1);
+    expect(provider.listsFor(LEGACY)).toHaveLength(0);
+    const second = await page(first.nextPageToken);
+    expect(second.nextPageDate).toBe("2026-10-01");
+    const last = await page(second.nextPageToken);
+    expect(last.nextPageToken).toBeNull();
+    expect(last.nextPageDate).toBeNull();
+    expect([...first.events, ...second.events, ...last.events].map((event: { id: string }) => event.id))
+      .toEqual(files.map((file) => file.split("/").at(-1)!.slice(0, 19)));
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
 
-  it("discovers the supported archive prefix and resolves legacy playback without browsing", async () => {
-    const earlier = "RecentClips-before-2026-09-01";
-    provider.add(earlier, true);
-    provider.add("RecentClips-backup", true);
+  it("plays a backfilled recording from its canonical dated path without probing preserved roots", async () => {
     const segment = "2026-08-20_12-00-00";
-    const file = provider.add(`${earlier}/${segment}-front.mp4`);
+    provider.add("RecentClips/2026-08-20", true);
+    const file = provider.add(`RecentClips/2026-08-20/${segment}-front.mp4`);
+    provider.add(`${LEGACY}/${segment}-front.mp4`);
     await start();
     expect((await request(hls(segment, "front"))).status).toBe(200);
     expect(ensureHlsSegments.mock.calls[0][0].url).toContain(`/file/${file.id}/`);
-    expect(provider.listsFor(earlier)).toHaveLength(0);
-    expect(provider.requests.some((url) => url.searchParams.get("path")?.includes("RecentClips-backup"))).toBe(false);
+    expect(provider.listsFor(LEGACY)).toHaveLength(0);
+    expect(provider.requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(1);
   });
 
-  it("discovers archive folders added after startup when the recording list is refreshed", async () => {
+  it("discovers dates added after startup when the recording list is refreshed", async () => {
     await start();
-    const archive = "RecentClips-before-2026-10-21";
+    expect((await page()).events).toEqual([]);
+    provider.add("RecentClips/2026-10-20", true);
     const segment = "2026-10-20_12-00-00";
-    provider.add(archive, true);
-    provider.add(`${archive}/${segment}-front.mp4`);
-    const ids: string[] = [];
-    let token: string | undefined;
-    do {
-      const result = await page(token);
-      ids.push(...result.events.map((event: { id: string }) => event.id));
-      token = result.nextPageToken;
-    } while (token);
-    expect(ids).toEqual([segment]);
+    provider.add(`RecentClips/2026-10-20/${segment}-front.mp4`);
+    expect((await page()).events.map((event: { id: string }) => event.id)).toEqual([segment]);
   });
 
-  it.each(["recording", "video"])("restores a %s from an archive added after startup without browsing", async (kind) => {
+  it.each(["recording", "video"])("restores a %s from a date added after startup without browsing", async (kind) => {
     await start();
-    const archive = "RecentClips-before-2026-10-21";
+    const date = "RecentClips/2026-10-20";
     const segment = "2026-10-20_12-00-00";
-    provider.add(archive, true);
-    const file = provider.add(`${archive}/${segment}-front.mp4`);
+    provider.add(date, true);
+    const file = provider.add(`${date}/${segment}-front.mp4`);
     if (kind === "recording") {
       const response = await request(`/api/events/RecentClips/${segment}`);
       expect(response.status).toBe(200);
@@ -351,16 +331,17 @@ describe("RecentClips archive API", () => {
     expect(ensureHlsSegments.mock.calls[0][0].url).toContain(`/file/${file.id}/`);
   });
 
-  it("surfaces root discovery failure instead of serving a stale archive list", async () => {
+  it("surfaces canonical root listing failure instead of serving a stale date list", async () => {
     await start();
+    const rootId = provider.entries.get("RecentClips")!.id;
     vi.stubGlobal("fetch", async (input: string | URL | Request) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      if (url.pathname === "/api/list" && !url.searchParams.has("folderId")) return new Response("Provider failure", { status: 503 });
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === rootId) return new Response("Provider failure", { status: 503 });
       return provider.fetch(input);
     });
     const response = await request("/api/events/page?type=RecentClips");
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: "Failed to list Drive folder root: 503" });
+    expect(await response.json()).toEqual({ error: `Failed to list Drive folder ${rootId}: 503` });
   });
 
   it("distinguishes missing chunks from a broken cache path", async () => {
@@ -378,91 +359,102 @@ describe("RecentClips archive API", () => {
     }
   });
 
-  it("preserves flat browsing alongside dated files without repeating clips", async () => {
-    const flat = "2026-10-02_12-00-00";
-    const dated = "2026-10-02_11-00-00";
-    provider.add(`RecentClips/${flat}-front.mp4`);
-    provider.add("RecentClips/2026-10-02", true);
-    provider.add(`RecentClips/2026-10-02/${dated}-back.mp4`);
+  it.each(["0", "-1", "invalid", undefined])("rejects invalid video size %s before playback", async (size) => {
+    const day = "2026-10-20";
+    const segment = `${day}_12-00-00`;
+    provider.add(`RecentClips/${day}`, true);
+    const file = provider.add(`RecentClips/${day}/${segment}-front.mp4`);
+    file.size = size;
     await start();
-    const first = await page();
-    expect(first.events.map((event: { id: string }) => event.id)).toEqual([flat]);
-    const second = await page(first.nextPageToken);
-    expect(second.events.map((event: { id: string }) => event.id)).toEqual([dated]);
+    const listing = await request("/api/events/page?type=RecentClips");
+    expect(listing.status).toBe(500);
+    expect(await listing.json()).toMatchObject({ error: expect.stringContaining("no valid video size") });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const playback = await request(hls(segment, "front"));
+      expect(playback.status).toBe(500);
+      expect(await playback.text()).toBe("Internal Server Error");
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("no valid video size") }));
+    } finally {
+      log.mockRestore();
+    }
+    expect(ensureHlsSegments).not.toHaveBeenCalled();
+    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
 
-  it("loads a dated event bookmark from a preserved archive", async () => {
-    const segment = "2026-09-30_12-00-00";
-    provider.add(`${LEGACY}/2026-09-30`, true);
-    provider.add(`${LEGACY}/2026-09-30/${segment}-front.mp4`);
+  it("rejects unsupported camera files rather than counting footage the player cannot show", async () => {
+    provider.add("RecentClips/2026-10-20", true);
+    provider.add("RecentClips/2026-10-20/2026-10-20_12-00-00-cabin.mp4");
     await start();
-    const response = await request(`/api/events/RecentClips/${segment}`);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ id: segment, clips: [{ cameras: ["front"] }] });
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining("Unsupported RecentClips camera") });
   });
 
-  it("restores a dated bookmark whose session was split across browse pages", async () => {
+  it("rejects flat files instead of silently hiding footage uploaded in an unsupported layout", async () => {
+    provider.add("RecentClips/2026-10-02_12-00-00-front.mp4");
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect((await response.json()).error).toContain("expected YYYY-MM-DD folders");
+  });
+
+  it("restores a complete session even when Drive splits its cameras across metadata pages", async () => {
     provider.add("RecentClips/2026-10-02", true);
     const segments = ["2026-10-02_10-00-00", "2026-10-02_10-01-00", "2026-10-02_10-02-00"];
     for (const segment of segments) provider.add(`RecentClips/2026-10-02/${segment}-front.mp4`);
+    provider.add(`RecentClips/2026-10-02/${segments[1]}-back.mp4`);
     await start();
     const response = await request(`/api/events/RecentClips/${segments[1]}`);
     expect(response.status).toBe(200);
     const event = await response.json();
     expect(event.clips.map((clip: { timestamp: string }) => clip.timestamp)).toEqual(segments);
+    expect(event.clips[1].cameras).toEqual(["front", "back"]);
+    expect(provider.listsFor("RecentClips/2026-10-02")).toHaveLength(2);
     const requestsBefore = provider.requests.length;
     expect((await request(`/api/events/RecentClips/${segments[1]}`)).status).toBe(200);
     expect(provider.requests).toHaveLength(requestsBefore);
   });
 
-  it("joins overlapping page groups, retains the first server ID and all aliases, and unions private sources", async () => {
+  it("retains session aliases and private sources while refresh replaces removed cameras", async () => {
+    const date = "RecentClips/2026-10-02";
+    provider.add(date, true);
     const early = "2026-10-02_10-00-00";
     const middle = "2026-10-02_10-01-00";
     const late = "2026-10-02_10-02-00";
-    provider.add(`RecentClips/${early}-front.mp4`);
-    const front = provider.add(`RecentClips/${middle}-front.mp4`);
-    const back = provider.add(`RecentClips/${middle}-back.mp4`);
-    provider.add(`RecentClips/${late}-front.mp4`);
+    provider.add(`${date}/${early}-front.mp4`);
+    const front = provider.add(`${date}/${middle}-front.mp4`);
+    const back = provider.add(`${date}/${middle}-back.mp4`);
+    provider.add(`${date}/${late}-front.mp4`);
     await start();
-    for (const id of [early, late]) {
-      const response = await request(`/api/events/RecentClips/${id}`);
-      expect(response.status).toBe(200);
-      expect((await response.json()).id).toBe(id);
-    }
     const first = await page();
-    expect(first.events[0].id).toBe(late);
-    const second = await page(first.nextPageToken);
-    expect(second.events).toHaveLength(1);
-    expect(second.events[0]).toMatchObject({ id: early, clips: [
-      { timestamp: early },
-      { timestamp: middle, cameras: ["front", "back"] },
-      { timestamp: late },
-    ] });
-    expect(second.events[0].clips.every((clip: {sourceByCamera?: unknown}) => clip.sourceByCamera === undefined)).toBe(true);
-    const requestsBefore = provider.requests.length;
+    expect(first.events).toMatchObject([{ id: early, clips: [
+      { timestamp: early }, { timestamp: middle, cameras: ["front", "back"] }, { timestamp: late },
+    ] }]);
+    expect(first.events[0].clips.every((clip: { sourceByCamera?: unknown }) => clip.sourceByCamera === undefined)).toBe(true);
     for (const alias of [early, middle, late]) {
       const response = await request(`/api/events/RecentClips/${alias}`);
       expect(response.status).toBe(200);
       expect((await response.json()).id).toBe(early);
     }
+    const requestsBefore = provider.requests.length;
     for (const [camera, source] of [["front", front], ["back", back]] as const) {
-      const response = await request(`/api/hls/RecentClips/${late}/${middle}/${camera}/stream.m3u8`);
-      expect(response.status).toBe(200);
+      expect((await request(`/api/hls/RecentClips/${late}/${middle}/${camera}/stream.m3u8`)).status).toBe(200);
       expect(ensureHlsSegments.mock.calls.at(-1)![0].url).toContain(`/file/${source.id}/`);
     }
     expect(provider.requests).toHaveLength(requestsBefore);
-    provider.remove(`RecentClips/${middle}-back.mp4`);
+    provider.remove(`${date}/${middle}-back.mp4`);
     const refreshed = await request(`/api/events/RecentClips/${middle}?refresh=1`);
     expect(refreshed.status).toBe(200);
-    expect(await refreshed.json()).toMatchObject({ id: early, clips: [{ timestamp: middle, cameras: ["front"] }] });
+    expect((await refreshed.json()).clips[1].cameras).toEqual(["front"]);
     const beforeAliasReads = provider.requests.length;
     for (const alias of [early, middle, late]) {
       const event = await (await request(`/api/events/RecentClips/${alias}`)).json();
-      expect(event.clips).toHaveLength(1);
-      expect(event.clips[0].cameras).toEqual(["front"]);
+      expect(event.clips).toHaveLength(3);
+      expect(event.clips[1].cameras).toEqual(["front"]);
     }
     expect(provider.requests).toHaveLength(beforeAliasReads);
-    for (const segment of [early, middle, late]) provider.remove(`RecentClips/${segment}-front.mp4`);
+    for (const segment of [early, middle, late]) provider.remove(`${date}/${segment}-front.mp4`);
     expect((await request(`/api/events/RecentClips/${late}?refresh=1`)).status).toBe(404);
     for (const alias of [early, middle, late]) expect((await request(`/api/events/RecentClips/${alias}`)).status).toBe(404);
   });
@@ -471,17 +463,17 @@ describe("RecentClips archive API", () => {
     const early = "2026-10-02_10-00-00";
     const middle = "2026-10-02_10-01-00";
     const late = "2026-10-02_10-02-00";
-    provider.add(`RecentClips/${early}-front.mp4`);
-    const front = provider.add(`RecentClips/${middle}-front.mp4`);
-    provider.add(`RecentClips/${middle}-back.mp4`);
-    provider.add(`RecentClips/${late}-front.mp4`);
+    provider.add("RecentClips/2026-10-02", true);
+    provider.add(`RecentClips/2026-10-02/${early}-front.mp4`);
+    const front = provider.add(`RecentClips/2026-10-02/${middle}-front.mp4`);
+    provider.add(`RecentClips/2026-10-02/${middle}-back.mp4`);
+    provider.add(`RecentClips/2026-10-02/${late}-front.mp4`);
     provider.reads.set(front.id, { body: "original video bytes", status: 200 });
     await start();
-    for (const alias of [early, late]) {
+    for (const alias of [early, middle, late]) {
       expect((await request(`/api/events/RecentClips/${alias}`)).status).toBe(200);
     }
-    const first = await page();
-    await page(first.nextPageToken);
+    await page();
 
     const beforeAliases = provider.requests.length;
     for (const alias of [early, middle, late]) {
@@ -534,8 +526,10 @@ describe("RecentClips archive API", () => {
 
   it("replaces a Recent refreshed scope, preserves aliases, and never treats provider failure as deletion", async () => {
     const id = "2026-10-02_10-00-00";
-    const front = `RecentClips/${id}-front.mp4`;
-    const back = `RecentClips/${id}-back.mp4`;
+    const date = "RecentClips/2026-10-02";
+    provider.add(date, true);
+    const front = `${date}/${id}-front.mp4`;
+    const back = `${date}/${id}-back.mp4`;
     provider.add(front);
     provider.add(back);
     await start();
@@ -547,9 +541,9 @@ describe("RecentClips archive API", () => {
     const refreshed = await request(`/api/events/RecentClips/${id}?refresh=1`);
     expect(refreshed.status).toBe(200);
     expect((await refreshed.json()).clips[0].cameras).toEqual(["front"]);
-    provider.resolveFailures.set(back, 503);
+    provider.resolveFailures.set(date, 503);
     expect((await request(`/api/events/RecentClips/${id}?refresh=1`)).status).toBe(500);
-    provider.resolveFailures.delete(back);
+    provider.resolveFailures.delete(date);
     expect((await (await request(`/api/events/RecentClips/${id}`)).json()).clips[0].cameras).toEqual(["front"]);
     provider.remove(front);
     expect((await request(`/api/events/RecentClips/${id}?refresh=1`)).status).toBe(404);
@@ -630,7 +624,7 @@ describe("RecentClips archive API", () => {
 
   it("propagates Drive errors instead of treating them as missing footage", async () => {
     const segment = "2026-10-02_03-14-04";
-    provider.resolveFailures.set(`RecentClips/${segment}-front.mp4`, 503);
+    provider.resolveFailures.set(`RecentClips/2026-10-02/${segment}-front.mp4`, 503);
     await start();
     expect((await request(hls(segment, "front"))).status).toBe(500);
     expect(ensureHlsSegments).not.toHaveBeenCalled();
@@ -723,78 +717,18 @@ describe("remaining archive calendar dates", () => {
     expect(serve).not.toHaveBeenCalled();
   });
 
-  it("keeps a newer pending date folder visible when the returned flat recording is older", async () => {
+  it("keeps the loaded-day bound while the cursor selects the next older day", async () => {
     provider.add("RecentClips/2026-10-24", true);
-    provider.add("RecentClips/2026-09-01_10-00-00-front.mp4");
-    provider.add(`${LEGACY}/metadata`, true);
+    provider.add("RecentClips/2026-10-23", true);
+    provider.add("RecentClips/2026-10-23/2026-10-23_10-00-00-front.mp4");
     await start();
     const first = await page();
-    expect(first.events.map((event: { id: string }) => event.id)).toEqual(["2026-09-01_10-00-00"]);
-    expect(first.nextPageDate).toBe("2026-10-24");
-    expect(first.nextPageToken).toBeTruthy();
-    expect(provider.listsFor("RecentClips/2026-10-24")).toHaveLength(0);
-    expect(provider.listsFor(`${LEGACY}/metadata`)).toHaveLength(0);
+    expect(first).toEqual({ type: "RecentClips", events: [], nextPageToken: "2026-10-23", nextPageDate: "2026-10-24" });
+    expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
+    expect((await page(first.nextPageToken)).nextPageToken).toBeNull();
   });
 
-  it("uses every later root's actual entry dates instead of migration labels", async () => {
-    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
-    provider.add(`${LEGACY}/metadata`, true);
-    provider.add(`${LEGACY}/2026-10-27`, true);
-    provider.add(`${LEGACY}/2026-09-30_10-00-00-front.mp4`);
-    const earlierRoot = "RecentClips-before-2026-09-01";
-    provider.add(earlierRoot, true);
-    provider.add(`${earlierRoot}/2026-10-30_10-00-00-front.mp4`);
-    await start();
-    const first = await page();
-    expect(first.nextPageDate).toBe("2026-10-30");
-    expect(provider.listsFor(`${LEGACY}/2026-10-27`)).toHaveLength(0);
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
-    expect(provider.listsFor(earlierRoot)).toHaveLength(1);
-    const query = provider.listsFor(LEGACY)[0].searchParams;
-    expect([query.get("pageSize"), query.get("limit"), query.get("orderBy")]).toEqual(["1000", "1000", "name desc"]);
-  });
-
-  it("propagates an unknown later root head even when the current pending date is known", async () => {
-    provider.add("RecentClips/2026-10-24", true);
-    provider.add("RecentClips/2026-09-01_10-00-00-front.mp4");
-    provider.add(`${LEGACY}/metadata-z`, true);
-    provider.add(`${LEGACY}/metadata-y`, true);
-    provider.add(`${LEGACY}/2026-10-30_10-00-00-front.mp4`);
-    await start();
-    const first = await page();
-    expect(first.nextPageToken).toBeTruthy();
-    expect(first.nextPageDate).toBeNull();
-    expect(provider.listsFor(LEGACY)).toHaveLength(1);
-    expect(provider.listsFor("RecentClips/2026-10-24")).toHaveLength(0);
-  });
-
-  it("bounds a continued current root page by raw names, then the remaining root head", async () => {
-    for (const day of ["26", "25", "24"]) provider.add(`RecentClips/2026-10-${day}_10-00-00-front.mp4`);
-    provider.add(`${LEGACY}/2026-10-23_10-00-00-front.mp4`);
-    await start();
-    const first = await page();
-    expect(first.nextPageDate).toBe("2026-10-25");
-    const second = await page(first.nextPageToken);
-    expect(second.nextPageDate).toBe("2026-10-23");
-    const last = await page(second.nextPageToken);
-    expect(last.nextPageToken).toBeNull();
-    expect(last.nextPageDate).toBeNull();
-  });
-
-  it("keeps empty continued Recent pages unknown and bounded", async () => {
-    provider.add("RecentClips/metadata-z", true);
-    provider.add("RecentClips/metadata-y", true);
-    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
-    await start();
-    const first = await page();
-    expect(first.events).toEqual([]);
-    expect(first.nextPageToken).toBeTruthy();
-    expect(first.nextPageDate).toBeNull();
-    expect(provider.listsFor("RecentClips")).toHaveLength(1);
-    expect(provider.listsFor("RecentClips/metadata-z")).toHaveLength(0);
-  });
-
-  it("finishes a dense day in one response without reading older date contents", async () => {
+  it("finishes a dense day with 8064 camera files in one user-visible page", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
     for (let minute = 0; minute < 1344; minute++) {
@@ -803,12 +737,12 @@ describe("remaining archive calendar dates", () => {
         provider.add(`${directory}/${timestamp}-${camera}.mp4`);
       }
     }
-    provider.add(`${LEGACY}/2026-09-30_10-00-00-front.mp4`);
+    provider.add("RecentClips/2026-10-23", true);
     vi.stubGlobal("fetch", async (input: string | URL | Request) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
         provider.requests.push(url);
-        const files = [...provider.children.get(folder.id)!].sort((a, b) => b.name.localeCompare(a.name));
+        const files = provider.children.get(folder.id)!;
         const offset = Number(url.searchParams.get("pageToken") || "0");
         return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset + 1000 < files.length ? String(offset + 1000) : undefined });
       }
@@ -816,50 +750,20 @@ describe("remaining archive calendar dates", () => {
     });
     await start();
     const first = await page();
-    expect(first.nextPageDate).toBe("2026-09-30");
     expect(first.events).toHaveLength(1);
     expect(first.events[0].clips).toHaveLength(1344);
-    expect(provider.listsFor(directory)).toHaveLength(9);
+    expect(first.nextPageDate).toBe("2026-10-24");
+    expect(first.nextPageToken).toBe("2026-10-23");
+    const requests = provider.listsFor(directory);
+    expect(requests).toHaveLength(9);
     expect(first.events[0].clips.every((clip: { cameras: string[] }) => clip.cameras.length === 6)).toBe(true);
-    const cursor = JSON.parse(Buffer.from(first.nextPageToken, "base64url").toString());
-    expect(cursor).toEqual({ root: provider.entries.get(LEGACY)!.id });
+    expect(requests.map((url) => url.searchParams.get("pageToken"))).toEqual([null, ...Array.from({ length: 8 }, (_, index) => String((index + 1) * 1000))]);
+    expect(requests.every((url) => url.searchParams.get("limit") === "1000")).toBe(true);
+    expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
     expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
 
-  it("finishes an existing mid-day cursor and advances to the next date", async () => {
-    const directory = "RecentClips/2026-10-24";
-    const folder = provider.add(directory, true);
-    const older = provider.add("RecentClips/2026-10-23", true);
-    const timestamps = Array.from({ length: 5 }, (_, minute) => `2026-10-24_12-0${minute}-00`);
-    for (const timestamp of timestamps) provider.add(`${directory}/${timestamp}-front.mp4`);
-    await start();
-    const token = Buffer.from(JSON.stringify({ root: provider.entries.get("RecentClips")!.id,
-      date: { id: folder.id, pageToken: "2" } })).toString("base64url");
-    const result = await page(token);
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0].clips.map((clip: { timestamp: string }) => clip.timestamp)).toEqual(timestamps.slice(0, 3));
-    expect(provider.listsFor(directory).map((url) => url.searchParams.get("pageToken"))).toEqual(["2", "4"]);
-    expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
-    expect(JSON.parse(Buffer.from(result.nextPageToken, "base64url").toString())).toEqual({
-      root: provider.entries.get("RecentClips")!.id, date: { id: older.id },
-    });
-  });
-
-  it("groups camera files split between provider pages into one complete clip", async () => {
-    const directory = "RecentClips/2026-10-24";
-    provider.add(directory, true);
-    const timestamp = "2026-10-24_12-00-00";
-    const cameras = ["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"];
-    for (const camera of cameras) provider.add(`${directory}/${timestamp}-${camera}.mp4`);
-    await start();
-    const result = await page();
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0].clips).toHaveLength(1);
-    expect(new Set(result.events[0].clips[0].cameras)).toEqual(new Set(cameras));
-    expect(provider.listsFor(directory)).toHaveLength(3);
-  });
-
-  it.each([false, true])("rejects repeated date-folder provider cursors (mid-day=%s)", async (midDay) => {
+  it("rejects repeated provider tokens before publishing a dated page", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
     const file = provider.add(`${directory}/2026-10-24_12-00-00-front.mp4`);
@@ -872,60 +776,69 @@ describe("remaining archive calendar dates", () => {
       return provider.fetch(input);
     });
     await start();
-    const token = midDay ? Buffer.from(JSON.stringify({ root: provider.entries.get("RecentClips")!.id,
-      date: { id: folder.id, pageToken: "private-repeated-token" } })).toString("base64url") : undefined;
-    const response = await request(`/api/events/page?type=RecentClips${token ? `&pageToken=${token}` : ""}`);
+    const response = await request("/api/events/page?type=RecentClips");
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: "Repeated RecentClips date-folder page token: 2026-10-24" });
-    expect(provider.listsFor(directory)).toHaveLength(midDay ? 1 : 2);
+    expect(await response.json()).toEqual({ error: "Repeated Drive folder page token" });
+    expect(provider.listsFor(directory)).toHaveLength(2);
   });
 
-  it("fails a later date page without returning or indexing an earlier partial result", async () => {
+  it("returns an error after an incomplete day fails, then retries the same date without losing files", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
-    const timestamps = ["2026-10-24_08-00-00", "2026-10-24_09-00-00", "2026-10-24_10-00-00"];
-    for (const timestamp of timestamps) provider.add(`${directory}/${timestamp}-front.mp4`);
+    for (let hour = 0; hour < 3; hour++) provider.add(`${directory}/2026-10-24_0${hour}-00-00-front.mp4`);
     vi.stubGlobal("fetch", async (input: string | URL | Request) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id && url.searchParams.has("pageToken")) {
-        provider.requests.push(url);
-        return new Response("Drive unavailable", { status: 503 });
-      }
-      return provider.fetch(input);
-    });
-    await start();
-    const failed = await request("/api/events/page?type=RecentClips");
-    expect(failed.status).toBe(500);
-    expect(await failed.json()).toEqual({ error: `Failed to list Drive folder ${folder.id}: 503` });
-    expect(provider.listsFor(directory)).toHaveLength(2);
-    // An indexed partial recording would bypass this failing folder resolution.
-    provider.resolveFailures.set(directory, 503);
-    expect((await request(`/api/events/RecentClips/${timestamps[2]}`)).status).toBe(500);
-    provider.resolveFailures.delete(directory);
-    vi.stubGlobal("fetch", provider.fetch.bind(provider));
-    const retried = await page();
-    expect(retried.events.map((event: { id: string }) => event.id)).toEqual([...timestamps].reverse());
-  });
-
-  it("surfaces a failed remaining-root metadata lookup without advancing the caller's cursor", async () => {
-    provider.add("RecentClips/2026-10-24_10-00-00-front.mp4");
-    provider.add(`${LEGACY}/2026-10-21_10-00-00-front.mp4`);
-    const legacyId = provider.entries.get(LEGACY)!.id;
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
-      const url = new URL(input instanceof Request ? input.url : input);
-      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === legacyId) return new Response("Provider unavailable", { status: 503 });
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id && url.searchParams.has("pageToken")) return new Response("Provider unavailable", { status: 503 });
       return provider.fetch(input);
     });
     await start();
     const failure = await request("/api/events/page?type=RecentClips");
     expect(failure.status).toBe(500);
-    expect(await failure.json()).toEqual({ error: `Failed to list Drive folder ${legacyId}: 503` });
+    expect((await failure.json()).error).toContain("503");
+    provider.resolveFailures.set(directory, 503);
+    // A partially indexed day would bypass this failing folder lookup.
+    expect((await request("/api/events/RecentClips/2026-10-24_00-00-00")).status).toBe(500);
+    provider.resolveFailures.delete(directory);
     vi.stubGlobal("fetch", provider.fetch.bind(provider));
     const retried = await page();
-    expect(retried.nextPageDate).toBe("2026-10-21");
-    expect(retried.events.map((event: { id: string }) => event.id)).toEqual(["2026-10-24_10-00-00"]);
+    expect(retried.events).toHaveLength(3);
+    expect(retried.nextPageToken).toBeNull();
     expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
+
+  it.each(["2026-02-30", "2026-10-25", "private-cursor", Buffer.from(JSON.stringify({ root: "old-root" })).toString("base64url")])(
+    "rejects invalid, missing, and legacy cursors with a refresh instruction: %s", async (token) => {
+      provider.add("RecentClips/2026-10-24", true);
+      await start();
+      const response = await request(`/api/events/page?type=RecentClips&pageToken=${encodeURIComponent(token)}`);
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("refresh the event list");
+      expect(provider.listsFor("RecentClips/2026-10-24")).toHaveLength(0);
+    },
+  );
+
+  it("rejects duplicate timestamp-camera files across Drive pages", async () => {
+    const directory = "RecentClips/2026-10-24";
+    const folder = provider.add(directory, true);
+    const file = provider.add(`${directory}/2026-10-24_10-00-00-front.mp4`);
+    provider.add(`${directory}/2026-10-24_09-00-00-front.mp4`);
+    provider.children.get(folder.id)!.push({ ...file, id: "duplicate-file" });
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect((await response.json()).error).toBe("Duplicate recording file: 2026-10-24_10-00-00-front.mp4");
+    expect(provider.listsFor(directory)).toHaveLength(2);
+  });
+
+  it("rejects duplicate day folders instead of choosing an arbitrary recording source", async () => {
+    const day = provider.add("RecentClips/2026-10-24", true);
+    provider.children.get(provider.entries.get("RecentClips")!.id)!.push({ ...day, id: "duplicate-day" });
+    await start();
+    const response = await request("/api/events/page?type=RecentClips");
+    expect(response.status).toBe(500);
+    expect((await response.json()).error).toBe("Duplicate RecentClips date folder: 2026-10-24");
+  });
+
 });
 
 describe("hosted API origin policy", () => {

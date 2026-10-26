@@ -28,7 +28,7 @@ describe("private source boundaries", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const drive = new GDriveLiteClient({ baseUrl: "http://drive.test/prefix" });
-    const resolved = await drive.resolvePath("/RecentClips-before-2026-10-02/clip-front.mp4", "file");
+    const resolved = await drive.resolvePath("/RecentClips/2026-10-02/2026-10-02_10-00-00-front.mp4", "file");
     const thumbnail = drive.thumbnailSource(resolved);
     expect(thumbnail).toMatchObject({
       id: "clip",
@@ -177,6 +177,20 @@ describe("Drive listing completeness", () => {
     expect(await drive.listFolderPage({ id: "archive" }, {})).toEqual({
       folderId: "archive", resourceKey: undefined, files: [file], nextPageToken: "older",
     });
+  });
+
+  it("rejects a provider cursor cycle without returning a prefix, then permits a fresh read", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({ folderId: "archive", files: [file], nextPageToken: "private-first" }))
+      .mockResolvedValueOnce(Response.json({ folderId: "archive", files: [], nextPageToken: "private-second" }))
+      .mockResolvedValueOnce(Response.json({ folderId: "archive", files: [], nextPageToken: "private-first" }))
+      .mockResolvedValueOnce(Response.json({ folderId: "archive", files: [file] }));
+    vi.stubGlobal("fetch", fetch);
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    await expect(drive.listFolder({ id: "archive" })).rejects.toThrow("Repeated Drive folder page token");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect((await drive.listFolder({ id: "archive" })).files).toEqual([file]);
+    expect(fetch).toHaveBeenCalledTimes(4);
   });
 
   it("rejects a later incomplete page without returning the earlier prefix, then permits a fresh read", async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   scanEventFolder,
-  scanRecentClipsPage,
+  scanRecentClips,
   getClipSource,
   getEventThumbnail,
   type TeslacamDrive,
@@ -159,12 +159,8 @@ function fixture(): MockFiles {
     "2026-02-01_10-13-00",
   ]) {
     for (const cam of ["front", "back", "left_repeater", "right_repeater"]) {
-      files[`RecentClips/${ts}-${cam}.mp4`] = "";
+      files[`RecentClips/2026-02-01/${ts}-${cam}.mp4`] = "";
     }
-  }
-
-  for (const cam of ["front", "back"]) {
-    files[`RecentClips/2026-01-15/2026-01-15_08-00-00-${cam}.mp4`] = "";
   }
 
   return files;
@@ -315,6 +311,16 @@ describe("scanEventFolder", () => {
     expect(event?.cameraCount).toBe(0);
   });
 
+  it("rejects duplicate camera files in Saved/Sentry event folders", async () => {
+    const path = "SavedClips/2025-06-01_18-17-49";
+    const filename = "2025-06-01_18-07-09-front.mp4";
+    const drive = createMockDrive({ [`${path}/${filename}`]: "" });
+    const first = drive.entry(`${path}/${filename}`);
+    drive.listFolder = async () => ({ folderId: path, files: [first, { ...first, id: "another-file-object" }] });
+    await expect(scanEventFolder(drive, "SavedClips", drive.entry(path, true)))
+      .rejects.toThrow(`Duplicate recording file: ${filename}`);
+  });
+
   it("handles six-camera Sentry events", async () => {
     const drive = createMockDrive(fixture());
     const event = await scanEventFolder(
@@ -337,12 +343,12 @@ describe("scanEventFolder", () => {
   });
 });
 
-describe("scanRecentClipsPage", () => {
-  it("groups flat RecentClips page files into driving sessions", async () => {
+describe("scanRecentClips", () => {
+  it("groups a date folder's file metadata into driving sessions without reading Drive", async () => {
     const drive = createMockDrive(fixture());
-    const page = (await drive.listFolder(drive.folderRef(drive.entry("RecentClips", true)))).files
-      .filter((entry) => !drive.isFolder(entry));
-    const events = await scanRecentClipsPage(drive, page);
+    const files = (await drive.listFolder(drive.folderRef(drive.entry("RecentClips/2026-02-01", true)))).files;
+    drive.listCalls.length = 0;
+    const events = scanRecentClips({ fileSource: drive.fileSource, thumbnailSource: drive.thumbnailSource }, files);
 
     expect(events.map((event) => event.id)).toEqual([
       "2026-02-01_10-00-00",
@@ -350,47 +356,40 @@ describe("scanRecentClipsPage", () => {
     ]);
     expect(events[0].clips).toHaveLength(3);
     expect(events[1].clips).toHaveLength(2);
+    expect(events[0].clips[0].cameras).toEqual(["front", "left_repeater", "right_repeater", "back"]);
+    expect(events[0].clips[0]).not.toHaveProperty("subfolder");
+    expect(drive.listCalls).toEqual([]);
   });
 
-  it("scans date subfolders from a RecentClips page", async () => {
-    const drive = createMockDrive(fixture());
-    const page = (await drive.listFolder(drive.folderRef(drive.entry("RecentClips", true)))).files;
-    const events = await scanRecentClipsPage(drive, page);
-    const subfolderEvent = events.find((event) => event.id === "2026-01-15_08-00-00");
-
-    expect(subfolderEvent?.clips).toHaveLength(1);
-    expect(subfolderEvent?.clips[0].subfolder).toBe("2026-01-15");
-    expect(subfolderEvent?.clips[0].cameras).toEqual(["front", "back"]);
-  });
-
-  it("returns an empty page when no clips are present", async () => {
+  it("returns an empty page when no clips are present", () => {
     const drive = createMockDrive({});
-    await expect(scanRecentClipsPage(drive, [])).resolves.toEqual([]);
+    expect(scanRecentClips(drive, [])).toEqual([]);
   });
 
-  it("propagates a date-folder discovery failure even if flat clips were already found", async () => {
-    const drive = createMockDrive(fixture());
-    const page = [drive.entry("RecentClips/2026-02-01_10-00-00-front.mp4"), drive.entry("RecentClips/2026-01-15", true)];
-    const error = new Error("Drive date listing failed");
-    drive.listFolder = async () => { throw error; };
-    await expect(scanRecentClipsPage(drive, page)).rejects.toBe(error);
-  });
-
-  it("keeps a missing minute unrecorded within a Recent driving session", async () => {
+  it("keeps a missing minute unrecorded within a Recent driving session", () => {
     const files = Object.fromEntries(["2026-02-01_10-00-00", "2026-02-01_10-02-00"]
-      .map((timestamp) => [`RecentClips/${timestamp}-front.mp4`, ""]));
+      .map((timestamp) => [`RecentClips/2026-02-01/${timestamp}-front.mp4`, ""]));
     const drive = createMockDrive(files);
-    const events = await scanRecentClipsPage(drive, Object.keys(files).map((path) => drive.entry(path)));
+    const events = scanRecentClips(drive, Object.keys(files).map((path) => drive.entry(path)));
     expect(events).toHaveLength(1);
     expect(events[0].clips.map((clip) => clip.durationSec)).toEqual([60, 60]);
     expect(events[0].totalDurationSec).toBe(120);
   });
 
-  it("rejects an invalid timestamp even when it is the only Recent segment", async () => {
-    const path = "RecentClips/2025-02-30_12-00-00-front.mp4";
+  it("rejects an invalid timestamp even when it is the only Recent segment", () => {
+    const path = "RecentClips/2025-02-28/2025-02-30_12-00-00-front.mp4";
     const drive = createMockDrive({ [path]: "" });
-    await expect(scanRecentClipsPage(drive, [drive.entry(path)]))
-      .rejects.toThrow("Invalid recording timestamp");
+    expect(() => scanRecentClips(drive, [drive.entry(path)]))
+      .toThrow("Invalid recording timestamp");
+  });
+
+  it("rejects duplicate camera files instead of silently choosing one Drive object", () => {
+    const path = "RecentClips/2026-02-01/2026-02-01_10-00-00-front.mp4";
+    const drive = createMockDrive({ [path]: "" });
+    const first = drive.entry(path);
+    const second = { ...first, id: "another-file-object" };
+    expect(() => scanRecentClips(drive, [first, second]))
+      .toThrow("Duplicate recording file: 2026-02-01_10-00-00-front.mp4");
   });
 });
 

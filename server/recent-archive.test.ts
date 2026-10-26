@@ -3,7 +3,6 @@ import { GDriveLiteClient, type DriveEntry } from "./gdrive-lite";
 import { RecentArchive } from "./recent-archive";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
-const LEGACY = "RecentClips-before-2026-10-02";
 
 function setup(paths: Record<string, boolean>, listedFiles: Record<string, string[]>, failures: Record<string, number>) {
   const entries = new Map(Object.entries(paths).map(([name, folder]) => [name, {
@@ -24,9 +23,9 @@ function setup(paths: Record<string, boolean>, listedFiles: Record<string, strin
       return file ? Response.json({ file }) : new Response("Not found", { status: 404 });
     }
     if (url.pathname === "/api/list") {
-      const folderId = url.searchParams.get("folderId");
-      if (!folderId) return Response.json({ folderId: "root", files: [...entries.values()].filter((entry) => entry.mimeType === FOLDER_MIME && !entry.id.includes("/")) });
-      if (!(folderId in listedFiles)) throw new Error(`Unexpected unbounded folder listing: ${folderId}`);
+      const folderId = url.searchParams.get("folderId")!;
+      if (failures[folderId]) return new Response("Provider failure", { status: failures[folderId] });
+      if (!(folderId in listedFiles)) throw new Error(`Unexpected folder listing: ${folderId}`);
       return Response.json({ folderId, files: listedFiles[folderId].map((name) => entries.get(name)!) });
     }
     throw new Error(`Unexpected provider request: ${url}`);
@@ -38,56 +37,56 @@ function setup(paths: Record<string, boolean>, listedFiles: Record<string, strin
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Recent recording bookmarks", () => {
-  it("restores a flat recording with six bounded lookups and never scans the flat root", async () => {
-    const id = "2026-09-30_12-00-00";
-    const { archive, requests } = setup({
-      RecentClips: true,
-      [`RecentClips/${id}-front.mp4`]: false,
-      [`RecentClips/${id}-back.mp4`]: false,
-    }, {}, {});
-    const event = await archive.findEvent(id);
-    expect(event).toMatchObject({ id, type: "RecentClips", cameraCount: 2, clips: [{ timestamp: id, cameras: ["front", "back"] }] });
-    expect(event!.clips[0].sourceByCamera!.front.id).toBe(`RecentClips/${id}-front.mp4`);
-    expect(requests).toHaveLength(8);
-    expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(7);
-    expect(requests.filter((url) => url.pathname === "/api/list").every((url) => !url.searchParams.has("folderId"))).toBe(true);
-  });
-
-  it("restores a preserved flat recording without listing the large legacy archive", async () => {
-    const id = "2026-05-06_20-49-14";
-    const { archive, requests } = setup({
-      RecentClips: true,
-      [LEGACY]: true,
-      [`${LEGACY}/${id}-left_repeater.mp4`]: false,
-    }, {}, {});
-    const event = await archive.findEvent(id);
-    expect(event!.clips[0].sourceByCamera!.left_repeater.id).toBe(`${LEGACY}/${id}-left_repeater.mp4`);
-    expect(event!.clips[0].cameras).toEqual(["left_repeater"]);
-    expect(requests).toHaveLength(15);
-    expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(14);
-    expect(requests.filter((url) => url.pathname === "/api/list").every((url) => !url.searchParams.has("folderId"))).toBe(true);
-  });
-
-  it("retains dated-session restoration without adding flat-root scans", async () => {
+  it("restores the complete dated session from a middle-segment bookmark", async () => {
     const date = "RecentClips/2026-10-21";
     const timestamps = ["2026-10-21_20-34-58", "2026-10-21_20-35-58", "2026-10-21_20-36-58"];
     const names = timestamps.map((timestamp) => `${date}/${timestamp}-front.mp4`);
-    const { archive, requests } = setup({ RecentClips: true, [date]: true, ...Object.fromEntries(names.map((name) => [name, false])) }, { [date]: names }, {});
+    const { archive, requests } = setup({ [date]: true, ...Object.fromEntries(names.map((name) => [name, false])) }, { [date]: names }, {});
     const event = await archive.findEvent(timestamps[1]);
     expect(event!.clips.map((clip) => clip.timestamp)).toEqual(timestamps);
-    expect(event!.clips.every((clip) => clip.subfolder === "2026-10-21")).toBe(true);
-    expect(requests.filter((url) => url.pathname === "/api/list" && url.searchParams.has("folderId"))).toHaveLength(1);
+    expect(event!.clips[0].sourceByCamera!.front.id).toBe(names[0]);
+    expect(requests.filter((url) => url.pathname === "/api/list")).toHaveLength(1);
+    expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(1);
+    expect(requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
   });
 
-  it("surfaces a provider failure rather than returning a partial camera set", async () => {
-    const id = "2026-09-30_12-00-00";
-    const { archive } = setup({ RecentClips: true, [`RecentClips/${id}-back.mp4`]: false }, {}, { [`RecentClips/${id}-front.mp4`]: 503 });
-    await expect(archive.findEvent(id)).rejects.toThrow("503");
+  it("surfaces a provider failure rather than reporting missing footage", async () => {
+    const date = "RecentClips/2026-10-21";
+    const { archive } = setup({ [date]: true }, {}, { [date]: 503 });
+    await expect(archive.findEvent("2026-10-21_12-00-00")).rejects.toThrow("503");
   });
 
-  it("returns not-found only after all supported roots lack the requested recording", async () => {
-    const { archive, requests } = setup({ RecentClips: true, [LEGACY]: true }, {}, {});
+  it("returns not-found when the date folder is missing without probing old layouts", async () => {
+    const { archive, requests } = setup({}, {}, {});
     await expect(archive.findEvent("2026-09-30_12-00-00")).resolves.toBeNull();
-    expect(requests).toHaveLength(15);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].searchParams.get("path")).toBe("/RecentClips/2026-09-30");
+  });
+
+  it("resolves a video directly from the canonical date path", async () => {
+    const segment = "2026-09-30_12-00-00";
+    const name = `RecentClips/2026-09-30/${segment}-back.mp4`;
+    const { archive, requests } = setup({ [name]: false }, {}, {});
+    await expect(archive.findClipSource(segment, "back")).resolves.toMatchObject({ id: name });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("propagates an ambiguous exact-path lookup without choosing another source", async () => {
+    const segment = "2026-09-30_12-00-00";
+    const name = `RecentClips/2026-09-30/${segment}-front.mp4`;
+    const { archive, requests } = setup({}, {}, { [name]: 409 });
+    await expect(archive.findClipSource(segment, "front")).rejects.toThrow("409");
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["2026-10-20_12-00-00-front.mp4", "wrong date folder"],
+    ["2026-10-21_25-00-00-front.mp4", "Invalid recording timestamp"],
+    ["partial.mp4", "Unsupported RecentClips file"],
+  ])("rejects invalid dated content: %s", async (filename, message) => {
+    const date = "RecentClips/2026-10-21";
+    const name = `${date}/${filename}`;
+    const { archive } = setup({ [date]: true, [name]: false }, { [date]: [name] }, {});
+    await expect(archive.findEvent("2026-10-21_12-00-00")).rejects.toThrow(message);
   });
 });

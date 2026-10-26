@@ -257,6 +257,7 @@ export class GDriveLiteClient {
     let folderId = folder.id || "";
     let resourceKey = folder.resourceKey || "";
     let pageToken = "";
+    const seenTokens = new Set<string>();
 
     do {
       const page = await this.listPage(folder, {
@@ -268,6 +269,8 @@ export class GDriveLiteClient {
       resourceKey = page.resourceKey || resourceKey;
       files.push(...page.files);
       pageToken = page.nextPageToken || "";
+      if (pageToken && seenTokens.has(pageToken)) throw new Error("Repeated Drive folder page token");
+      if (pageToken) seenTokens.add(pageToken);
     } while (pageToken);
 
     return { folderId, resourceKey, files };

@@ -6,7 +6,7 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 
 - **Multi-camera player** — Recordings open with a single active camera in Focus. Choose Grid for synchronized playback of all 6 cameras. Switching cameras preserves playback position and speed.
 - **Recording browser** — Browse Saved, Sentry, and Recent recordings or view loaded recordings on a timeline. Search loaded recordings by displayed date, time, city, or reason.
-- **Timeline view** — A common loaded date range across Recent, Saved, and Sentry footage; loading older history prioritizes sources that have not reached the same archive day
+- **Timeline view** — Automatically load seven calendar days ending at the newest recording day, with a common loaded range across Recent, Saved, and Sentry footage. Earlier 7 days extends that range.
 - **HLS streaming** — ffmpeg segments footage on demand so the browser loads video in chunks
 - **Driving data on demand** — Select Driving data or press T to show speed, GPS coordinates, and other data extracted from H.264 SEI metadata
 - **Zoomable seek bar** — Scroll to zoom, drag to pan, minimap for orientation
@@ -119,18 +119,21 @@ TeslaCam/
 ├── SentryClips/
 │   └── 2026-01-15_14-20-00/
 │       └── ...
-├── RecentClips/
-│   ├── 2026-01-15_10-30-00-front.mp4
-│   └── 2026-01-16/
-│       └── 2026-01-16_10-30-00-front.mp4
-└── RecentClips-before-2026-01-16/
-    └── 2026-01-14_10-30-00-front.mp4
+└── RecentClips/
+    ├── 2026-01-15/
+    │   └── 2026-01-15_10-30-00-front.mp4
+    └── 2026-01-16/
+        └── 2026-01-16_10-30-00-front.mp4
 ```
 
-Recent footage can be stored directly in `RecentClips` or in its `YYYY-MM-DD`
-subfolders. Preserved archives named `RecentClips-before-YYYY-MM-DD` are included
-after the current archive. Browsing pages each folder separately and ignores the
-`metadata` subfolder. These roots are discovered when the server starts.
+Recent footage lives in `RecentClips/YYYY-MM-DD/`, using each video filename's
+recording date. Each Recent page loads one complete day of file metadata; Drive
+pagination is handled internally. Videos are downloaded only for playback. The
+root-level `metadata` folder is excluded from recording discovery. Flat files,
+duplicate date folders, videos in the wrong day, unsupported cameras and invalid
+video sizes fail with an explicit error.
+Historical `RecentClips-before-YYYY-MM-DD` folders are not recording sources.
+Migrate their videos into the dated layout before deploying this reader.
 
 ## Related
 

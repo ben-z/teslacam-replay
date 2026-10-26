@@ -83,6 +83,26 @@ describe("requested Timeline range", () => {
     expect(buildTimeline(events, result.fromDate).sessionList).toEqual([LATEST, saved]);
   });
 
+  it("keeps older Saved footage hidden until the canonical Recent day arrives", () => {
+    const saved = recording("2026-10-23_12-00-00", "SavedClips", 60);
+    const initial = [LATEST, saved];
+    const pages: EventPagePositions = {
+      SavedClips: { nextPageToken: "saved", nextPageDate: "2026-10-17" },
+      SentryClips: EXHAUSTED.SentryClips,
+      RecentClips: { nextPageToken: "2026-10-23", nextPageDate: "2026-10-24" },
+    };
+    const first = timelinePaging(initial, pages);
+    expect(first.fromDate).toBe("2026-10-24");
+    expect(first.loadTypes).toEqual(["RecentClips"]);
+    expect(buildTimeline(initial, first.fromDate).sessionList).toEqual([LATEST]);
+    const loaded = [...initial, recording("2026-10-23_10-00-00", "RecentClips", 60)];
+    const next = timelinePaging(loaded, {
+      ...pages, RecentClips: { nextPageToken: "2026-10-22", nextPageDate: "2026-10-23" },
+    });
+    expect(next.fromDate).toBe("2026-10-23");
+    expect(buildTimeline(loaded, next.fromDate).sessionList).toContain(saved);
+  });
+
   it("extends by a week without reloading sources that already cover the earlier target", () => {
     const events = [LATEST, recording("2026-10-12_12-00-00", "SavedClips", 60)];
     let pages: EventPagePositions = {

@@ -1,6 +1,6 @@
 import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList, DriveThumbnailSource } from "./gdrive-lite.js";
 import { recordingWallTimeMs } from "../src/playback.js";
-import type { DashcamEvent as PublicDashcamEvent, EventClip as PublicEventClip } from "../src/types.js";
+import { ALL_CAMERAS, type DashcamEvent as PublicDashcamEvent, type EventClip as PublicEventClip } from "../src/types.js";
 
 export interface EventClip extends PublicEventClip {
   sourceByCamera?: Record<string, DriveFileSource>;
@@ -25,10 +25,6 @@ export interface TeslacamDrive {
 }
 
 const CLIP_REGEX = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$/;
-const CAMERA_ORDER = ["front", "left_repeater", "right_repeater", "back", "left_pillar", "right_pillar"];
-
-// Date-only folder pattern for RecentClips subfolders: "YYYY-MM-DD"
-const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 // Max gap between consecutive clips before splitting into separate events (seconds)
 const SCAN_CONFIG = { sessionGapThresholdSec: 120, clipDurationEstimateSec: 60 } as const;
@@ -64,17 +60,7 @@ export async function scanEventFolder(
     }
   }
 
-  // Group MP4 files by timestamp segment
-  const segmentMap = new Map<string, Map<string, DriveEntry>>();
-  for (const file of files) {
-    const match = file.name.match(CLIP_REGEX);
-    if (!match) continue;
-    const [, timestamp, camera] = match;
-    if (!segmentMap.has(timestamp)) {
-      segmentMap.set(timestamp, new Map());
-    }
-    segmentMap.get(timestamp)!.set(camera, file);
-  }
+  const segmentMap = groupClips(files);
 
   const thumbnail = files.find((file) => file.name === "thumb.png");
 
@@ -141,46 +127,18 @@ function countUniqueCameras(clips: EventClip[]): number {
   return cameras.size;
 }
 
-export async function scanRecentClipsPage(
-  drive: TeslacamDrive,
+export function scanRecentClips(
+  drive: Pick<TeslacamDrive, "fileSource" | "thumbnailSource">,
   entries: DriveEntry[]
-): Promise<DashcamEvent[]> {
-  const segmentMap = new Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>();
-
-  for (const file of entries) {
-    const match = file.name.match(CLIP_REGEX);
-    if (!match) continue;
-    const [, timestamp, camera] = match;
-    addSegment(segmentMap, timestamp, camera, file);
-  }
-
-  const dateFolders = entries.filter((f) =>
-    drive.isFolder(f) && DATE_FOLDER_PATTERN.test(f.name)
-  );
-  for (const folder of dateFolders) {
-    const files = (await drive.listFolder(drive.folderRef(folder))).files;
-    for (const file of files) {
-      const match = file.name.match(CLIP_REGEX);
-      if (!match) continue;
-      const [, timestamp, camera] = match;
-      addSegment(segmentMap, timestamp, camera, file, folder.name);
-    }
-  }
-
+): DashcamEvent[] {
+  const segmentMap = groupClips(entries);
   if (segmentMap.size === 0) return [];
 
-  return recentEventsFromSegmentMap(drive, segmentMap);
-}
-
-function recentEventsFromSegmentMap(
-  drive: TeslacamDrive,
-  segmentMap: Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>
-): DashcamEvent[] {
   // Sort all segments by timestamp
   const sorted = Array.from(segmentMap.entries())
     .sort(([a], [b]) => a.localeCompare(b));
 
-  // Group into driving sessions (split on gaps > SESSION_GAP_THRESHOLD)
+  // Group consecutive segments into driving sessions.
   const sessions: typeof sorted[] = [];
   let current: typeof sorted = [sorted[0]];
 
@@ -197,13 +155,12 @@ function recentEventsFromSegmentMap(
 
   // Convert sessions to events
   return sessions.map((session) => {
-    const clips: EventClip[] = session.map(([timestamp, { cameras, subfolder }], i) => ({
+    const clips: EventClip[] = session.map(([timestamp, cameras], i) => ({
       timestamp,
       cameras: sortCameras(Array.from(cameras.keys())),
       sourceByCamera: sourceByCamera(drive, cameras),
       thumbnailSource: cameras.has("front") ? drive.thumbnailSource(cameras.get("front")!) : undefined,
       durationSec: estimateDuration(timestamp, session[i + 1]?.[0]),
-      subfolder,
     }));
 
     const firstTimestamp = session[0][0];
@@ -223,19 +180,21 @@ export function getEventThumbnail(event: DashcamEvent): DriveThumbnailSource | u
   return event.clips.find((clip) => clip.thumbnailSource)?.thumbnailSource;
 }
 
-function addSegment(
-  segmentMap: Map<string, { cameras: Map<string, DriveEntry>; subfolder?: string }>,
-  timestamp: string,
-  camera: string,
-  file: DriveEntry,
-  subfolder?: string
-): void {
-  if (!segmentMap.has(timestamp)) {
-    segmentMap.set(timestamp, { cameras: new Map(), subfolder });
+function groupClips(entries: DriveEntry[]): Map<string, Map<string, DriveEntry>> {
+  const segments = new Map<string, Map<string, DriveEntry>>();
+  for (const file of entries) {
+    const match = file.name.match(CLIP_REGEX);
+    if (!match) continue;
+    const [, timestamp, camera] = match;
+    let cameras = segments.get(timestamp);
+    if (!cameras) {
+      cameras = new Map();
+      segments.set(timestamp, cameras);
+    }
+    if (cameras.has(camera)) throw new Error(`Duplicate recording file: ${file.name}`);
+    cameras.set(camera, file);
   }
-  const segment = segmentMap.get(timestamp)!;
-  segment.cameras.set(camera, file);
-  if (subfolder) segment.subfolder = subfolder;
+  return segments;
 }
 
 function sortCameras(cameras: string[]): string[] {
@@ -243,12 +202,12 @@ function sortCameras(cameras: string[]): string[] {
 }
 
 function cameraRank(camera: string): number {
-  const rank = CAMERA_ORDER.indexOf(camera);
-  return rank === -1 ? CAMERA_ORDER.length : rank;
+  const rank = ALL_CAMERAS.findIndex((known) => known === camera);
+  return rank === -1 ? ALL_CAMERAS.length : rank;
 }
 
 function sourceByCamera(
-  drive: TeslacamDrive,
+  drive: Pick<TeslacamDrive, "fileSource">,
   cameraFiles: Map<string, DriveEntry>
 ): Record<string, DriveFileSource> {
   return Object.fromEntries(

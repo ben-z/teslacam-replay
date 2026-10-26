@@ -74,7 +74,7 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 tesl
 - **Drive access**: `gdrive-lite.ts` talks to `gdrive-serve-lite`; file IDs and direct read URLs are retained while building pages so playback does not re-resolve paths
 - **Event index**: In-memory index of pages/events touched by the current server process; gdrive-serve-lite owns listing and pagination
 - **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching below the configured `CACHE_DIR`
-- **Page-first browsing**: `/api/events/page` scans a bounded Drive page and returns its cursor plus `nextPageDate`, the newest archive-entry day that may remain. Recent paging also reads bounded listing heads of later roots; migration folder names do not prove their capture dates. Timeline uses a common loaded-day window and prioritizes unfinished sources at that day. Player routes use the in-memory event index or single-folder resolution.
+- **Page-first browsing**: `/api/events/page` returns its cursor plus `nextPageDate`, the newest archive-entry day that may remain. Saved/Sentry scan a bounded event-folder page. Recent reads one complete `RecentClips/YYYY-MM-DD` day, following Drive metadata pages internally. Timeline uses a common loaded-day window and prioritizes unfinished sources at that day. Player routes use the in-memory event index or single-folder resolution.
 
 ### Multi-Camera Sync
 - 6 cameras: front, back, left_repeater, right_repeater, left_pillar, right_pillar
