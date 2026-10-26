@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { ComponentProps } from "react";
 import type { TelemetryFrame, TelemetryValues } from "../types";
 import { DrivingDataPanel } from "./DrivingDataPanel";
 
@@ -22,10 +23,14 @@ const values: TelemetryValues = {
   linearAccelerationMps2Z: 0,
 };
 
+function renderPanel(frame: TelemetryFrame | null, overrides: Partial<ComponentProps<typeof DrivingDataPanel>>) {
+  return renderToStaticMarkup(<DrivingDataPanel frame={frame} data={frame ? { frames: [frame], frameTimesMs: [0] } : null} loading={false} error={null} available={true} {...overrides} />);
+}
+
 describe("driving data details", () => {
   it("shows all sixteen fields and signed measured acceleration", () => {
     const frame: TelemetryFrame = { ...values, raw: values };
-    const markup = renderToStaticMarkup(<DrivingDataPanel frame={frame} />);
+    const markup = renderPanel(frame, {});
     for (const label of ["Speed", "Gear", "Driving assistance", "Steering angle", "Accelerator pedal", "Brake flag", "Left indicator", "Right indicator", "Heading", "Latitude", "Longitude", "Data version", "Frame sequence", "X", "Y", "Z"]) {
       expect(markup).toContain(`>${label}<`);
     }
@@ -40,13 +45,13 @@ describe("driving data details", () => {
 
   it("keeps omitted pedal and brake fields distinct from explicit zero and false", () => {
     const raw = { autopilotState: 1, vehicleSpeedMps: 10.25 };
-    const markup = renderToStaticMarkup(<DrivingDataPanel frame={{ ...values, raw }} />);
+    const markup = renderPanel({ ...values, raw }, {});
     expect(markup).toContain('<dt>Accelerator pedal</dt><dd><span class="driving-data-unrecorded">Not recorded</span>');
     expect(markup).toContain('<dt>Brake flag</dt><dd><span class="driving-data-unrecorded">Not recorded</span>');
     expect(markup).toContain('&quot;autopilotState&quot;: 1');
     expect(markup).not.toContain('&quot;brakeApplied&quot;');
     expect(markup).not.toContain('&quot;acceleratorPedalPosition&quot;');
-    const explicit = renderToStaticMarkup(<DrivingDataPanel frame={{ ...values, raw: { acceleratorPedalPosition: 0, brakeApplied: false } }} />);
+    const explicit = renderPanel({ ...values, raw: { acceleratorPedalPosition: 0, brakeApplied: false } }, {});
     expect(explicit).toContain('<dt>Accelerator pedal</dt><dd>0.0%</dd>');
     expect(explicit).toContain('<dt>Brake flag</dt><dd>Off</dd>');
     expect(explicit).toContain('&quot;acceleratorPedalPosition&quot;: 0');
@@ -55,10 +60,35 @@ describe("driving data details", () => {
   });
 
   it("offers a native raw JSON toggle even while no current frame is available", () => {
-    const markup = renderToStaticMarkup(<DrivingDataPanel frame={null} />);
+    const markup = renderPanel(null, {});
     expect(markup).toContain('<details class="driving-data-json"><summary>Raw JSON</summary>');
     expect(markup).toContain("No driving data at this playback position.");
-    expect(markup).toContain("No recorded frame to display.");
-    expect(markup).not.toContain("<pre");
+    expect(markup).toContain('<pre tabindex="0" aria-label="Recorded driving data JSON">null</pre>');
+    expect((markup.match(/<dt>/g) ?? []).length).toBe(13);
+    expect((markup.match(/class="driving-data-axis"/g) ?? []).length).toBe(3);
+    expect(markup).not.toContain("932");
+  });
+  it("retains all fields and the JSON viewport through each unavailable state", () => {
+    for (const [state, message] of [
+      [{ loading: true }, "Loading driving data…"],
+      [{ available: false }, "No driving data in this clip."],
+      [{ error: "HTTP 502" }, "Driving data could not be loaded: HTTP 502"],
+    ] as const) {
+      const markup = renderPanel(null, state);
+      expect(markup).toContain(message);
+      expect((markup.match(/<dt>/g) ?? []).length).toBe(13);
+      expect(markup).toContain('aria-label="Recorded driving data JSON">null</pre>');
+    }
+    expect(renderPanel(null, { error: "HTTP 502" })).toContain('role="alert"');
+  });
+
+  it("keeps an unchanged axis at the same scale throughout the clip", () => {
+    const first = { ...values, raw: values };
+    const laterValues = { ...values, linearAccelerationMps2Y: 6 };
+    const later = { ...laterValues, raw: laterValues };
+    const data = { frames: [first, later], frameTimesMs: [0, 40] };
+    const unchangedAxis = 'data-direction="negative" style="width:12.5%;left:37.5%"';
+    expect(renderPanel(first, { data })).toContain(unchangedAxis);
+    expect(renderPanel(later, { data })).toContain(unchangedAxis);
   });
 });

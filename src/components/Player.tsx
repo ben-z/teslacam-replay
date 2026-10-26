@@ -192,7 +192,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   const loadedParticipantsRef = useRef("");
   const allCamerasFailed = participantCameras.length > 0 && participantCameras.every((camera) => videoErrors.has(camera));
   const audioAvailable = participantCameras.includes("front");
-  const { frame: currentTelemFrame, loading: telemetryLoading, error: telemetryError, available: telemetryAvailable } =
+  const { frame: currentTelemFrame, data: telemetryData, loading: telemetryLoading, error: telemetryError, available: telemetryAvailable } =
     useTelemetry(event, showTelemetry && participantCameras.length > 0 ? segmentIdx : -1, displayTime, segmentOffsets);
 
   const setRef = useCallback(
@@ -1186,8 +1186,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
       {/* Header */}
       {header}
 
-      {showTelemetry && telemetryAvailable === false && <p className="player-media-status" role="status">No driving data in this clip.</p>}
-      {telemetryError && <p className="player-media-status" role="alert">Driving data could not be loaded: {telemetryError}</p>}
       {playerError && <p className="player-media-status" role="alert">{playerError}</p>}
       {allCamerasFailed && (
         <p className="player-media-status" role="alert">{layout === "focus" ? "This camera failed to load. Retry it or choose another camera." : "All cameras failed to load for this segment. Retry a camera to try again."}</p>
@@ -1497,7 +1495,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           </select>
         </label>
       </div>
-      {showTelemetry && <DrivingDataPanel frame={inRecordingGap ? null : currentTelemFrame} />}
+      {showTelemetry && <DrivingDataPanel frame={inRecordingGap ? null : currentTelemFrame} data={telemetryData} loading={telemetryLoading} error={telemetryError} available={telemetryAvailable} />}
     </div>
   );
 }
