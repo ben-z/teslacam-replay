@@ -119,6 +119,62 @@ function writeTableValue(source: Buffer, name: string, offset: number, value: nu
 const slice = () => nal(Buffer.from([0x65, 0x88]));
 
 describe("Tesla vehicle data integrity", () => {
+  it("preserves all sixteen recorded fields in the normalized and raw frame", async () => {
+    const recorded = {
+      version: 1,
+      frameSeqNo: 100,
+      gearState: 1,
+      vehicleSpeedMps: 12.5,
+      acceleratorPedalPosition: 17.5,
+      steeringWheelAngle: -3.25,
+      blinkerOnLeft: true,
+      blinkerOnRight: true,
+      brakeApplied: true,
+      autopilotState: 1,
+      latitudeDeg: 37.4141,
+      longitudeDeg: -122.13,
+      headingDeg: 73.5,
+      linearAccelerationMps2X: -1.25,
+      linearAccelerationMps2Y: 2.5,
+      linearAccelerationMps2Z: 9.75,
+    };
+    const payload = teslaPayload(escapeEmulationBytes(metadata.encode(metadata.create(recorded)).finish()));
+    const data = await extractTelemetryFromBuffer(movie([Buffer.concat([payload, slice()])], [40], {}));
+    expect(data?.frames).toEqual([{ ...recorded, raw: recorded }]);
+    expect(data?.frameTimesMs).toEqual([0]);
+  });
+
+  it("keeps omitted pedal fields distinct from explicitly recorded zero and false", async () => {
+    const omitted = { frameSeqNo: 100 };
+    const explicit = { frameSeqNo: 101, acceleratorPedalPosition: 0, brakeApplied: false };
+    const explicitPayload = protobuf.Writer.create()
+      .uint32(24).uint64(101)
+      .uint32(45).float(0)
+      .uint32(72).bool(false)
+      .finish();
+    const samples = [
+      metadata.encode(metadata.create(omitted)).finish(), explicitPayload,
+    ].map((payload) => Buffer.concat([teslaPayload(escapeEmulationBytes(payload)), slice()]));
+    const data = await extractTelemetryFromBuffer(movie(samples, [40, 40], {}));
+    expect(data?.frames.map((frame) => frame.raw)).toEqual([omitted, explicit]);
+    expect(data?.frames.map((frame) => [frame.acceleratorPedalPosition, frame.brakeApplied]))
+      .toEqual([[0, false], [0, false]]);
+    expect(data?.frames[0].raw).not.toHaveProperty("version");
+    expect(data?.frames[0].raw).not.toHaveProperty("linearAccelerationMps2X");
+  });
+
+  it.each([
+    ["linearAccelerationMps2X", NaN],
+    ["linearAccelerationMps2Y", Infinity],
+    ["linearAccelerationMps2Z", -Infinity],
+  ])("rejects non-finite recorded %s", async (field, value) => {
+    const payload = teslaPayload(escapeEmulationBytes(metadata.encode(metadata.create({
+      frameSeqNo: 100, [field]: value,
+    })).finish()));
+    await expect(extractTelemetryFromBuffer(movie([Buffer.concat([payload, slice()])], [40], {})))
+      .rejects.toThrow(`Vehicle data ${field} must be finite`);
+  });
+
   it("preserves the recorded accelerator percentage without normalization", async () => {
     const payload = teslaPayload(escapeEmulationBytes(metadata.encode(metadata.create({
       frameSeqNo: 100,

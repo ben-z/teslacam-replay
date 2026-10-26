@@ -16,17 +16,22 @@ function clamp(value: number, min: number, max: number): number {
 
 export function TelemetryOverlay({ frame }: Props) {
   const mph = Math.round(frame.vehicleSpeedMps * MPS_TO_MPH);
-  const gear = GEAR_LABELS[frame.gearState] ?? "?";
+  const gear = Object.hasOwn(frame.raw, "gearState") ? GEAR_LABELS[frame.gearState] ?? "?" : "?";
   const ap = AP_LABELS[frame.autopilotState] ?? "";
   const steerDeg = Math.round(frame.steeringWheelAngle);
   const throttlePct = Math.round(frame.acceleratorPedalPosition);
-  const hasGps = frame.latitudeDeg !== 0 || frame.longitudeDeg !== 0;
+  const hasPedal = Object.hasOwn(frame.raw, "acceleratorPedalPosition");
+  const hasBrake = Object.hasOwn(frame.raw, "brakeApplied");
+  const hasSteering = Object.hasOwn(frame.raw, "steeringWheelAngle");
+  const hasGps = Object.hasOwn(frame.raw, "latitudeDeg") && Object.hasOwn(frame.raw, "longitudeDeg");
+  let brakeLabel = "—";
+  if (hasBrake) brakeLabel = frame.brakeApplied ? "On" : "Off";
 
   return (
     <div className="telem-hud">
       <div className="telem-speed-row">
         <span className="telem-gear" data-gear={gear}>{gear}</span>
-        <span className="telem-speed">{mph}</span>
+        <span className="telem-speed">{Object.hasOwn(frame.raw, "vehicleSpeedMps") ? mph : "—"}</span>
         <span className="telem-unit">mph</span>
       </div>
 
@@ -38,23 +43,24 @@ export function TelemetryOverlay({ frame }: Props) {
 
       <div className="telem-pedals">
         <div className="telem-pedal">
-          <span className="telem-pedal-label">THR</span>
+          <span className="telem-pedal-label">Pedal</span>
           <div className="telem-pedal-track">
             <div
               className="telem-pedal-fill telem-pedal-thr"
-              style={{ width: `${throttlePct}%` }}
+              style={{ width: `${hasPedal ? throttlePct : 0}%` }}
             />
           </div>
-          <span className="telem-pedal-val">{throttlePct}%</span>
+          <span className="telem-pedal-val" title={hasPedal ? "Accelerator pedal position" : "Not recorded"}>{hasPedal ? `${throttlePct}%` : "—"}</span>
         </div>
         <div className="telem-pedal">
-          <span className="telem-pedal-label">BRK</span>
+          <span className="telem-pedal-label">Brake</span>
           <div className="telem-pedal-track">
             <div
-              className={`telem-pedal-fill telem-pedal-brk${frame.brakeApplied ? " active" : ""}`}
-              style={{ width: frame.brakeApplied ? "100%" : "0%" }}
+              className={`telem-pedal-fill telem-pedal-brk${hasBrake && frame.brakeApplied ? " active" : ""}`}
+              style={{ width: hasBrake && frame.brakeApplied ? "100%" : "0%" }}
             />
           </div>
+          <span className="telem-pedal-val" title={hasBrake ? "Recorded brake flag" : "Not recorded"}>{brakeLabel}</span>
         </div>
       </div>
 
@@ -67,7 +73,7 @@ export function TelemetryOverlay({ frame }: Props) {
             transform={`rotate(${clamp(steerDeg, -MAX_STEER_DISPLAY, MAX_STEER_DISPLAY)}, 12, 12)`}
           />
         </svg>
-        <span className="telem-steer-val">{steerDeg > 0 ? "+" : ""}{steerDeg}&deg;</span>
+        <span className="telem-steer-val">{hasSteering ? `${steerDeg > 0 ? "+" : ""}${steerDeg}°` : "—"}</span>
       </div>
 
       {hasGps && (

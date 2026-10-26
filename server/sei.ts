@@ -1,11 +1,9 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import protobuf from "protobufjs";
-import type { TelemetryFrame } from "../src/types.js";
+import type { TelemetryFrame, TelemetryValues } from "../src/types.js";
 
-export interface SeiFrame extends TelemetryFrame {
-  frameSeqNo: number;
-}
+export type SeiFrame = TelemetryFrame;
 
 export interface TelemetryData {
   frameTimesMs: number[]; // precomputed start time for each telemetry frame
@@ -16,8 +14,14 @@ export interface TelemetryData {
 let seiMetadataType: protobuf.Type | null = null;
 async function getProtoType(): Promise<protobuf.Type> {
   if (seiMetadataType) return seiMetadataType;
-  const root = await protobuf.load(path.join(import.meta.dirname, "dashcam.proto"));
+  const schema = await readFile(path.join(import.meta.dirname, "dashcam.proto"), "utf8");
+  const root = protobuf.parse(schema).root;
   seiMetadataType = root.lookupType("SeiMetadata");
+  // Preserve explicitly encoded zero/false values in the raw view. Proto3's
+  // implicit presence otherwise drops them during decoding in protobufjs.
+  for (const field of seiMetadataType.fieldsArray) {
+    field.setOption("features", { field_presence: "EXPLICIT" });
+  }
   return seiMetadataType;
 }
 
@@ -280,12 +284,16 @@ class Mp4Parser {
 
     const payload = this.stripEmulationBytes(nal.subarray(i + 1, nal.length - 1));
     let msg: Record<string, unknown>;
+    let raw: Partial<TelemetryValues>;
     try {
-      msg = SeiMetadata.toObject(SeiMetadata.decode(payload), { defaults: true, longs: Number });
+      const decoded = SeiMetadata.decode(payload);
+      msg = SeiMetadata.toObject(decoded, { defaults: true, longs: Number });
+      raw = SeiMetadata.toObject(decoded, { defaults: false, longs: Number });
     } catch (error) {
       throw new Error("Cannot decode Tesla vehicle data", { cause: error });
     }
     const frame: SeiFrame = {
+      version: msg.version as number,
       frameSeqNo: msg.frameSeqNo as number,
       vehicleSpeedMps: msg.vehicleSpeedMps as number,
       acceleratorPedalPosition: msg.acceleratorPedalPosition as number,
@@ -298,6 +306,10 @@ class Mp4Parser {
       latitudeDeg: msg.latitudeDeg as number,
       longitudeDeg: msg.longitudeDeg as number,
       headingDeg: msg.headingDeg as number,
+      linearAccelerationMps2X: msg.linearAccelerationMps2X as number,
+      linearAccelerationMps2Y: msg.linearAccelerationMps2Y as number,
+      linearAccelerationMps2Z: msg.linearAccelerationMps2Z as number,
+      raw,
     };
     if (!Number.isSafeInteger(frame.frameSeqNo)) throw new Error("Vehicle data frame sequence is not a safe integer");
     for (const [field, value] of Object.entries(frame)) {

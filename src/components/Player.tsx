@@ -5,6 +5,7 @@ import type { DashcamEvent, CameraAngle } from "../types";
 import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
 import { useTelemetry } from "../useTelemetry";
 import { TelemetryOverlay } from "./TelemetryOverlay";
+import { DrivingDataPanel } from "./DrivingDataPanel";
 import { hasReachedPlaybackEnd, playbackBoundary, playbackParticipants, playbackTimeline, recordingWallTimeMs, type CompletedDurations } from "../playback";
 import "./Player.css";
 
@@ -1181,7 +1182,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   }
 
   return (
-    <div className="player-container" ref={containerRef}>
+    <div className={`player-container${showTelemetry ? " player-container-with-data" : ""}`} ref={containerRef}>
       {/* Header */}
       {header}
 
@@ -1496,6 +1497,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
           </select>
         </label>
       </div>
+      {showTelemetry && <DrivingDataPanel frame={inRecordingGap ? null : currentTelemFrame} />}
     </div>
   );
 }
