@@ -51,7 +51,9 @@ export const ALL_CAMERAS: CameraAngle[] = [
   "right_pillar",
 ];
 
-export interface TelemetryFrame {
+export interface TelemetryValues {
+  version: number;
+  frameSeqNo: number;
   vehicleSpeedMps: number;
   acceleratorPedalPosition: number; // percent as recorded
   steeringWheelAngle: number;
@@ -63,6 +65,14 @@ export interface TelemetryFrame {
   latitudeDeg: number;
   longitudeDeg: number;
   headingDeg: number;
+  linearAccelerationMps2X: number;
+  linearAccelerationMps2Y: number;
+  linearAccelerationMps2Z: number;
+}
+
+export interface TelemetryFrame extends TelemetryValues {
+  // Only fields encoded in the protobuf message; omitted fields remain absent.
+  raw: Partial<TelemetryValues>;
 }
 
 export interface TelemetryData {
