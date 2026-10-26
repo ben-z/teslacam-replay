@@ -25,12 +25,24 @@
 }
 
 .driving-data-heading > span,
+.driving-data-status,
 .driving-data-note,
 .driving-data-acceleration p,
 .driving-data-json p {
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.5;
+}
+
+.driving-data-status {
+  block-size: 4.5em;
+  overflow: auto;
+  margin: 0 0 12px;
+  scrollbar-gutter: stable;
+}
+
+.driving-data-status[role="alert"] {
+  color: #fca5a5;
 }
 
 .driving-data-acceleration {
@@ -121,12 +133,13 @@
 
 .driving-data-values dd {
   margin: 0;
+  min-block-size: 3em;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .driving-data-unrecorded {
   color: var(--text-muted);
-  font-size: 11px;
   font-family: inherit;
 }
 
@@ -143,8 +156,10 @@
 }
 
 .driving-data-json pre {
-  max-height: 260px;
+  block-size: 260px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
   margin: 8px 0 0;
   padding: 12px;
   border: 1px solid var(--border);
@@ -154,6 +169,7 @@
   line-height: 1.5;
 }
 
+.driving-data-status:focus-visible,
 .driving-data-json :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;

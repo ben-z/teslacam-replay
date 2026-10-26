@@ -12,7 +12,7 @@
 }
 
 .player-container-with-data .player-videos {
-  flex: 1 0 45vh;
+  flex: 0 0 45vh;
   min-height: 180px;
 }
 

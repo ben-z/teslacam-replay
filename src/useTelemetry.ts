@@ -5,6 +5,7 @@ import { telemetryFrameAt } from "./telemetry";
 
 interface UseTelemetryResult {
   frame: TelemetryFrame | null;
+  data: TelemetryData | null;
   loading: boolean;
   error: string | null;
   available: boolean | null;
@@ -51,6 +52,7 @@ export function useTelemetry(
 
   return {
     frame,
+    data: data ?? null,
     loading: Boolean(segTimestamp) && current === null,
     error: current?.error ?? null,
     available: current === null || current.error !== null ? null : current.data !== null,
