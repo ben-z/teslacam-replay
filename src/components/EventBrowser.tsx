@@ -84,8 +84,29 @@ export function EventBrowser({
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [timelineFromDate, setTimelineFromDate] = useState<string>();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const recordingsTabRef = useRef<HTMLButtonElement>(null);
+  const timelineTabRef = useRef<HTMLButtonElement>(null);
+  const retryFocusRef = useRef<HTMLButtonElement | null>(null);
   const pending = pendingTypes.length > 0;
   const failedTypes = SOURCE_TYPES.filter((type) => errorsByType[type] !== undefined);
+
+  useEffect(() => {
+    const retryButton = retryFocusRef.current;
+    if (!retryButton || retryButton.isConnected) return;
+    retryFocusRef.current = null;
+    if (active && document.hasFocus() && document.activeElement === document.body) {
+      (view === "events" ? recordingsTabRef : timelineTabRef).current!.focus();
+    }
+  }, [active, errorsByType, view]);
+
+  const clearSearch = () => {
+    setSearchInput("");
+    setSearch("");
+    setVisibleCount(PAGE_SIZE);
+    searchInputRef.current!.focus();
+    document.querySelector(".browse-content")?.scrollTo(0, 0);
+  };
 
   // Debounce search input
   useEffect(() => {
@@ -196,11 +217,13 @@ export function EventBrowser({
       : `Check older ${labels} recordings`;
   }
   if (timelineFailedTypes.length > 0) {
-    timelineLoadLabel = `Retry ${timelineFailedTypes.map((type) => BADGE_STYLES[type].label).join(", ")}`;
     timelineActionPending = timelineFailedTypes.every((type) => pendingTypes.includes(type));
+    timelineLoadLabel = `${timelineActionPending ? "Retrying" : "Retry"} ${timelineFailedTypes.map((type) => BADGE_STYLES[type].label).join(", ")}`;
   }
   let timelineRangeStatus = "Archive loaded for this range.";
-  if (timelineFailedTypes.length > 0) timelineRangeStatus = "Archive loading paused. Retry the failed source to continue.";
+  if (timelineFailedTypes.length > 0) timelineRangeStatus = timelineActionPending
+    ? "Retrying archive for this range…"
+    : "Archive loading paused. Retry the failed source to continue.";
   else if (timelinePage.manualTypes.length > 0) timelineRangeStatus = "Check older recordings below to establish this range.";
   else if (timelinePage.rangeIncomplete) timelineRangeStatus = "Loading archive for this range…";
 
@@ -213,9 +236,11 @@ export function EventBrowser({
           ? timelineFailedTypes.map((type) => `browse-error-${type}`).join(" ")
           : undefined}
         aria-disabled={timelineActionPending || undefined}
-        onClick={() => {
+        onBlur={() => { retryFocusRef.current = null; }}
+        onClick={(event) => {
           if (timelineActionPending) return;
           if (timelineFailedTypes.length > 0) {
+            retryFocusRef.current = event.currentTarget;
             for (const type of timelineFailedTypes) {
               if (!pendingTypes.includes(type)) onRetry(type);
             }
@@ -251,6 +276,7 @@ export function EventBrowser({
         <div className="browse-filters">
           <div className="browse-view-toggle" role="group" aria-label="View">
             <button
+              ref={recordingsTabRef}
               onClick={() => { setView("events"); setVisibleCount(PAGE_SIZE); document.querySelector(".browse-content")?.scrollTo(0, 0); }}
               className={`browse-view-btn ${view === "events" ? "active" : ""}`}
               aria-pressed={view === "events"}
@@ -259,6 +285,7 @@ export function EventBrowser({
             </button>
             {(
               <button
+                ref={timelineTabRef}
                 onClick={() => { setView("timeline"); document.querySelector(".browse-content")?.scrollTo(0, 0); }}
                 className={`browse-view-btn ${view === "timeline" ? "active" : ""}`}
                 aria-pressed={view === "timeline"}
@@ -290,18 +317,26 @@ export function EventBrowser({
               </div>
               <div className="browse-search-wrapper">
                 <input
+                  ref={searchInputRef}
                   type="text"
                   placeholder="Search loaded recordings…"
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape" && searchInput) {
+                      event.preventDefault();
+                      clearSearch();
+                    }
+                  }}
                   className="browse-search"
                   aria-label="Search loaded recordings by city, date or reason"
                 />
                 {searchInput && (
                   <button
-                    onClick={() => setSearchInput("")}
+                    onClick={clearSearch}
                     className="browse-search-clear"
                     aria-label="Clear search"
+                    title="Clear search (Esc)"
                   >
                     &times;
                   </button>
@@ -319,12 +354,22 @@ export function EventBrowser({
           </p>
         )}
         {failedTypes.map((type) => (
-          <div className="browse-error" id={`browse-error-${type}`} role="alert" key={type}>
-            {BADGE_STYLES[type].label}: {errorsByType[type]}
-            {events.some((event) => event.type === type) && (
+          <div className="browse-error" id={`browse-error-${type}`} role={pendingTypes.includes(type) ? "status" : "alert"} key={type}>
+            {pendingTypes.includes(type)
+              ? `Retrying ${BADGE_STYLES[type].label} recordings…`
+              : `${BADGE_STYLES[type].label}: ${errorsByType[type]}`}
+            {!pendingTypes.includes(type) && events.some((event) => event.type === type) && (
               <> Previously loaded {BADGE_STYLES[type].label} recordings are still shown.</>
             )}
-            {" "}<button onClick={() => onRetry(type)} disabled={pendingTypes.includes(type)}>Retry {BADGE_STYLES[type].label}</button>
+            {" "}<button
+              aria-disabled={pendingTypes.includes(type) || undefined}
+              onBlur={() => { retryFocusRef.current = null; }}
+              onClick={(event) => {
+                if (pendingTypes.includes(type)) return;
+                retryFocusRef.current = event.currentTarget;
+                onRetry(type);
+              }}
+            >Retry {BADGE_STYLES[type].label}</button>
           </div>
         ))}
         {view === "events" && (
@@ -366,7 +411,7 @@ export function EventBrowser({
               <>
                 <p>No loaded recordings match your filters</p>
                 <button
-                  onClick={() => { setFilter("all"); setSearchInput(""); }}
+                  onClick={() => { setFilter("all"); clearSearch(); }}
                   className="browse-clear-filters-btn"
                 >
                   Clear filters
