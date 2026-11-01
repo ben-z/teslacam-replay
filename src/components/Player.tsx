@@ -7,10 +7,13 @@ import { useTelemetry } from "../useTelemetry";
 import { TelemetryOverlay } from "./TelemetryOverlay";
 import { DrivingDataPanel } from "./DrivingDataPanel";
 import { hasReachedPlaybackEnd, playbackBoundary, playbackParticipants, playbackTimeline, recordingWallTimeMs, type CompletedDurations } from "../playback";
+import { RecordingNavigation } from "./RecordingNavigation";
+import { formatPlaybackTime as formatTime, RECORDING_NAVIGATION } from "../recordingNavigation";
 import "./Player.css";
 
 interface Props {
   event: DashcamEvent;
+  initialTime: number;
   onBack: () => void;
   onRefresh: () => void;
   onNavigate?: (direction: -1 | 1) => void;
@@ -20,12 +23,6 @@ interface Props {
 
 type Layout = "grid" | "focus";
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
 function cameraSeekTime(time: number, completedDuration: number | undefined): number {
   const nonnegative = Math.max(0, time);
   return completedDuration === undefined ? nonnegative : Math.min(nonnegative, completedDuration);
@@ -33,7 +30,6 @@ function cameraSeekTime(time: number, completedDuration: number | undefined): nu
 
 const SYNC_THRESHOLD = 0.15; // seconds - max drift before re-syncing
 const SYNC_INTERVAL = 200; // ms - how often to check sync
-const SEEK_STEP = 5; // seconds for arrow key seeking
 const SPEED_OPTIONS = [0.5, 1, 1.5, 2];
 const NEXT_SEGMENT_PREFETCH_WINDOW = 15; // seconds before boundary
 const HLS_LOAD_TIMEOUT_MS = 120_000; // first-run server-side segmentation can take tens of seconds
@@ -68,12 +64,13 @@ const BADGE_MAP = {
   SavedClips: { label: "Saved", color: "var(--saved-color)" },
 } as const;
 
-export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext }: Props) {
+export function Player({ event, initialTime, onBack, onRefresh, onNavigate, hasPrev, hasNext }: Props) {
   const recordingTitleRef = useRef<HTMLHeadingElement>(null);
   const [layout, setLayout] = useState<Layout>("focus");
   const [focusCamera, setFocusCamera] = useState<CameraAngle>("front");
   const [isPlaying, setIsPlaying] = useState(false);
-  const [displayTime, setDisplayTime] = useState(0);
+  const [displayTime, setDisplayTime] = useState(initialTime);
+  const [seekTarget, setSeekTarget] = useState({ time: initialTime });
   const [playbackRate, setPlaybackRate] = useState(1);
   const [segmentIdx, setSegmentIdx] = useState(0);
 
@@ -82,9 +79,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   const [endedCameras, setEndedCameras] = useState<Set<CameraAngle>>(new Set());
   const [segmentLoading, setSegmentLoading] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
-  const [hoverTime, setHoverTime] = useState<number | null>(null);
-  const [zoomLevel, setZoomLevel] = useState(1);
-  const [viewCenter, setViewCenter] = useState(0);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const shortcutsCloseRef = useRef<HTMLButtonElement>(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
@@ -630,6 +624,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
         videoElsRef.current.forEach((video) => video.pause());
       }
       const localTime = clamped - offsets[newSegIdx];
+      setSeekTarget({ time: clamped });
       setDisplayTime(clamped);
       displayTimeRef.current = clamped;
 
@@ -789,30 +784,44 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
     pendingFinalSeekRef.current = null;
     setCompletedDurationState({ eventKey, durations: {} });
 
-    segmentIdxRef.current = 0;
-    setSegmentIdx(0);
-    setDisplayTime(0);
-    displayTimeRef.current = 0;
+    const offsets = segmentOffsetsRef.current;
+    const startTime = Math.max(0, Math.min(initialTime, offsets.at(-1)!));
+    let initialSegment = 0;
+    for (let index = event.clips.length - 1; index >= 0; index--) {
+      if (startTime >= offsets[index]) { initialSegment = index; break; }
+    }
+    segmentIdxRef.current = initialSegment;
+    setSegmentIdx(initialSegment);
+    setDisplayTime(startTime);
+    displayTimeRef.current = startTime;
+    setSeekTarget({ time: startTime });
     setVideoErrors(new Set());
     setBufferingCameras(new Set());
     setEndedCameras(new Set());
     prefetchedSegmentsRef.current.clear();
-    const initialCamera = allEventCameras.find((camera) => event.clips[0]?.cameras.includes(camera));
+    const initialCamera = allEventCameras.find((camera) => event.clips[initialSegment]?.cameras.includes(camera));
     if (initialCamera !== undefined) {
       setFocusCamera(initialCamera);
       selectionRef.current = { ...selectionRef.current, focusCamera: initialCamera };
     }
 
-    loadSegment(0, 0, true);
-  }, [eventKey, loadSegment]);
+    const selection = selectionRef.current;
+    const available = allEventCameras.filter((camera) => event.clips[initialSegment]?.cameras.includes(camera));
+    const cameras = playbackParticipants(available, selection.layout === "focus" ? selection.focusCamera : null);
+    if (initialSegment === event.clips.length - 1 && cameras.length > 0) {
+      pendingFinalSeekRef.current = { eventKey, timestamp: event.clips[initialSegment].timestamp, time: startTime, cameras, ...selection };
+    }
+
+    loadSegment(initialSegment, startTime - offsets[initialSegment], true);
+  }, [eventKey, initialTime, loadSegment]);
 
   // A layout/camera change reconciles sources without resetting playback.
   useEffect(() => {
-    pendingFinalSeekRef.current = null;
     const seg = event.clips[segmentIdxRef.current];
     if (!seg) return;
     const key = `${eventKey}/${seg.timestamp}/${participantCamerasRef.current.join(",")}`;
     if (key === loadedParticipantsRef.current) return;
+    pendingFinalSeekRef.current = null;
     loadSegment(segmentIdxRef.current, displayTimeRef.current - segmentOffsetsRef.current[segmentIdxRef.current], false);
   }, [layout, focusCamera, event.clips, eventKey, loadSegment]);
 
@@ -863,7 +872,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
               seekTo(segmentOffsetsRef.current[segmentIdxRef.current - 1]);
             }
           } else {
-            seekTo(displayTimeRef.current - SEEK_STEP);
+            seekTo(displayTimeRef.current - RECORDING_NAVIGATION.seekStepSec);
           }
           break;
         case "ArrowRight":
@@ -874,7 +883,7 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
               seekTo(segmentOffsetsRef.current[segmentIdxRef.current + 1]);
             }
           } else {
-            seekTo(displayTimeRef.current + SEEK_STEP);
+            seekTo(displayTimeRef.current + RECORDING_NAVIGATION.seekStepSec);
           }
           break;
         case "[":
@@ -950,100 +959,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
   );
 
   const { label: badgeLabel, color: badgeColor } = BADGE_MAP[event.type];
-
-  // Zoom/pan calculations for the player timeline
-  const viewDuration = totalDuration / zoomLevel;
-  const viewStart = Math.max(0, Math.min(viewCenter - viewDuration / 2, totalDuration - viewDuration));
-  const viewEnd = viewStart + viewDuration;
-  const isZoomed = zoomLevel > 1;
-
-  // Convert a time value to a percentage within the visible viewport
-  const timeToViewPct = (t: number): number => ((t - viewStart) / viewDuration) * 100;
-
-  // Pre-compute trigger marker position (null if out of viewport)
-  const triggerPct = triggerTimeGlobal != null && totalDuration > 0
-    ? timeToViewPct(triggerTimeGlobal)
-    : null;
-  const showTriggerMarker = triggerPct != null && triggerPct >= -1 && triggerPct <= 101;
-
-  // Auto-follow playhead during playback (keep it visible)
-  useEffect(() => {
-    if (!isPlaying || !isZoomed) return;
-    if (displayTime < viewStart || displayTime > viewEnd) {
-      setViewCenter(displayTime);
-    }
-  }, [isPlaying, isZoomed, displayTime, viewStart, viewEnd]);
-
-  // Reset zoom when event changes
-  useEffect(() => {
-    setZoomLevel(1);
-    setViewCenter(0);
-  }, [event.type, event.id]);
-
-  // Attach wheel listener with { passive: false } to allow preventDefault
-  const timelineRef = useRef<HTMLDivElement>(null);
-  const totalDurationRef = useRef(totalDuration);
-  totalDurationRef.current = totalDuration;
-
-  useEffect(() => {
-    const el = timelineRef.current;
-    if (!el) return;
-    const handler = (e: WheelEvent) => {
-      const td = totalDurationRef.current;
-      if (td <= 0) return;
-      e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const mouseX = (e.clientX - rect.left) / rect.width;
-      const zoomFactor = e.deltaY < 0 ? 1.3 : 1 / 1.3;
-      // Functional updates handle rapid sequential scroll events correctly
-      setZoomLevel(prevZoom => {
-        const newZoom = Math.max(1, Math.min(50, prevZoom * zoomFactor));
-        setViewCenter(prevCenter => {
-          const prevDur = td / prevZoom;
-          const vs = Math.max(0, Math.min(prevCenter - prevDur / 2, td - prevDur));
-          const mouseTime = vs + mouseX * prevDur;
-          const newDur = td / newZoom;
-          const newCenter = mouseTime - (mouseX - 0.5) * newDur;
-          return Math.max(newDur / 2, Math.min(td - newDur / 2, newCenter));
-        });
-        return newZoom;
-      });
-    };
-    el.addEventListener("wheel", handler, { passive: false });
-    return () => el.removeEventListener("wheel", handler);
-  }, []);
-
-  const handleTimelineClick = useCallback((e: React.MouseEvent) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const time = viewStart + pct * viewDuration;
-    seekTo(time);
-  }, [viewStart, viewDuration, seekTo]);
-
-  const handleTimelineMouseMove = useCallback((e: React.MouseEvent) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setHoverTime(viewStart + pct * viewDuration);
-  }, [viewStart, viewDuration]);
-
-  // Minimap drag to pan
-  const minimapDragRef = useRef(false);
-  const handleMinimapPointerDown = useCallback((e: React.PointerEvent) => {
-    minimapDragRef.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    setViewCenter(pct * totalDuration);
-  }, [totalDuration]);
-  const handleMinimapPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!minimapDragRef.current) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setViewCenter(pct * totalDuration);
-  }, [totalDuration]);
-  const handleMinimapPointerUp = useCallback(() => {
-    minimapDragRef.current = false;
-  }, []);
 
   const navigation = (
     <div className="player-nav-group">
@@ -1203,6 +1118,8 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
                 ["Space", "Play / Pause"],
                 ["\u2190 \u2192", "Seek \u00b15 seconds"],
                 ["Shift+\u2190 \u2192", "Previous / Next segment"],
+                ["Home / End", "First / Last position on timeline"],
+                ["Page Up / Down", "Seek by timeline window"],
                 ["[ ]", "Previous / Next recording"],
                 ["F", "Toggle grid / focus layout"],
                 ["M", "Mute / Unmute"],
@@ -1297,6 +1214,22 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
         {inRecordingGap && <div className="player-loading-overlay" role="status">{layout === "focus" ? "This camera has no video for this interval. Choose another camera or use Next segment." : "No archived video for this interval. Use Next segment to continue."}</div>}
       </div>
 
+      {wallClockBaseMs !== null && totalDuration > 0 && <RecordingNavigation
+        key={eventKey}
+        baseTimestamp={event.clips[0].timestamp}
+        total={totalDuration}
+        position={displayTime}
+        seekTarget={seekTarget}
+        offsets={segmentOffsets}
+        durations={timeline.durations}
+        completed={completedSegments}
+        trigger={triggerTimeGlobal}
+        loading={segmentLoading}
+        estimated={timeline.estimated}
+        footageEnd={segmentIdx === event.clips.length - 1 && participantDuration !== null && segmentOffsets[segmentIdx] + participantDuration < totalDuration ? segmentOffsets[segmentIdx] + participantDuration : null}
+        onSeek={seekTo}
+      />}
+
       {/* Transport controls */}
       <div className="player-controls">
         <button
@@ -1353,115 +1286,6 @@ export function Player({ event, onBack, onRefresh, onNavigate, hasPrev, hasNext 
             <span className="player-wall-clock" title="Recorded local time"> {wallClockDisplay}</span>
           )}
         </span>
-
-        <div className="player-timeline-wrapper">
-          <div
-            ref={timelineRef}
-            className={`player-timeline ${isZoomed ? "zoomed" : ""}`}
-            role="slider"
-            tabIndex={0}
-            aria-label="Recording position"
-            aria-valuemin={0}
-            aria-valuemax={totalDuration}
-            aria-valuenow={Math.min(displayTime, totalDuration)}
-            aria-valuetext={`${formatTime(displayTime)} of ${timeline.estimated ? "approximately " : ""}${formatTime(totalDuration)}${segmentIdx === event.clips.length - 1 && participantDuration !== null && segmentOffsets[segmentIdx] + participantDuration < totalDuration ? `; ${layout === "focus" ? CAMERA_LABELS[focusCamera] : "Selected"} footage ends at ${formatTime(segmentOffsets[segmentIdx] + participantDuration)}` : ""}`}
-            onKeyDown={(e) => {
-              if (e.altKey || e.ctrlKey || e.metaKey || (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"))) return;
-              const target = e.key === "Home" ? 0 : e.key === "End" ? totalDuration : e.key === "ArrowLeft" || e.key === "ArrowDown" ? displayTimeRef.current - SEEK_STEP : e.key === "ArrowRight" || e.key === "ArrowUp" ? displayTimeRef.current + SEEK_STEP : null;
-              if (target === null) return;
-              e.preventDefault();
-              e.stopPropagation();
-              seekTo(target);
-            }}
-            onMouseMove={handleTimelineMouseMove}
-            onMouseLeave={() => setHoverTime(null)}
-            onClick={handleTimelineClick}
-          >
-            {event.clips.slice(0, -1).map((clip, i) => {
-              const start = segmentOffsets[i] + timeline.durations[i];
-              const end = segmentOffsets[i + 1];
-              if (!completedSegments[i] || end <= start || end <= viewStart || start >= viewEnd) return null;
-              return <span key={clip.timestamp} className="player-timeline-gap" title="No archived video" style={{ left: `${Math.max(0, timeToViewPct(start))}%`, width: `${Math.min(100, timeToViewPct(end)) - Math.max(0, timeToViewPct(start))}%` }} />;
-            })}
-            <div
-              className="player-timeline-progress"
-              style={{
-                left: `${Math.max(0, timeToViewPct(0))}%`,
-                width: `${Math.min(timeToViewPct(displayTime), 100) - Math.max(0, timeToViewPct(0))}%`,
-              }}
-            />
-            {/* Segment boundary markers */}
-            {event.clips.length > 1 && event.clips.slice(1).map((_, i) => {
-              const pct = timeToViewPct(segmentOffsets[i + 1]);
-              if (pct < -1 || pct > 101) return null;
-              return (
-                <div
-                  key={i}
-                  className="player-timeline-marker"
-                  style={{ left: `${pct}%` }}
-                />
-              );
-            })}
-            {/* Event trigger time marker */}
-            {showTriggerMarker && (
-              <div
-                className="player-timeline-trigger"
-                style={{ left: `${triggerPct}%` }}
-                title="Event moment"
-              />
-            )}
-            {hoverTime != null && (
-              <span
-                className="player-timeline-tooltip"
-                style={{ left: `${timeToViewPct(hoverTime)}%` }}
-              >
-                {formatTime(hoverTime)}
-              </span>
-            )}
-            {segmentLoading && (
-              <span className="player-timeline-loading">Loading...</span>
-            )}
-          </div>
-          {/* Minimap: shows full timeline with viewport indicator */}
-          {isZoomed && (
-            <div
-              className="player-minimap"
-              onPointerDown={handleMinimapPointerDown}
-              onPointerMove={handleMinimapPointerMove}
-              onPointerUp={handleMinimapPointerUp}
-            >
-              <div
-                className="player-minimap-progress"
-                style={{ width: `${(displayTime / totalDuration) * 100}%` }}
-              />
-              {/* Segment markers on minimap */}
-              {event.clips.length > 1 && event.clips.slice(1).map((_, i) => (
-                <div
-                  key={i}
-                  className="player-minimap-marker"
-                  style={{ left: `${(segmentOffsets[i + 1] / totalDuration) * 100}%` }}
-                />
-              ))}
-              {/* Viewport indicator */}
-              <div
-                className="player-minimap-viewport"
-                style={{
-                  left: `${(viewStart / totalDuration) * 100}%`,
-                  width: `${(viewDuration / totalDuration) * 100}%`,
-                }}
-              />
-            </div>
-          )}
-          {isZoomed && (
-            <button
-              className="player-zoom-reset"
-              onClick={() => { setZoomLevel(1); setViewCenter(0); }}
-              title="Reset zoom"
-            >
-              {zoomLevel.toFixed(1)}x
-            </button>
-          )}
-        </div>
 
         {event.clips.length > 1 && <div className="player-segment-group" role="group" aria-label="Segment navigation">
           <span className="player-nav-label">Clips</span>

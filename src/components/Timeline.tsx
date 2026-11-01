@@ -6,7 +6,7 @@ import "./Timeline.css";
 interface Props {
   events: DashcamEvent[];
   fromDate?: string;
-  onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[]) => void;
+  onSelectEvent?: (event: DashcamEvent, sessionList: DashcamEvent[], startTime?: number) => void;
   footer?: ReactNode;
 }
 
@@ -61,6 +61,14 @@ function formatDurationShort(min: number): string {
     return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
   }
   return `${min}m`;
+}
+
+/** Convert a calendar selection to the source recording clock, retaining gaps. */
+export function timelineSelectionTime(event: DashcamEvent, dateStr: string, hour: number): number {
+  if (!Number.isFinite(hour) || hour < 0 || hour > 24) throw new Error(`Invalid Timeline selection hour: ${hour}`);
+  if (!event.clips.length) throw new Error("Cannot select a recording without clips");
+  const selectedTime = recordingWallTimeMs(`${dateStr}T00:00:00`) + hour * 3_600_000;
+  return Math.max(0, (selectedTime - recordingWallTimeMs(event.clips[0].timestamp)) / 1000);
 }
 
 /** Draw calendar ranges while retaining full source recordings for selection. */
@@ -132,8 +140,8 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
 
   const { days, sessionList } = useMemo(() => buildTimeline(events, fromDate), [events, fromDate]);
 
-  const handleSessionClick = useCallback((session: SessionBlock) => {
-    onSelectEvent?.(session.event, sessionList);
+  const handleSessionClick = useCallback((session: SessionBlock, dateStr: string, hour: number) => {
+    onSelectEvent?.(session.event, sessionList, timelineSelectionTime(session.event, dateStr, hour));
   }, [onSelectEvent, sessionList]);
 
   const handleBarPointerMove = useCallback((e: React.PointerEvent, day: DayData) => {
@@ -234,7 +242,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
   onTooltipClear,
 }: {
   day: DayData;
-  onSessionClick: (session: SessionBlock) => void;
+  onSessionClick: (session: SessionBlock, dateStr: string, hour: number) => void;
   onBarPointerMove: (e: React.PointerEvent, day: DayData) => void;
   onTooltipClear: () => void;
 }) {
@@ -260,7 +268,13 @@ const TimelineDayRow = memo(function TimelineDayRow({
                     className={`timeline-segment timeline-segment--${EVENT_TYPE_CLASS[session.event.type]}`}
                     d={session.ranges.map(({ startHour, endHour }) =>
                       `M${startHour},0H${endHour}V1H${startHour}Z`).join("")}
-                    onClick={() => onSessionClick(session)}
+                    onClick={(e) => {
+                      const bar = e.currentTarget.closest(".timeline-bar-inner");
+                      if (!bar) throw new Error("Timeline recording is missing its calendar track");
+                      const rect = bar.getBoundingClientRect();
+                      const hour = Math.max(0, Math.min(24, (e.clientX - rect.left) / rect.width * 24));
+                      onSessionClick(session, day.dateStr, hour);
+                    }}
                   />
                 ))}
               </svg>
@@ -286,7 +300,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
                 key={`${session.event.type}/${session.event.id}`}
                 className="timeline-session-button"
                 aria-label={`Open ${type} recording at ${formatTimeDetailed(session.startHour)} on ${day.dateStr}`}
-                onClick={() => onSessionClick(session)}
+                onClick={() => onSessionClick(session, day.dateStr, session.startHour)}
               >
                 <span className={`timeline-session-type timeline-segment--${type}`}>{type}</span>
                 <span>{formatTimeDetailed(session.startHour)}</span>

@@ -18,7 +18,7 @@ interface Props {
   pendingTypes: EventPageType[];
   errorsByType: Partial<Record<EventPageType, string>>;
   pagePositions: EventPagePositions;
-  onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[]) => void;
+  onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[], startTime?: number) => void;
   onRefresh: () => void;
   onRetry: (type: EventPageType) => void;
   onLoadMore: (types: EventPageType[]) => void;
