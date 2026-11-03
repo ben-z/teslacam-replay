@@ -332,6 +332,7 @@ export function App() {
           <div className="event-loading" role="status">
             <p>{eventError ?? "Loading recording…"}</p>
             {eventError && <button onClick={() => { const route = parseHash(); if (route) void loadRoute(route, true); }}>Retry recording</button>}
+            {eventError && <button onClick={() => location.reload()}>Reload app</button>}
             <button ref={recordingBackRef} onClick={handleBack}>Back to recordings</button>
           </div>
         ))}

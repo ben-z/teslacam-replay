@@ -12,11 +12,11 @@ interface HlsDouble {
   complete: (duration: number) => void;
 }
 
-const { instances } = vi.hoisted(() => ({ instances: [] as HlsDouble[] }));
+const { instances, runtime } = vi.hoisted(() => ({ instances: [] as HlsDouble[], runtime: { native: false } }));
 
 vi.mock("hls.js", () => ({
   default: class {
-    static isSupported = () => true;
+    static isSupported = () => !runtime.native;
     static Events = { ERROR: "error", LEVEL_LOADED: "levelLoaded", FRAG_BUFFERED: "fragBuffered" };
     url = "";
     destroyed = false;
@@ -56,6 +56,7 @@ let root: Root;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   instances.length = 0;
+  runtime.native = false;
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
@@ -112,5 +113,87 @@ describe("opening at a selected recording time", () => {
     expect(instances).toHaveLength(2);
     expect(instances[1].url).toContain("/2026-10-21_20-01-00/front/stream.m3u8");
     expect(instances[1].video!.currentTime).toBe(15);
+  });
+});
+
+
+describe("seeking across recording gaps and missing cameras", () => {
+  it("shows a measured recording gap and lets the user continue at the next source file", async () => {
+    const event = recording(["2026-10-21_20-00-00", "2026-10-21_20-01-00"], ["front"]);
+    await open(event, 45);
+    await act(async () => instances[0].complete(30));
+    expect(position()).toBe(45);
+    expect(container.textContent).toContain("This camera has no video for this interval");
+    await act(async () => (container.querySelector('[aria-label="Next segment"]') as HTMLButtonElement).click());
+    expect(position()).toBe(60);
+    expect(instances).toHaveLength(2);
+    expect(instances[1].url).toContain("/2026-10-21_20-01-00/front/stream.m3u8");
+    expect(instances[1].video!.currentTime).toBe(0);
+    expect(container.textContent).not.toContain("This camera has no video for this interval");
+  });
+
+  it("keeps a missing focused camera explicit after seeking and loads the chosen available camera", async () => {
+    const event = recording(["2026-10-21_20-00-00", "2026-10-21_20-01-00"], ["front"]);
+    event.clips[1].cameras = ["back"];
+    await open(event, 10);
+    await act(async () => (container.querySelector('[aria-label="Next segment"]') as HTMLButtonElement).click());
+    expect(position()).toBe(60);
+    expect(container.textContent).toContain("Front camera has no recorded video in this segment");
+    expect((container.querySelector('[aria-label="Play"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(instances).toHaveLength(1);
+    const picker = container.querySelector('[aria-label="Focused camera"]') as HTMLSelectElement;
+    await act(async () => { picker.value = "back"; picker.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(instances).toHaveLength(2);
+    expect(instances[1].url).toContain("/2026-10-21_20-01-00/back/stream.m3u8");
+    expect(position()).toBe(60);
+    expect(container.textContent).not.toContain("Front camera has no recorded video in this segment");
+  });
+});
+
+
+describe("native HLS final-segment seeking", () => {
+  it("keeps a native EVENT playlist's infinite duration provisional while preserving the requested position", async () => {
+    runtime.native = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    await open(recording(["2026-10-21_20-00-00"], ["front"]), 10);
+    const video = container.querySelector('video[aria-label="Front camera"]') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 4 },
+      duration: { configurable: true, value: Infinity },
+      currentSrc: { configurable: true, get: () => video.src },
+    });
+    await act(async () => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+      video.dispatchEvent(new Event("durationchange"));
+      video.dispatchEvent(new Event("canplay"));
+    });
+    expect(position()).toBe(10);
+    expect(video.currentTime).toBe(10);
+    expect(container.querySelector('.player-time')!.textContent).toContain("0:10 / ~1:00");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain("Loading segment");
+    expect(instances).toHaveLength(0);
+  });
+
+  it("corrects a paused native seek when the browser reaches the completed source end", async () => {
+    runtime.native = true;
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    await open(recording(["2026-10-21_20-00-00"], ["front"]), 55);
+    expect(instances).toHaveLength(0);
+    const video = container.querySelector('video[aria-label="Front camera"]') as HTMLVideoElement;
+    expect(video.src).toContain("/2026-10-21_20-00-00/front/stream.m3u8");
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 4 },
+      duration: { configurable: true, value: 43 },
+      currentSrc: { configurable: true, get: () => video.src },
+      ended: { configurable: true, value: true },
+    });
+    // WebKit reports readiness before reaching a completed native source's end.
+    await act(async () => { video.dispatchEvent(new Event("canplay")); });
+    await act(async () => { video.dispatchEvent(new Event("ended")); });
+    expect(position()).toBe(43);
+    expect(video.currentTime).toBe(43);
+    expect(container.querySelector('.player-time')!.textContent).toContain("0:43 / 0:43");
+    expect((container.querySelector('[aria-label="Play"]') as HTMLButtonElement).disabled).toBe(false);
   });
 });
