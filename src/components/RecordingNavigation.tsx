@@ -32,7 +32,7 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
   const [hover, setHover] = useState<number | null>(null);
   const [jumpOpen, setJumpOpen] = useState(false);
   const [jumpError, setJumpError] = useState<string | null>(null);
-  const [jumpChoices, setJumpChoices] = useState<ReturnType<typeof recordingTimeCandidates>>([]);
+  const [submittedWallTimeMs, setSubmittedWallTimeMs] = useState<number | null>(null);
   const jumpInput = useRef<HTMLInputElement>(null);
   const dragging = useRef(false);
   const viewport = recordingViewport(total, windowSec ?? total, center);
@@ -42,9 +42,11 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
     const to = recordingOffsetMs(clip);
     return from === to ? [] : [{ time: (clip.captureTimeMs - clips[0].captureTimeMs) / 1000, from, to }];
   }), [clips]);
-  const clock = (time: number) => {
+  const jumpChoices = useMemo(() => submittedWallTimeMs === null ? []
+    : recordingTimeCandidates(clips, total, submittedWallTimeMs), [clips, total, submittedWallTimeMs]);
+  const clock = (time: number, includeOffset: boolean) => {
     const value = recordingClockAt(clips, time);
-    return `${CLOCK.format(value.wallTimeMs)}${clockChanges.length ? ` ${formatUtcOffset(value.utcOffsetMs)}` : ""}`;
+    return `${CLOCK.format(value.wallTimeMs)}${includeOffset && clockChanges.length ? ` ${formatUtcOffset(value.utcOffsetMs)}` : ""}`;
   };
   const inputTime = (time: number) => new Date(recordingClockAt(clips, time).wallTimeMs).toISOString().slice(0, 19);
   const percent = (time: number) => (time - start) / duration * 100;
@@ -62,8 +64,6 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
   useEffect(() => {
     if (jumpOpen) jumpInput.current?.focus();
   }, [jumpOpen]);
-
-  useEffect(() => { setJumpChoices([]); }, [clips, total]);
 
   const seek = (time: number) => {
     setFollowing(true);
@@ -100,28 +100,29 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
         <button type="button" disabled={start === 0} aria-label="Earlier timeline window" onClick={() => { setFollowing(false); setCenter(Math.max(duration / 2, start - duration / 2)); }}>‹</button>
         <button type="button" disabled={end >= total} aria-label="Later timeline window" onClick={() => { setFollowing(false); setCenter(Math.min(total - duration / 2, end + duration / 2)); }}>›</button>
         <button type="button" aria-pressed={following} onClick={() => { setFollowing(true); setCenter(position); }}>Follow playhead</button>
-        <button type="button" aria-expanded={jumpOpen} onClick={() => { setJumpOpen(!jumpOpen); setJumpError(null); setJumpChoices([]); }}>Jump to time</button>
+        <button type="button" aria-expanded={jumpOpen} onClick={() => { setJumpOpen(!jumpOpen); setJumpError(null); setSubmittedWallTimeMs(null); }}>Jump to time</button>
       </div>
       {jumpOpen && <form className="recording-jump" onSubmit={(event) => {
         event.preventDefault();
         const value = jumpInput.current!.value;
         try {
-          const choices = recordingTimeCandidates(clips, total, recordingWallTimeMs(value.length === 16 ? `${value}:00` : value));
+          const wallTimeMs = recordingWallTimeMs(value.length === 16 ? `${value}:00` : value);
+          const choices = recordingTimeCandidates(clips, total, wallTimeMs);
           if (choices.length === 0) throw new Error("Choose a recorded local time within this recording. Clock changes can skip local times.");
-          setJumpChoices(choices.length > 1 ? choices : []);
+          setSubmittedWallTimeMs(choices.length > 1 ? wallTimeMs : null);
           if (choices.length === 1) seek(choices[0].timeSec);
           setJumpError(null);
         } catch (error) {
-          setJumpChoices([]);
+          setSubmittedWallTimeMs(null);
           setJumpError(error instanceof Error ? error.message : String(error));
         }
       }}>
-        <label>Recorded local time <input ref={jumpInput} type="datetime-local" step="1" required defaultValue={inputTime(position)} aria-label="Recorded local time" onChange={() => { setJumpChoices([]); setJumpError(null); }} /></label>
+        <label>Recorded local time <input ref={jumpInput} type="datetime-local" step="1" required defaultValue={inputTime(position)} aria-label="Recorded local time" onChange={() => { setSubmittedWallTimeMs(null); setJumpError(null); }} /></label>
         <button type="submit">Go</button>
         {jumpError && <span role="alert">{jumpError}</span>}
         {jumpChoices.length > 1 && <div className="recording-jump-choices" role="status">
-          <span>This local time occurs more than once. Choose an occurrence:</span>
-          {jumpChoices.map((choice) => <button type="button" key={choice.timeSec} onClick={() => { seek(choice.timeSec); setJumpChoices([]); }}>{clock(choice.timeSec)}</button>)}
+          <span>This time occurs more than once. Choose an occurrence:</span>
+          {jumpChoices.map((choice) => <button type="button" key={choice.timeSec} onClick={() => { seek(choice.timeSec); setSubmittedWallTimeMs(null); }}>{clock(choice.timeSec, true)}</button>)}
         </div>}
       </form>}
       {clockChanges.length > 0 && <div className="recording-clock-changes" role="status">
@@ -129,11 +130,11 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
       </div>}
       {triggers.length > 1 && <div className="recording-clock-changes">The event time repeats; both possible event moments are marked.</div>}
       <div className="recording-clock-labels" aria-hidden="true">
-        {tickTimes.map((time, index) => <span key={index}>{clock(time)}</span>)}
+        {tickTimes.map((time, index) => <span key={index}>{clock(time, false)}</span>)}
       </div>
       <div className="player-timeline" role="slider" tabIndex={0}
         aria-label="Recording position" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.min(displayedPosition, total)}
-        aria-valuetext={`${clock(displayedPosition)}; ${formatPlaybackTime(displayedPosition)} of ${estimated ? "approximately " : ""}${formatPlaybackTime(total)}${footageEnd !== null ? `; Selected footage ends at ${formatPlaybackTime(footageEnd)}` : ""}`}
+        aria-valuetext={`${clock(displayedPosition, true)}; ${formatPlaybackTime(displayedPosition)} of ${estimated ? "approximately " : ""}${formatPlaybackTime(total)}${footageEnd !== null ? `; Selected footage ends at ${formatPlaybackTime(footageEnd)}` : ""}`}
         onKeyDown={(event) => {
           if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           const target = event.key === "Home" ? 0 : event.key === "End" ? total
@@ -170,12 +171,12 @@ export function RecordingNavigation({ clips, total, position, seekTarget, offset
         {boundaries.length <= RECORDING_NAVIGATION.maximumBoundaryMarkers && boundaries.map((time) => <div key={time} className="player-timeline-marker" style={{ left: `${percent(time)}%` }} />)}
         {triggers.filter((trigger) => trigger >= start && trigger <= end).map((trigger) => <div key={trigger} className="player-timeline-trigger" title={triggers.length > 1 ? "Possible event moment: recorded time repeats" : "Event moment"} style={{ left: `${percent(trigger)}%` }} />)}
         {clockChanges.filter((change) => change.time >= start && change.time <= end).map((change) => <div key={change.time} className="recording-clock-change-marker" title={`Recorded clock changes from ${formatUtcOffset(change.from)} to ${formatUtcOffset(change.to)}`} style={{ left: `${percent(change.time)}%` }} />)}
-        {hoverTime !== null && <span className="player-timeline-tooltip" style={{ left: `${Math.max(0, Math.min(100, percent(hoverTime)))}%`, transform: `translateX(-${Math.max(0, Math.min(100, percent(hoverTime)))}%)` }}>{clock(hoverTime)} · {formatPlaybackTime(hoverTime)}</span>}
+        {hoverTime !== null && <span className="player-timeline-tooltip" style={{ left: `${Math.max(0, Math.min(100, percent(hoverTime)))}%`, transform: `translateX(-${Math.max(0, Math.min(100, percent(hoverTime)))}%)` }}>{clock(hoverTime, true)} · {formatPlaybackTime(hoverTime)}</span>}
         {loading && <span className="player-timeline-loading">Loading…</span>}
       </div>
       {duration < total && <label className="recording-overview">Browse recording
         <input type="range" aria-label="Timeline window position" min={duration / 2} max={total - duration / 2} step="1" value={start + duration / 2}
-          aria-valuetext={`${clock(start)} to ${clock(end)}`} onChange={(event) => { setFollowing(false); setCenter(Number(event.target.value)); }} />
+          aria-valuetext={`${clock(start, true)} to ${clock(end, true)}`} onChange={(event) => { setFollowing(false); setCenter(Number(event.target.value)); }} />
       </label>}
     </div>
   );

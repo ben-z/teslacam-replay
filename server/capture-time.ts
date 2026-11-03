@@ -34,18 +34,14 @@ export class CaptureTimeReader {
 
   private async readCached(source: DriveFileSource, key: string): Promise<number> {
     const file = path.join(this.cacheDirectory, `${key}.json`);
-    let cached: string | undefined;
     try {
-      cached = await readFile(file, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (cached !== undefined) {
-      const parsed: unknown = JSON.parse(cached);
+      const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
       if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || !Number.isFinite(new Date(parsed).getTime())) {
         throw new Error("Invalid cached MP4 capture time");
       }
       return parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const captureTimeMs = await readMovieCreationTime(source, this.readRange);
     await mkdir(this.cacheDirectory, { recursive: true });

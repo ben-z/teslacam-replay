@@ -55,18 +55,15 @@ export function recordingClockAt(clips: EventClip[], elapsedSec: number): { wall
 export function recordingTimeCandidates(clips: EventClip[], total: number, wallTimeMs: number): { timeSec: number; utcOffsetMs: number }[] {
   if (!clips.length) throw new Error("Cannot select a recording without clips");
   if (!Number.isFinite(total) || total < 0 || !Number.isFinite(wallTimeMs)) throw new Error("Invalid recording time selection");
-  const spans: { start: number; utcOffsetMs: number }[] = [];
-  for (const clip of clips) {
+  const base = clips[0].captureTimeMs;
+  return clips.flatMap((clip, index) => {
     const utcOffsetMs = recordingOffsetMs(clip);
-    if (spans.at(-1)?.utcOffsetMs !== utcOffsetMs) {
-      spans.push({ start: (clip.captureTimeMs - clips[0].captureTimeMs) / 1000, utcOffsetMs });
-    }
-  }
-  return spans.flatMap((span, index) => {
-    const timeSec = (wallTimeMs - span.utcOffsetMs - clips[0].captureTimeMs) / 1000;
-    const last = index === spans.length - 1;
-    const end = last ? total : spans[index + 1].start;
-    return timeSec >= span.start && (last ? timeSec <= end : timeSec < end) ? [{ timeSec, utcOffsetMs: span.utcOffsetMs }] : [];
+    const timeSec = (wallTimeMs - utcOffsetMs - base) / 1000;
+    const start = (clip.captureTimeMs - base) / 1000;
+    const last = index === clips.length - 1;
+    const end = last ? total : (clips[index + 1].captureTimeMs - base) / 1000;
+    if (timeSec < start || timeSec > end || (!last && timeSec === end)) return [];
+    return [{ timeSec, utcOffsetMs }];
   });
 }
 

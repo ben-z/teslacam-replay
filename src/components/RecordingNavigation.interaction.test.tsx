@@ -106,7 +106,7 @@ describe("recording navigation interactions", () => {
     expect(props.onSeek).toHaveBeenCalledTimes(1);
   });
 
-  it("offers both occurrences of a repeated local time and seeks only after a choice", () => {
+  it("keeps repeated-time choices available while duration is measured and seeks only after a choice", () => {
     props = { ...props, total: 7200, position: 0, clips: [
       { timestamp: "2026-11-01_01-00-00", captureTimeMs: Date.parse("2026-11-01T08:00:00Z"), durationSec: 3601, cameras: ["front"] },
       { timestamp: "2026-11-01_01-00-01", captureTimeMs: Date.parse("2026-11-01T09:00:01Z"), durationSec: 3599, cameras: ["front"] },
@@ -121,6 +121,13 @@ describe("recording navigation interactions", () => {
     expect(props.onSeek).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Choose an occurrence");
     expect(button("Nov 1, 1:30:00 AM UTC−07:00")).toBeDefined();
+    props = { ...props, total: 7199.7, clips: [...props.clips] };
+    render();
+    expect(button("Nov 1, 1:30:00 AM UTC−07:00")).toBeDefined();
+    expect(button("Nov 1, 1:30:00 AM UTC−08:00")).toBeDefined();
+    expect(props.onSeek).not.toHaveBeenCalled();
+    pointer("pointermove", 500);
+    expect(container.querySelector(".player-timeline-tooltip")!.textContent).toContain("UTC−07:00");
     click("Nov 1, 1:30:00 AM UTC−08:00");
     expect(props.onSeek).toHaveBeenCalledExactlyOnceWith(5400);
     expect(container.querySelector(".recording-jump-choices")).toBeNull();

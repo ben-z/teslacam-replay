@@ -21,7 +21,6 @@ interface DayData {
 }
 
 interface SessionBlock {
-  utcOffsetMs: number;
   startHour: number;
   endHour: number;
   durationMin: number;
@@ -99,7 +98,7 @@ export function buildTimeline(events: DashcamEvent[], fromDate?: string): { days
         entry.firstCaptureTimeMs = Math.min(entry.firstCaptureTimeMs, Math.max(start, day) - utcOffsetMs);
         const sessions = entry.sessions;
         if (!sessions.has(key)) {
-          sessions.set(key, { utcOffsetMs, startHour: 24, endHour: 0, durationMin: 0, event, ranges: [] });
+          sessions.set(key, { startHour: 24, endHour: 0, durationMin: 0, event, ranges: [] });
         }
         const session = sessions.get(key)!;
         session.ranges.push({
@@ -159,8 +158,8 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
   const { days, sessionList } = useMemo(() => buildTimeline(events, fromDate), [events, fromDate]);
   const dayCount = new Set(days.map((day) => day.dateStr)).size;
 
-  const handleSessionClick = useCallback((session: SessionBlock, dateStr: string, hour: number) => {
-    onSelectEvent?.(session.event, sessionList, timelineSelectionTime(session.event, dateStr, hour, session.utcOffsetMs));
+  const handleSessionClick = useCallback((session: SessionBlock, day: DayData, hour: number) => {
+    onSelectEvent?.(session.event, sessionList, timelineSelectionTime(session.event, day.dateStr, hour, day.utcOffsetMs));
   }, [onSelectEvent, sessionList]);
 
   const handleBarPointerMove = useCallback((e: React.PointerEvent, day: DayData) => {
@@ -261,7 +260,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
   onTooltipClear,
 }: {
   day: DayData;
-  onSessionClick: (session: SessionBlock, dateStr: string, hour: number) => void;
+  onSessionClick: (session: SessionBlock, day: DayData, hour: number) => void;
   onBarPointerMove: (e: React.PointerEvent, day: DayData) => void;
   onTooltipClear: () => void;
 }) {
@@ -293,7 +292,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
                       if (!bar) throw new Error("Timeline recording is missing its calendar track");
                       const rect = bar.getBoundingClientRect();
                       const hour = Math.max(0, Math.min(24, (e.clientX - rect.left) / rect.width * 24));
-                      onSessionClick(session, day.dateStr, hour);
+                      onSessionClick(session, day, hour);
                     }}
                   />
                 ))}
@@ -320,10 +319,10 @@ const TimelineDayRow = memo(function TimelineDayRow({
                 key={`${session.event.type}/${session.event.id}`}
                 className="timeline-session-button"
                 aria-label={`Open ${type} recording at ${formatTimeDetailed(session.startHour)} on ${day.dateStr}${day.offsetLabel ? ` ${day.offsetLabel}` : ""}`}
-                onClick={() => onSessionClick(session, day.dateStr, session.startHour)}
+                onClick={() => onSessionClick(session, day, session.startHour)}
               >
                 <span className={`timeline-session-type timeline-segment--${type}`}>{type}</span>
-                <span>{formatTimeDetailed(session.startHour)}{day.offsetLabel ? ` ${day.offsetLabel}` : ""}</span>
+                <span>{formatTimeDetailed(session.startHour)}</span>
                 <span className="timeline-session-duration">about {formatDurationShort(session.durationMin)}</span>
               </button>
             );

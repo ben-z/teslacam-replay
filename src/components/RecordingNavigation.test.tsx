@@ -117,4 +117,7 @@ it("labels clock changes and both possible event moments without shortening the 
   expect(html).toContain("Nov 1, 1:30:00 AM UTC−08:00; 1:30:00 of approximately 2:00:00");
   expect(html).toContain("The event time repeats; both possible event moments are marked.");
   expect(html).toContain("Possible event moment: recorded time repeats");
+  const tickLabels = html.match(/<div class="recording-clock-labels"[^>]*>(.*?)<\/div>/)![1];
+  expect(tickLabels.match(/<span>/g)).toHaveLength(5);
+  expect(tickLabels).not.toContain("UTC");
 });
