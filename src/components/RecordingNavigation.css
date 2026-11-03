@@ -1,0 +1,58 @@
+.recording-navigation {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.recording-navigation-tools, .recording-jump {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.recording-navigation label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.recording-navigation button, .recording-navigation select, .recording-jump input {
+  min-height: 36px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  color-scheme: dark;
+}
+.recording-navigation button { cursor: pointer; }
+.recording-navigation button:disabled { opacity: .35; cursor: default; }
+.recording-jump [role="alert"] { color: #f87171; font-size: 12px; }
+.recording-clock-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.recording-clock-labels span { text-align: center; }
+.recording-clock-labels span:first-child { text-align: left; }
+.recording-clock-labels span:last-child { text-align: right; }
+.recording-navigation .player-timeline { touch-action: none; height: 32px; }
+.recording-navigation .player-timeline-tooltip { position: absolute; max-width: 100%; white-space: normal; text-align: center; }
+.recording-gaps { position: absolute; width: 100%; height: 12px; top: 10px; fill: var(--text-dim); opacity: .5; pointer-events: none; }
+.recording-overview { display: flex; align-items: center; gap: 12px; }
+.recording-overview input { flex: 1; min-width: 0; accent-color: var(--accent); }
+@media (max-width: 768px) {
+  .recording-navigation { padding: 6px 12px; }
+  .recording-clock-labels span:nth-child(even) { display: none; }
+  .recording-clock-labels { font-size: 10px; }
+}
+@media (pointer: coarse) {
+  .recording-navigation button, .recording-navigation select, .recording-jump input { min-height: 44px; }
+  .recording-navigation .player-timeline { height: 44px; }
+  .recording-gaps { top: 16px; }
+  .recording-overview input { min-height: 32px; }
+}

@@ -10,6 +10,7 @@ import {
 import { EventBrowser } from "./components/EventBrowser";
 import type { DashcamEvent, ViewMode } from "./types";
 import { mergeEvents, replaceEventSnapshot } from "./events";
+import { recordingWallTimeMs } from "./playback";
 
 const loadPlayer = () => import("./components/Player");
 const Player = lazy(async () => ({ default: (await loadPlayer()).Player }));
@@ -74,6 +75,8 @@ export function App() {
     parseHash() ? "player" : "browse"
   );
   const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
+  const [initialTime, setInitialTime] = useState(0);
+  const pendingStartTime = useRef<{ type: string; id: string; wallTimeMs: number } | null>(null);
   // The filtered list of events the user was browsing when they selected an event
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
   const pushedHashRef = useRef(false);
@@ -106,6 +109,9 @@ export function App() {
 
   const loadRoute = useCallback(async (route: { type: string; id: string }, refresh: boolean) => {
     const request = ++routeRequest.current;
+    const pending = pendingStartTime.current;
+    const requestedWallTime = pending?.type === route.type && pending.id === route.id ? pending.wallTimeMs : undefined;
+    if (requestedWallTime === undefined) pendingStartTime.current = null;
     setView("player");
     setSelectedEvent(null);
     setEventError(null);
@@ -120,6 +126,9 @@ export function App() {
       const canonical = merged.find((event) => event.type === found.type && event.id === found.id);
       if (!canonical) throw new Error("Loaded recording is missing from the event list");
       history.replaceState(null, "", `#/event/${canonical.type}/${canonical.id}`);
+      setInitialTime(requestedWallTime === undefined ? 0 : Math.max(0,
+        (requestedWallTime - recordingWallTimeMs(canonical.clips[0].timestamp)) / 1000));
+      pendingStartTime.current = null;
       selectEvent(canonical);
     } catch (error) {
       if (request === routeRequest.current) {
@@ -188,6 +197,7 @@ export function App() {
         void loadRoute(route, false);
       } else {
         routeRequest.current++;
+        pendingStartTime.current = null;
         setSelectedEvent(null);
         setView("browse");
       }
@@ -222,7 +232,12 @@ export function App() {
     }
   };
 
-  const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[]) => {
+  const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[], startTime?: number) => {
+    pendingStartTime.current = startTime === undefined ? null : {
+      type: event.type,
+      id: event.id,
+      wallTimeMs: recordingWallTimeMs(event.clips[0].timestamp) + startTime * 1000,
+    };
     if (view === "browse" && document.activeElement instanceof HTMLElement) {
       browseFocusRef.current = document.activeElement;
     }
@@ -237,6 +252,7 @@ export function App() {
   };
 
   const handleBack = () => {
+    pendingStartTime.current = null;
     if (pushedHashRef.current) {
       // We pushed a hash, so history.back() returns to browse
       pushedHashRef.current = false;
@@ -274,6 +290,7 @@ export function App() {
       const nextIdx = selectedIdx + direction;
       if (nextIdx >= 0 && nextIdx < navList.length) {
         const next = navList[nextIdx];
+        pendingStartTime.current = null;
         history.replaceState(null, "", `#/event/${next.type}/${next.id}`);
         void loadRoute(next, false);
       }
@@ -302,6 +319,7 @@ export function App() {
             <Suspense fallback={<div className="event-loading" role="status">Loading player…</div>}>
               <Player
                 event={selectedEvent}
+                initialTime={initialTime}
                 onBack={handleBack}
                 onRefresh={() => { void loadRoute(selectedEvent, true); }}
                 onNavigate={handleNavigate}

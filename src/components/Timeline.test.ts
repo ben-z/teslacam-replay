@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { buildTimeline, Timeline } from "./Timeline";
+import { buildTimeline, timelineSelectionTime, Timeline } from "./Timeline";
 import type { DashcamEvent, EventClip } from "../types";
 
 function event(clips: EventClip[]): DashcamEvent {
@@ -22,6 +22,47 @@ function clip(timestamp: string, durationSec: number): EventClip {
 function render(events: DashcamEvent[], props: Partial<Parameters<typeof Timeline>[0]> = {}): string {
   return renderToStaticMarkup(createElement(Timeline, { events, ...props }));
 }
+
+describe("timeline playback selection", () => {
+  it("opens a selected hour within a long recording rather than its beginning", () => {
+    const recording = event([clip("2026-10-21_01-00-00", 21 * 3600)]);
+    expect(timelineSelectionTime(recording, "2026-10-21", 20.5)).toBe(19.5 * 3600);
+  });
+
+  it("opens the first visible range on the selected day after midnight", () => {
+    const recording = event([clip("2026-10-21_23-59-30", 60)]);
+    const nextDay = buildTimeline([recording]).days[0];
+    expect(nextDay.dateStr).toBe("2026-10-22");
+    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour)).toBe(30);
+    expect(timelineSelectionTime(recording, nextDay.dateStr, 15 / 3600)).toBe(45);
+  });
+
+  it("retains missing intervals in the source recording clock", () => {
+    const recording = event([
+      clip("2026-10-21_10-00-00", 30),
+      clip("2026-10-21_10-05-00", 30),
+    ]);
+    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5 / 60)).toBe(300);
+    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5.25 / 60)).toBe(315);
+  });
+
+  it("uses the first visible range when the selected day starts with a gap", () => {
+    const recording = event([
+      clip("2026-10-21_23-59-00", 30),
+      clip("2026-10-22_00-05-00", 30),
+    ]);
+    const nextDay = buildTimeline([recording]).days[0];
+    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour)).toBe(360);
+  });
+
+  it("accepts the end of a calendar day and rejects invalid selections", () => {
+    const recording = event([clip("2026-10-21_23-59-30", 60)]);
+    expect(timelineSelectionTime(recording, "2026-10-21", 24)).toBe(30);
+    expect(() => timelineSelectionTime(recording, "2026-10-21", NaN)).toThrow("Invalid Timeline selection hour");
+    expect(() => timelineSelectionTime(recording, "2026-10-21", 25)).toThrow("Invalid Timeline selection hour");
+    expect(() => timelineSelectionTime(event([]), "2026-10-21", 12)).toThrow("without clips");
+  });
+});
 
 describe("recording timeline", () => {
   it("keeps the older-page action reachable when the loaded page contains no recordings", () => {
