@@ -70,6 +70,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 async function open() {
@@ -94,6 +95,16 @@ function playerStart() {
 }
 
 describe("calendar playback selection", () => {
+  it("offers a full reload after a recording-load failure", async () => {
+    vi.mocked(fetchEvent).mockRejectedValue(new Error("Recording could not be loaded"));
+    await open();
+    await select(selected, 20 * 3600);
+    const reload = vi.fn();
+    vi.stubGlobal("location", { hash: location.hash, reload });
+    await click("Reload app");
+    expect(reload).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it("retains a late selected time when a recording load fails and the user retries", async () => {
     vi.mocked(fetchEvent).mockRejectedValueOnce(new Error("Drive listing failed")).mockResolvedValueOnce(selected);
     await open();
