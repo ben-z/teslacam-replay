@@ -2,18 +2,30 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 import { RecordingNavigation } from "./RecordingNavigation";
+import type { EventClip } from "../types";
+import { recordingWallTimeMs } from "../playback";
 
 const total = 21 * 3600;
 const offsets = Array.from({ length: 1261 }, (_, index) => index * 60);
+
+function recordingClips(baseTimestamp: string): EventClip[] {
+  const base = recordingWallTimeMs(baseTimestamp);
+  return offsets.slice(0, -1).map((time) => ({
+    timestamp: new Date(base + time * 1000).toISOString().slice(0, 19),
+    captureTimeMs: base + time * 1000,
+    durationSec: 60,
+    cameras: ["front"],
+  }));
+}
 const props: ComponentProps<typeof RecordingNavigation> = {
-  baseTimestamp: "2026-10-21_00-00-00",
+  clips: recordingClips("2026-10-21_00-00-00"),
   total,
   position: 0,
   seekTarget: { time: 0 },
   offsets,
   durations: offsets.slice(1).map(() => 60),
   completed: offsets.slice(1).map(() => false),
-  trigger: null,
+  triggers: [] as number[],
   loading: false,
   estimated: true,
   footageEnd: null,
@@ -80,16 +92,29 @@ describe("recording navigation", () => {
   });
 
   it("shows the event marker only when the event moment is inside the visible window", () => {
-    expect(render({ trigger: 60 })).toContain('class="player-timeline-trigger"');
-    expect(render({ trigger: 3600 })).not.toContain('class="player-timeline-trigger"');
+    expect(render({ triggers: [60] })).toContain('class="player-timeline-trigger"');
+    expect(render({ triggers: [3600] })).not.toContain('class="player-timeline-trigger"');
   });
 
   it("exposes the recording position and local date to keyboard and screen-reader users", () => {
-    const html = render({ baseTimestamp: "2026-10-21_23-00-00", seekTarget: { time: 7200 }, position: 7200, estimated: false });
+    const html = render({ clips: recordingClips("2026-10-21_23-00-00"), seekTarget: { time: 7200 }, position: 7200, estimated: false });
     expect(html).toContain('role="slider" tabindex="0" aria-label="Recording position"');
     expect(html).toContain('aria-valuemin="0" aria-valuemax="75600" aria-valuenow="7200"');
     expect(html).toContain('aria-valuetext="Oct 22, 1:00:00 AM; 2:00:00 of 21:00:00"');
     expect(html).not.toContain("approximately");
     expect(html).toContain('aria-expanded="false"');
   });
+});
+
+
+it("labels clock changes and both possible event moments without shortening the elapsed axis", () => {
+  const clips = [
+    { timestamp: "2026-11-01_01-00-00", captureTimeMs: Date.parse("2026-11-01T08:00:00Z"), durationSec: 3601, cameras: ["front"] },
+    { timestamp: "2026-11-01_01-00-01", captureTimeMs: Date.parse("2026-11-01T09:00:01Z"), durationSec: 3599, cameras: ["front"] },
+  ];
+  const html = render({ clips, total: 7200, position: 5400, seekTarget: { time: 5400 }, triggers: [1800, 5400] });
+  expect(html).toContain("Recorded clock changes: UTC−07:00 → UTC−08:00");
+  expect(html).toContain("Nov 1, 1:30:00 AM UTC−08:00; 1:30:00 of approximately 2:00:00");
+  expect(html).toContain("The event time repeats; both possible event moments are marked.");
+  expect(html).toContain("Possible event moment: recorded time repeats");
 });

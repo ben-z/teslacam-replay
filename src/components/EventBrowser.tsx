@@ -8,7 +8,8 @@ import {
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
-import { recordingWallTimeMs } from "../playback";
+import { formatUtcOffset, recordingOffsetMs, recordingWallTimeMs } from "../playback";
+import { compareRecordingOrder } from "../events";
 import { earlierTimelineDate, timelinePaging, TIMELINE_WINDOW_DAYS } from "../timelinePaging";
 import "./EventBrowser.css";
 
@@ -121,7 +122,17 @@ export function EventBrowser({
 
   const loadedEvents = useMemo(() => events
     .filter((event) => filter === "all" || event.type === filter)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp)), [events, filter]);
+    .sort(compareRecordingOrder), [events, filter]);
+
+  const clockOffsetsByDate = useMemo(() => {
+    const dates = new Map<string, Set<number>>();
+    for (const event of loadedEvents) {
+      const date = dateKey(event.timestamp);
+      if (!dates.has(date)) dates.set(date, new Set());
+      for (const clip of event.clips) dates.get(date)!.add(recordingOffsetMs(clip));
+    }
+    return dates;
+  }, [loadedEvents]);
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -445,6 +456,7 @@ export function EventBrowser({
                     )}
                     <EventCard
                       event={event}
+                      showUtcOffset={clockOffsetsByDate.get(curDate)!.size > 1}
                       onSelect={handleCardSelect}
                       active={active}
                     />
@@ -485,10 +497,12 @@ const BADGE_STYLES: Record<string, { label: string; color: string }> = {
 
 const EventCard = memo(function EventCard({
   event,
+  showUtcOffset,
   onSelect,
   active,
 }: {
   event: DashcamEvent;
+  showUtcOffset: boolean;
   onSelect: (event: DashcamEvent) => void;
   active: boolean;
 }) {
@@ -498,6 +512,11 @@ const EventCard = memo(function EventCard({
     () => formatTimestamp(event.timestamp),
     [event.timestamp]
   );
+  const clockLabel = useMemo(() => {
+    const offsets = new Set(event.clips.map(recordingOffsetMs));
+    if (offsets.size > 1) return "Clock changes";
+    return showUtcOffset && event.clips.length > 0 ? formatUtcOffset(recordingOffsetMs(event.clips[0])) : null;
+  }, [event.clips, showUtcOffset]);
   const cameraCount = useMemo(() => {
     if (event.cameraCount != null) return event.cameraCount;
     return new Set(event.clips.flatMap((c) => c.cameras)).size;
@@ -519,7 +538,7 @@ const EventCard = memo(function EventCard({
 
   return (
     <article className="browse-card">
-      <button ref={openButton} onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${event.city ? ` in ${event.city}` : ""}`}>
+      <button ref={openButton} onClick={handleClick} className="browse-card-open" aria-label={`Open ${badge.label} recording from ${formattedTimestamp}${clockLabel ? `; ${clockLabel}` : ""}${event.city ? ` in ${event.city}` : ""}`}>
         <div className="browse-card-thumb">
           {active && event.hasThumbnail && thumbState !== "error" ? (
             <>
@@ -554,6 +573,7 @@ const EventCard = memo(function EventCard({
         <div className="browse-card-info">
           <div className="browse-card-date" title={`Recorded local time: ${event.timestamp}`}>
             {formattedTimestamp}
+            {clockLabel && <span className="browse-card-clock">{clockLabel}</span>}
           </div>
           {event.city && (
             <div className="browse-card-city">{event.city}</div>

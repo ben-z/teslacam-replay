@@ -7,6 +7,7 @@ import {
 } from "./gdrive-lite.js";
 import { scanRecentClips, type DashcamEvent } from "./scan.js";
 import { recordingWallTimeMs } from "../src/playback.js";
+import { compareRecordingOrder } from "../src/events.js";
 import { ALL_CAMERAS } from "../src/types.js";
 
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -44,7 +45,7 @@ export class RecentArchive {
     const events = await this.readDay(date);
     const nextDate = dates[index + 1]?.name;
     return {
-      events: events.sort((a, b) => b.id.localeCompare(a.id)),
+      events: events.sort(compareRecordingOrder),
       nextPageToken: nextDate,
       // Keep the common Timeline range on the day just loaded until the next day arrives.
       nextPageDate: nextDate ? date.name : null,

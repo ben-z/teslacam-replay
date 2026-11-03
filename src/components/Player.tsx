@@ -6,7 +6,7 @@ import { ALL_CAMERAS, CAMERA_LABELS, formatReason } from "../types";
 import { useTelemetry } from "../useTelemetry";
 import { TelemetryOverlay } from "./TelemetryOverlay";
 import { DrivingDataPanel } from "./DrivingDataPanel";
-import { hasReachedPlaybackEnd, playbackBoundary, playbackParticipants, playbackTimeline, recordingWallTimeMs, type CompletedDurations } from "../playback";
+import { hasReachedPlaybackEnd, playbackBoundary, playbackParticipants, playbackTimeline, recordingWallTimeMs, recordingClockAt, recordingTimeCandidates, formatUtcOffset, type CompletedDurations } from "../playback";
 import { RecordingNavigation } from "./RecordingNavigation";
 import { formatPlaybackTime as formatTime, RECORDING_NAVIGATION } from "../recordingNavigation";
 import "./Player.css";
@@ -132,26 +132,20 @@ export function Player({ event, initialTime, onBack, onRefresh, onNavigate, hasP
   const finalDurationKnown = Boolean(completedSegments.at(-1));
   const totalDuration = finalDurationKnown ? segmentOffsets[segmentOffsets.length - 1] : Math.max(segmentOffsets[segmentOffsets.length - 1], displayTime);
 
-  // Compute trigger time position on the seek bar (Sentry/Saved only)
-  const triggerTimeGlobal = useMemo(() => {
-    if (event.type === "RecentClips" || !event.timestamp) return null;
-    const triggerEpoch = recordingWallTimeMs(event.timestamp) / 1000;
-
-    // Parse clip timestamps once (shared between both passes)
-    const clipEpochs = event.clips.map((clip) => {
-      return recordingWallTimeMs(clip.timestamp) / 1000;
-    });
-
-    // Pass 1: find which segment the trigger falls within
-    for (let i = 0; i < clipEpochs.length; i++) {
-      if (isNaN(clipEpochs[i])) continue;
-      const offsetInClip = triggerEpoch - clipEpochs[i];
-      if (offsetInClip >= 0 && offsetInClip <= timeline.durations[i]) {
-        return segmentOffsets[i] + offsetInClip;
-      }
+  // A local trigger can occur twice when the recorded clock moves backward.
+  const triggerTimesGlobal = useMemo(() => {
+    if (event.type === "RecentClips" || !event.timestamp || !event.clips.length) return [];
+    let candidates: number[];
+    if (/(?:Z|[+-]\d{2}:\d{2})$/.test(event.timestamp)) {
+      const instant = Date.parse(event.timestamp);
+      if (!Number.isFinite(instant)) throw new Error(`Invalid event timestamp: ${event.timestamp}`);
+      candidates = [(instant - event.clips[0].captureTimeMs) / 1000];
+    } else {
+      candidates = recordingTimeCandidates(event.clips, totalDuration, recordingWallTimeMs(event.timestamp)).map((candidate) => candidate.timeSec);
     }
-    return null;
-  }, [event.type, event.timestamp, event.clips, segmentOffsets, timeline.durations]);
+    return candidates.filter((time) => segmentOffsets.some((offset, index) => index < event.clips.length
+      && time >= offset && time <= offset + timeline.durations[index]));
+  }, [event.type, event.timestamp, event.clips, totalDuration, segmentOffsets, timeline.durations]);
 
   const segment = event.clips[segmentIdx];
 
@@ -944,15 +938,9 @@ export function Player({ event, initialTime, onBack, onRefresh, onNavigate, hasP
       : { display: "none" };
   };
 
-  // Wall-clock time: compute from first clip timestamp + displayTime
-  const wallClockBaseMs = useMemo(() => {
-    if (!event.clips[0]?.timestamp) return null;
-    return recordingWallTimeMs(event.clips[0].timestamp);
-  }, [event.clips]);
-
-  const wallClockDisplay = wallClockBaseMs != null
-    ? WALL_CLOCK_FORMATTER.format(new Date(wallClockBaseMs + displayTime * 1000))
-    : null;
+  const recordedClock = event.clips.length ? recordingClockAt(event.clips, displayTime) : null;
+  const wallClockDisplay = recordedClock === null ? null
+    : `${WALL_CLOCK_FORMATTER.format(recordedClock.wallTimeMs)} ${formatUtcOffset(recordedClock.utcOffsetMs)}`;
   const headerDateDisplay = useMemo(
     () => HEADER_DATE_FORMATTER.format(recordingWallTimeMs(event.timestamp)),
     [event.timestamp]
@@ -1214,16 +1202,16 @@ export function Player({ event, initialTime, onBack, onRefresh, onNavigate, hasP
         {inRecordingGap && <div className="player-loading-overlay" role="status">{layout === "focus" ? "This camera has no video for this interval. Choose another camera or use Next segment." : "No archived video for this interval. Use Next segment to continue."}</div>}
       </div>
 
-      {wallClockBaseMs !== null && totalDuration > 0 && <RecordingNavigation
+      {event.clips.length > 0 && totalDuration > 0 && <RecordingNavigation
         key={eventKey}
-        baseTimestamp={event.clips[0].timestamp}
+        clips={event.clips}
         total={totalDuration}
         position={displayTime}
         seekTarget={seekTarget}
         offsets={segmentOffsets}
         durations={timeline.durations}
         completed={completedSegments}
-        trigger={triggerTimeGlobal}
+        triggers={triggerTimesGlobal}
         loading={segmentLoading}
         estimated={timeline.estimated}
         footageEnd={segmentIdx === event.clips.length - 1 && participantDuration !== null && segmentOffsets[segmentIdx] + participantDuration < totalDuration ? segmentOffsets[segmentIdx] + participantDuration : null}
@@ -1269,16 +1257,13 @@ export function Player({ event, initialTime, onBack, onRefresh, onNavigate, hasP
           )}
         </button>
 
-        {triggerTimeGlobal != null && (
-          <button
-            onClick={() => seekTo(triggerTimeGlobal)}
-            className="player-trigger-btn"
-            title="Jump to event moment"
-            aria-label="Jump to event moment"
-          >
-            Event
-          </button>
-        )}
+        {triggerTimesGlobal.map((time) => {
+          const offset = formatUtcOffset(recordingClockAt(event.clips, time).utcOffsetMs);
+          const label = triggerTimesGlobal.length > 1 ? `Jump to possible event moment ${offset}` : "Jump to event moment";
+          return <button key={time} onClick={() => seekTo(time)} className="player-trigger-btn" title={label} aria-label={label}>
+            Event{triggerTimesGlobal.length > 1 ? ` ${offset}` : ""}
+          </button>;
+        })}
 
         <span className="player-time">
           {formatTime(displayTime)} / {timeline.estimated ? "~" : ""}{formatTime(totalDuration)}

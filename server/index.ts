@@ -21,8 +21,9 @@ import { ensureHlsSegments, hlsManifestPath, hlsCacheDir } from "./hls.js";
 import { createGDriveLiteFromEnv, DriveNotFoundError, type DriveEntry, type DriveFileSource } from "./gdrive-lite.js";
 import { basicAuthConfigFromEnv, isBasicAuthAuthorized } from "./basic-auth.js";
 import { RecentArchive } from "./recent-archive.js";
-import { mergeRecentFragments } from "../src/events.js";
+import { compareRecordingOrder, mergeRecentFragments } from "../src/events.js";
 import { oldestArchiveDate } from "./archive-date-bounds.js";
+import { mapLimit } from "./map-limit.js";
 import type { DashcamEvent as PublicDashcamEvent } from "../src/types.js";
 
 const appOrigin = process.env.APP_ORIGIN;
@@ -168,7 +169,7 @@ function mergeEvent(existing: DashcamEvent, incoming: DashcamEvent): DashcamEven
     });
   }
   const clips = Array.from(clipsByTimestamp.values())
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    .sort((a, b) => a.captureTimeMs - b.captureTimeMs);
   const cameraCount = new Set(clips.flatMap((clip) => clip.cameras)).size;
   return {
     ...existing,
@@ -229,6 +230,7 @@ function publicEvent(event: DashcamEvent): PublicDashcamEvent {
       : undefined,
     clips: event.clips.map((clip) => ({
       timestamp: clip.timestamp,
+      captureTimeMs: clip.captureTimeMs,
       cameras: clip.cameras,
       durationSec: clip.durationSec,
     })),
@@ -245,23 +247,6 @@ async function getTypeFolder(type: EventType): Promise<DriveEntry> {
   const folder = await drive.resolvePath(`/${type}`, "folder");
   typeFolders.set(type, folder);
   return folder;
-}
-
-async function mapLimit<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workerCount = Math.min(limit, items.length);
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  }));
-  return results;
 }
 
 async function getEventPage(
@@ -292,7 +277,7 @@ async function getEventPage(
   );
   const events = scanned
     .filter((event): event is DashcamEvent => Boolean(event))
-    .sort((a, b) => b.id.localeCompare(a.id));
+    .sort(compareRecordingOrder);
   rememberEvents(events, "snapshot");
   return {
     events,

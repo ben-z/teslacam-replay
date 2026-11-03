@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { buildTimeline, timelineSelectionTime, Timeline } from "./Timeline";
 import type { DashcamEvent, EventClip } from "../types";
+import { recordingWallTimeMs } from "../playback";
 
 function event(clips: EventClip[]): DashcamEvent {
   return {
@@ -16,7 +17,7 @@ function event(clips: EventClip[]): DashcamEvent {
 }
 
 function clip(timestamp: string, durationSec: number): EventClip {
-  return { timestamp, durationSec, cameras: ["front"] };
+  return { timestamp, captureTimeMs: recordingWallTimeMs(timestamp), durationSec, cameras: ["front"] };
 }
 
 function render(events: DashcamEvent[], props: Partial<Parameters<typeof Timeline>[0]> = {}): string {
@@ -26,15 +27,15 @@ function render(events: DashcamEvent[], props: Partial<Parameters<typeof Timelin
 describe("timeline playback selection", () => {
   it("opens a selected hour within a long recording rather than its beginning", () => {
     const recording = event([clip("2026-10-21_01-00-00", 21 * 3600)]);
-    expect(timelineSelectionTime(recording, "2026-10-21", 20.5)).toBe(19.5 * 3600);
+    expect(timelineSelectionTime(recording, "2026-10-21", 20.5, 0)).toBe(19.5 * 3600);
   });
 
   it("opens the first visible range on the selected day after midnight", () => {
     const recording = event([clip("2026-10-21_23-59-30", 60)]);
     const nextDay = buildTimeline([recording]).days[0];
     expect(nextDay.dateStr).toBe("2026-10-22");
-    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour)).toBe(30);
-    expect(timelineSelectionTime(recording, nextDay.dateStr, 15 / 3600)).toBe(45);
+    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour, 0)).toBe(30);
+    expect(timelineSelectionTime(recording, nextDay.dateStr, 15 / 3600, 0)).toBe(45);
   });
 
   it("retains missing intervals in the source recording clock", () => {
@@ -42,8 +43,8 @@ describe("timeline playback selection", () => {
       clip("2026-10-21_10-00-00", 30),
       clip("2026-10-21_10-05-00", 30),
     ]);
-    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5 / 60)).toBe(300);
-    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5.25 / 60)).toBe(315);
+    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5 / 60, 0)).toBe(300);
+    expect(timelineSelectionTime(recording, "2026-10-21", 10 + 5.25 / 60, 0)).toBe(315);
   });
 
   it("uses the first visible range when the selected day starts with a gap", () => {
@@ -52,15 +53,15 @@ describe("timeline playback selection", () => {
       clip("2026-10-22_00-05-00", 30),
     ]);
     const nextDay = buildTimeline([recording]).days[0];
-    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour)).toBe(360);
+    expect(timelineSelectionTime(recording, nextDay.dateStr, nextDay.sessions[0].startHour, 0)).toBe(360);
   });
 
   it("accepts the end of a calendar day and rejects invalid selections", () => {
     const recording = event([clip("2026-10-21_23-59-30", 60)]);
-    expect(timelineSelectionTime(recording, "2026-10-21", 24)).toBe(30);
-    expect(() => timelineSelectionTime(recording, "2026-10-21", NaN)).toThrow("Invalid Timeline selection hour");
-    expect(() => timelineSelectionTime(recording, "2026-10-21", 25)).toThrow("Invalid Timeline selection hour");
-    expect(() => timelineSelectionTime(event([]), "2026-10-21", 12)).toThrow("without clips");
+    expect(timelineSelectionTime(recording, "2026-10-21", 24, 0)).toBe(30);
+    expect(() => timelineSelectionTime(recording, "2026-10-21", NaN, 0)).toThrow("Invalid Timeline selection hour");
+    expect(() => timelineSelectionTime(recording, "2026-10-21", 25, 0)).toThrow("Invalid Timeline selection hour");
+    expect(() => timelineSelectionTime(event([]), "2026-10-21", 12, 0)).toThrow("without clips");
   });
 });
 
@@ -248,4 +249,48 @@ describe("recording timeline", () => {
   it.each(["2026-2-01", "2026-02-30", "2026-10-24T00:00:00", "not-a-date"])("rejects invalid date guard %s", (fromDate) => {
     expect(() => buildTimeline([], fromDate)).toThrow(/Invalid/);
   });
+});
+
+
+describe("timeline clock changes", () => {
+  it("keeps both occurrences of a repeated hour on separate selectable rows", () => {
+    const recording = event([
+      { ...clip("2026-11-01_01-00-00", 60), captureTimeMs: Date.parse("2026-11-01T08:00:00Z") },
+      { ...clip("2026-11-01_01-00-30", 60), captureTimeMs: Date.parse("2026-11-01T09:00:30Z") },
+    ]);
+    const result = buildTimeline([recording]);
+    expect(result.days.map((day) => [day.dateStr, day.offsetLabel])).toEqual([
+      ["2026-11-01", "UTC−07:00"], ["2026-11-01", "UTC−08:00"],
+    ]);
+    expect(result.days.map((day) => timelineSelectionTime(recording, day.dateStr, 1.01, day.utcOffsetMs))).toEqual([36, 3636]);
+    expect(result.days.map((day) => day.sessions[0].durationMin)).toEqual([1, 1]);
+    expect(result.sessionList).toEqual([recording]);
+    const html = render([recording]);
+    expect(html).toContain("Video on <strong>1</strong> day");
+    expect(html).toContain("<strong>1</strong> recording shown");
+    expect(html).toContain('aria-label="Open recent recording at 1:00 AM on 2026-11-01 UTC−07:00"');
+    expect(html).toContain('aria-label="Open recent recording at 1:00 AM on 2026-11-01 UTC−08:00"');
+    expect(html.match(/class="timeline-segment /g)).toHaveLength(2);
+  });
+
+  it("orders spring-forward rows by capture time and opens the time after the skipped hour", () => {
+    const recording = event([
+      { ...clip("2026-03-08_01-59-00", 60), captureTimeMs: Date.parse("2026-03-08T09:59:00Z") },
+      { ...clip("2026-03-08_03-00-00", 60), captureTimeMs: Date.parse("2026-03-08T10:00:00Z") },
+    ]);
+    const result = buildTimeline([recording]);
+    expect(result.days.map((day) => day.offsetLabel)).toEqual(["UTC−08:00", "UTC−07:00"]);
+    expect(timelineSelectionTime(recording, "2026-03-08", 3, result.days[1].utcOffsetMs)).toBe(60);
+  });
+});
+
+
+it("opens a partial file at its captured beginning when its filename is 55 seconds ahead", () => {
+  const recording = event([
+    { ...clip("2026-11-01_02-12-59", 60), captureTimeMs: Date.parse("2026-11-01T10:12:04Z") },
+  ]);
+  const day = buildTimeline([recording]).days[0];
+  expect(day.utcOffsetMs).toBe(-8 * 3600_000);
+  expect(day.sessions[0].startHour).toBeCloseTo(2 + 12 / 60 + 4 / 3600);
+  expect(timelineSelectionTime(recording, day.dateStr, day.sessions[0].startHour, day.utcOffsetMs)).toBeCloseTo(0);
 });

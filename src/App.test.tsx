@@ -1,3 +1,4 @@
+import { recordingWallTimeMs } from "./playback";
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -15,6 +16,7 @@ interface PlayerProps {
   initialTime: number;
   onBack: () => void;
   onRefresh: () => void;
+  onNavigate: (direction: -1 | 1) => void;
 }
 const state = vi.hoisted(() => ({ browser: null as BrowserProps | null }));
 
@@ -30,10 +32,11 @@ vi.mock("./components/EventBrowser", () => ({
   },
 }));
 vi.mock("./components/Player", () => ({
-  Player: ({ event, initialTime, onBack, onRefresh }: PlayerProps) => <div>
+  Player: ({ event, initialTime, onBack, onRefresh, onNavigate }: PlayerProps) => <div>
     <output data-testid="player" data-recording={event.id} data-start={initialTime} />
     <button onClick={onBack}>Player back</button>
     <button onClick={onRefresh}>Refresh recording</button>
+    <button onClick={() => onNavigate(1)}>Next recording</button>
   </div>,
 }));
 
@@ -43,7 +46,7 @@ function recording(timestamp: string): DashcamEvent {
     type: "RecentClips",
     timestamp,
     hasThumbnail: false,
-    clips: [{ timestamp, cameras: ["front"], durationSec: 21 * 3600 }],
+    clips: [{ timestamp, captureTimeMs: recordingWallTimeMs(timestamp), cameras: ["front"], durationSec: 21 * 3600 }],
     totalDurationSec: 21 * 3600,
   };
 }
@@ -157,4 +160,26 @@ describe("calendar playback selection", () => {
     await click("Refresh recording");
     expect(playerStart()).toBe(0);
   });
+});
+
+
+it("navigates between repeated-hour recordings in the same order as the browser and timeline", async () => {
+  const first = recording("2026-11-01_01-50-00");
+  first.clips[0].captureTimeMs = Date.parse("2026-11-01T08:50:00Z");
+  const second = recording("2026-11-01_01-20-00");
+  second.clips[0].captureTimeMs = Date.parse("2026-11-01T09:20:00Z");
+  vi.mocked(fetchEventPage).mockImplementation(async (type) => ({ type, events: type === "RecentClips" ? [first, second] : [], nextPageToken: null, nextPageDate: null }));
+  vi.mocked(fetchEvent).mockImplementation(async (_type, id) => {
+    const event = [first, second].find((event) => event.id === id);
+    if (!event) throw new Error(`Unknown recording: ${id}`);
+    return event;
+  });
+  await open();
+  await act(async () => {
+    state.browser!.onSelectEvent(second, [first, second], 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.querySelector('[data-testid="player"]')!.getAttribute("data-recording")).toBe(second.id);
+  await click("Next recording");
+  expect(container.querySelector('[data-testid="player"]')!.getAttribute("data-recording")).toBe(first.id);
 });

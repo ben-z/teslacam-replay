@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { formatPlaybackTime, recordingTimeOffset, recordingViewport } from "./recordingNavigation";
+import { describe, expect, it } from "vitest";
+import { formatPlaybackTime, recordingViewport } from "./recordingNavigation";
 
 describe("recording navigation coordinates", () => {
   it.each([
@@ -27,29 +27,4 @@ describe("recording navigation coordinates", () => {
     expect(recordingViewport(3600, 60, 5000)).toEqual({ start: 3540, end: 3600, duration: 60 });
   });
 
-  it("uses the selected recorded date across midnight", () => {
-    expect(recordingTimeOffset("2026-10-22T00:05:15", "2026-10-21_23-59-30", 1200)).toBe(345);
-    expect(recordingTimeOffset("2026-10-22T20:00:00", "2026-10-21_23-59-30", 21 * 3600)).toBe(20 * 3600 + 30);
-  });
-
-  it("accepts both exact recording boundaries and rejects times outside them", () => {
-    const base = "2026-10-21_10-00-00";
-    expect(recordingTimeOffset("2026-10-21T10:00:00", base, 900)).toBe(0);
-    expect(recordingTimeOffset("2026-10-21T10:15:00", base, 900)).toBe(900);
-    expect(() => recordingTimeOffset("2026-10-21T09:59:59", base, 900)).toThrow("within this recording");
-    expect(() => recordingTimeOffset("2026-10-21T10:15:01", base, 900)).toThrow("within this recording");
-    expect(() => recordingTimeOffset("2026-02-30T10:00:00", base, 900)).toThrow("Invalid recording timestamp");
-  });
-
-  it("retains filename wall-clock coordinates across daylight-saving changes and browser timezones", () => {
-    for (const timezone of ["America/Los_Angeles", "UTC", "Pacific/Auckland"]) {
-      vi.stubEnv("TZ", timezone);
-      try {
-        expect(recordingTimeOffset("2026-11-01T03:00:00", "2026-11-01_00-00-00", 20 * 3600)).toBe(3 * 3600);
-        expect(recordingTimeOffset("2026-03-08T03:00:00", "2026-03-08_00-00-00", 20 * 3600)).toBe(3 * 3600);
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    }
-  });
 });

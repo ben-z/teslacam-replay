@@ -1,21 +1,41 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { rm } from "node:fs/promises";
 import { GDriveLiteClient, type DriveEntry } from "./gdrive-lite";
 import { RecentArchive } from "./recent-archive";
+import { captureTimeFromFilename, timingMp4, timingRangeResponse } from "./test-mp4";
+
+const { testCache } = vi.hoisted(() => ({ testCache: `/tmp/teslacam-recent-time-test-${process.pid}-${Math.random().toString(16).slice(2)}` }));
+vi.mock("./paths.js", () => ({ CACHE_DIR: testCache }));
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 function setup(paths: Record<string, boolean>, listedFiles: Record<string, string[]>, failures: Record<string, number>) {
+  const videos = new Map<string, Buffer>();
+  for (const [name, folder] of Object.entries(paths)) {
+    if (!folder && /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(name.split("/").at(-1)!)) {
+      const filename = name.split("/").at(-1)!;
+      const timestamp = Date.parse(filename.slice(0, 19).replace("_", "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2") + "Z");
+      videos.set(name, timingMp4(Number.isFinite(timestamp) ? timestamp : Date.UTC(2026, 9, 21)));
+    }
+  }
   const entries = new Map(Object.entries(paths).map(([name, folder]) => [name, {
     id: name,
     name: name.split("/").at(-1)!,
     mimeType: folder ? FOLDER_MIME : "video/mp4",
-    size: folder ? undefined : "1234",
+    size: folder ? undefined : String(videos.get(name)?.length ?? 1234),
+    modifiedTime: "2026-11-03T00:00:00Z",
     hasThumbnail: false,
   } satisfies DriveEntry]));
   const requests: URL[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : input);
     requests.push(url);
+    if (url.pathname.startsWith("/file/")) {
+      const name = decodeURIComponent(url.pathname.split("/")[2]);
+      const bytes = videos.get(name);
+      if (!bytes) throw new Error(`Missing video timing fixture: ${name}`);
+      return timingRangeResponse(bytes, input, init);
+    }
     if (url.pathname === "/api/resolve") {
       const name = url.searchParams.get("path")!.replace(/^\//, "");
       if (failures[name]) return new Response("Provider failure", { status: failures[name] });
@@ -35,6 +55,7 @@ function setup(paths: Record<string, boolean>, listedFiles: Record<string, strin
 }
 
 afterEach(() => vi.unstubAllGlobals());
+afterAll(async () => { await rm(testCache, { recursive: true, force: true }); });
 
 describe("Recent recording bookmarks", () => {
   it("restores the complete dated session from a middle-segment bookmark", async () => {
@@ -47,7 +68,8 @@ describe("Recent recording bookmarks", () => {
     expect(event!.clips[0].sourceByCamera!.front.id).toBe(names[0]);
     expect(requests.filter((url) => url.pathname === "/api/list")).toHaveLength(1);
     expect(requests.filter((url) => url.pathname === "/api/resolve")).toHaveLength(1);
-    expect(requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(event!.clips.map((clip) => clip.captureTimeMs)).toEqual(timestamps.map(captureTimeFromFilename));
+    expect(requests.filter((url) => url.pathname.startsWith("/file/")).length).toBeGreaterThan(0);
   });
 
   it("surfaces a provider failure rather than reporting missing footage", async () => {

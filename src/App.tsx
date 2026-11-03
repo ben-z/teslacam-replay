@@ -9,8 +9,7 @@ import {
 } from "./api";
 import { EventBrowser } from "./components/EventBrowser";
 import type { DashcamEvent, ViewMode } from "./types";
-import { mergeEvents, replaceEventSnapshot } from "./events";
-import { recordingWallTimeMs } from "./playback";
+import { compareRecordingOrder, mergeEvents, replaceEventSnapshot } from "./events";
 
 const loadPlayer = () => import("./components/Player");
 const Player = lazy(async () => ({ default: (await loadPlayer()).Player }));
@@ -76,7 +75,7 @@ export function App() {
   );
   const [selectedEvent, setSelectedEvent] = useState<DashcamEvent | null>(null);
   const [initialTime, setInitialTime] = useState(0);
-  const pendingStartTime = useRef<{ type: string; id: string; wallTimeMs: number } | null>(null);
+  const pendingStartTime = useRef<{ type: string; id: string; captureTimeMs: number } | null>(null);
   // The filtered list of events the user was browsing when they selected an event
   const [browseList, setBrowseList] = useState<DashcamEvent[]>([]);
   const pushedHashRef = useRef(false);
@@ -110,8 +109,8 @@ export function App() {
   const loadRoute = useCallback(async (route: { type: string; id: string }, refresh: boolean) => {
     const request = ++routeRequest.current;
     const pending = pendingStartTime.current;
-    const requestedWallTime = pending?.type === route.type && pending.id === route.id ? pending.wallTimeMs : undefined;
-    if (requestedWallTime === undefined) pendingStartTime.current = null;
+    const requestedCaptureTime = pending?.type === route.type && pending.id === route.id ? pending.captureTimeMs : undefined;
+    if (requestedCaptureTime === undefined) pendingStartTime.current = null;
     setView("player");
     setSelectedEvent(null);
     setEventError(null);
@@ -126,8 +125,8 @@ export function App() {
       const canonical = merged.find((event) => event.type === found.type && event.id === found.id);
       if (!canonical) throw new Error("Loaded recording is missing from the event list");
       history.replaceState(null, "", `#/event/${canonical.type}/${canonical.id}`);
-      setInitialTime(requestedWallTime === undefined ? 0 : Math.max(0,
-        (requestedWallTime - recordingWallTimeMs(canonical.clips[0].timestamp)) / 1000));
+      setInitialTime(requestedCaptureTime === undefined ? 0 : Math.max(0,
+        (requestedCaptureTime - canonical.clips[0].captureTimeMs) / 1000));
       pendingStartTime.current = null;
       selectEvent(canonical);
     } catch (error) {
@@ -236,7 +235,7 @@ export function App() {
     pendingStartTime.current = startTime === undefined ? null : {
       type: event.type,
       id: event.id,
-      wallTimeMs: recordingWallTimeMs(event.clips[0].timestamp) + startTime * 1000,
+      captureTimeMs: event.clips[0].captureTimeMs + startTime * 1000,
     };
     if (view === "browse" && document.activeElement instanceof HTMLElement) {
       browseFocusRef.current = document.activeElement;
@@ -275,7 +274,7 @@ export function App() {
         ))
       ))
     );
-    return [...visible].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return [...visible].sort(compareRecordingOrder);
   }, [browseList, events]);
 
   const selectedIdx = useMemo(() => {
