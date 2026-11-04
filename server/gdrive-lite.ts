@@ -8,7 +8,7 @@ const DEFAULT_LIST_TIMEOUT_MS = 120_000;
 const DEFAULT_METADATA_TIMEOUT_MS = 30_000;
 const DEFAULT_READ_TIMEOUT_MS = 300_000;
 // One pool bounds header requests across all recording folders being scanned.
-export const CAPTURE_CONFIG = { concurrency: 64 } as const;
+export const CAPTURE_CONFIG = { concurrency: 256 } as const;
 
 export interface DriveShortcutDetails {
   targetId?: string;
@@ -184,58 +184,58 @@ export class GDriveLiteClient {
   async captureTime(file: DriveEntry): Promise<number> {
     const source = this.fileSource(file);
     this.streamSource(source);
+    return this.captureTimes.read(source);
+  }
+
+  private async readRange(source: DriveFileSource, start: number, end: number): Promise<Buffer> {
+    const stream = this.streamSource(source);
     if (this.activeCaptureReads >= CAPTURE_CONFIG.concurrency) {
       await new Promise<void>((resolve) => this.waitingCaptureReads.push(resolve));
     } else {
       this.activeCaptureReads++;
     }
     try {
-      return await this.captureTimes.read(source);
+      const response = await fetch(stream.url, {
+        headers: { ...stream.headers, Range: `bytes=${start}-${end}` },
+        signal: AbortSignal.timeout(this.metadataTimeoutMs),
+      });
+      if (response.status !== 206) {
+        await response.body?.cancel();
+        throw new Error(`Cannot read recording header for ${source.name}: expected HTTP 206, received ${response.status}`);
+      }
+      if (response.headers.get("Content-Range") !== `bytes ${start}-${end}/${source.sizeBytes}`) {
+        await response.body?.cancel();
+        throw new Error(`Invalid recording header Content-Range for ${source.name}`);
+      }
+      const expectedLength = end - start + 1;
+      const declaredLength = response.headers.get("Content-Length");
+      if (declaredLength !== null && declaredLength !== String(expectedLength)) {
+        await response.body?.cancel();
+        throw new Error(`Invalid recording header Content-Length for ${source.name}`);
+      }
+      if (!response.body) throw new Error(`Missing recording header body for ${source.name}`);
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.length;
+        if (received > expectedLength) {
+          await reader.cancel();
+          throw new Error(`Oversized recording header range for ${source.name}`);
+        }
+        chunks.push(value);
+      }
+      if (received !== expectedLength) {
+        throw new Error(`Truncated recording header range for ${source.name}`);
+      }
+      return Buffer.concat(chunks);
     } finally {
       const next = this.waitingCaptureReads.shift();
       if (next) next();
       else this.activeCaptureReads--;
     }
-  }
-
-  private async readRange(source: DriveFileSource, start: number, end: number): Promise<Buffer> {
-    const stream = this.streamSource(source);
-    const response = await fetch(stream.url, {
-      headers: { ...stream.headers, Range: `bytes=${start}-${end}` },
-      signal: AbortSignal.timeout(this.metadataTimeoutMs),
-    });
-    if (response.status !== 206) {
-      await response.body?.cancel();
-      throw new Error(`Cannot read recording header for ${source.name}: expected HTTP 206, received ${response.status}`);
-    }
-    if (response.headers.get("Content-Range") !== `bytes ${start}-${end}/${source.sizeBytes}`) {
-      await response.body?.cancel();
-      throw new Error(`Invalid recording header Content-Range for ${source.name}`);
-    }
-    const expectedLength = end - start + 1;
-    const declaredLength = response.headers.get("Content-Length");
-    if (declaredLength !== null && declaredLength !== String(expectedLength)) {
-      await response.body?.cancel();
-      throw new Error(`Invalid recording header Content-Length for ${source.name}`);
-    }
-    if (!response.body) throw new Error(`Missing recording header body for ${source.name}`);
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let received = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.length;
-      if (received > expectedLength) {
-        await reader.cancel();
-        throw new Error(`Oversized recording header range for ${source.name}`);
-      }
-      chunks.push(value);
-    }
-    if (received !== expectedLength) {
-      throw new Error(`Truncated recording header range for ${source.name}`);
-    }
-    return Buffer.concat(chunks);
   }
 
   fileSource(file: DriveEntry): DriveFileSource {
