@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
-import { DriveNotFoundError, GDriveLiteClient } from "./gdrive-lite";
+import { CAPTURE_CONFIG, DriveNotFoundError, GDriveLiteClient } from "./gdrive-lite";
 import { timingMp4, timingRangeResponse } from "./test-mp4";
 
 const { testCache } = vi.hoisted(() => ({ testCache: `/tmp/teslacam-drive-time-test-${process.pid}-${Math.random().toString(16).slice(2)}` }));
@@ -46,8 +46,8 @@ describe("recording capture metadata transport", () => {
   });
 
   it("bounds header work across recording folders and releases failed reads", async () => {
-    const files = Array.from({ length: 65 }, video);
-    const failing = new Set<string>(files.slice(0, 64).map((file) => file.id));
+    const files = Array.from({ length: CAPTURE_CONFIG.concurrency + 1 }, video);
+    const failing = new Set<string>(files.slice(0, CAPTURE_CONFIG.concurrency).map((file) => file.id));
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let started = 0;
@@ -66,12 +66,44 @@ describe("recording capture metadata transport", () => {
     }));
     const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
     const reads = Promise.allSettled(files.map((file) => drive.captureTime(file)));
-    await vi.waitFor(() => expect(started).toBe(64));
+    await vi.waitFor(() => expect(started).toBe(CAPTURE_CONFIG.concurrency));
     release();
     const results = await reads;
-    expect(maximum).toBe(64);
-    expect(results.slice(0, 64).every((result) => result.status === "rejected")).toBe(true);
-    expect(results[64]).toEqual({ status: "fulfilled", value: capturedAt });
+    expect(maximum).toBe(CAPTURE_CONFIG.concurrency);
+    expect(results.slice(0, CAPTURE_CONFIG.concurrency).every((result) => result.status === "rejected")).toBe(true);
+    expect(results[CAPTURE_CONFIG.concurrency]).toEqual({ status: "fulfilled", value: capturedAt });
+  });
+
+  it("keeps network permits available when another scan requests the same files or cached metadata", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Set<string>();
+    let hold = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (hold) {
+        started.add(new URL(input instanceof Request ? input.url : input).pathname);
+        await held;
+      }
+      return timingRangeResponse(bytes, input, init);
+    }));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    const cached = video();
+    await drive.captureTime(cached);
+    hold = true;
+    const repeated = video();
+    const reads = Promise.all([
+      ...Array.from({ length: CAPTURE_CONFIG.concurrency }, () => repeated),
+      ...Array.from({ length: CAPTURE_CONFIG.concurrency - 1 }, video),
+    ].map((file) => drive.captureTime(file)));
+    const cachedRead = drive.captureTime(cached);
+    try {
+      await vi.waitFor(() => expect(started.size).toBe(CAPTURE_CONFIG.concurrency));
+      expect(await cachedRead).toBe(capturedAt);
+    } finally {
+      release();
+      await reads;
+      await cachedRead;
+    }
   });
 
   it.each([200, 403, 503])("rejects HTTP %s without consuming a full video body", async (status) => {
