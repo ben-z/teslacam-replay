@@ -1,5 +1,7 @@
 import type { DriveEntry, DriveFileSource, DriveFolderRef, DriveList, DriveThumbnailSource } from "./gdrive-lite.js";
-import { recordingWallTimeMs } from "../src/playback.js";
+import { CAPTURE_CONFIG } from "./gdrive-lite.js";
+import { mapLimit } from "./map-limit.js";
+import { recordingOffsetMs, recordingWallTimeMs } from "../src/playback.js";
 import { ALL_CAMERAS, type DashcamEvent as PublicDashcamEvent, type EventClip as PublicEventClip } from "../src/types.js";
 
 export interface EventClip extends PublicEventClip {
@@ -18,6 +20,7 @@ export interface DashcamEvent extends Omit<PublicDashcamEvent, "hasThumbnail" | 
 export interface TeslacamDrive {
   listFolder(folder: DriveFolderRef): Promise<DriveList>;
   readText(file: DriveEntry): Promise<string>;
+  captureTime(file: DriveEntry): Promise<number>;
   fileSource(file: DriveEntry): DriveFileSource;
   thumbnailSource(file: DriveEntry): DriveThumbnailSource | undefined;
   folderRef(file: DriveEntry): DriveFolderRef;
@@ -66,16 +69,7 @@ export async function scanEventFolder(
 
   if (segmentMap.size === 0 && !eventJson && !thumbnail) return null;
 
-  // Build clips array sorted by timestamp, with estimated durations
-  const sorted = Array.from(segmentMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b));
-
-  const clips: EventClip[] = sorted.map(([timestamp, cameraFiles], i) => ({
-    timestamp,
-    cameras: sortCameras(Array.from(cameraFiles.keys())),
-    sourceByCamera: sourceByCamera(drive, cameraFiles),
-    durationSec: estimateDuration(timestamp, sorted[i + 1]?.[0]),
-  }));
+  const clips = await readSegments(drive, segmentMap);
 
   return {
     id: folder.name,
@@ -91,22 +85,6 @@ export async function scanEventFolder(
     totalDurationSec: clips.reduce((sum, c) => sum + c.durationSec, 0),
     cameraCount: countUniqueCameras(clips),
   };
-}
-
-function estimateDuration(timestamp: string, nextTimestamp?: string): number {
-  const cur = segmentTimestampToEpoch(timestamp);
-  if (!nextTimestamp) return SCAN_CONFIG.clipDurationEstimateSec;
-  const next = segmentTimestampToEpoch(nextTimestamp);
-  if (cur > 0 && next > 0) {
-    const diff = next - cur;
-    if (diff >= 1) return Math.min(diff, SCAN_CONFIG.clipDurationEstimateSec);
-  }
-  return SCAN_CONFIG.clipDurationEstimateSec;
-}
-
-function segmentTimestampToEpoch(ts: string): number {
-  // A timezone-neutral coordinate for the recorded calendar fields.
-  return recordingWallTimeMs(ts) / 1000;
 }
 
 function folderNameToISO(name: string): string {
@@ -127,25 +105,21 @@ function countUniqueCameras(clips: EventClip[]): number {
   return cameras.size;
 }
 
-export function scanRecentClips(
-  drive: Pick<TeslacamDrive, "fileSource" | "thumbnailSource">,
+export async function scanRecentClips(
+  drive: Pick<TeslacamDrive, "fileSource" | "thumbnailSource" | "captureTime">,
   entries: DriveEntry[]
-): DashcamEvent[] {
+): Promise<DashcamEvent[]> {
   const segmentMap = groupClips(entries);
   if (segmentMap.size === 0) return [];
 
-  // Sort all segments by timestamp
-  const sorted = Array.from(segmentMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b));
+  const sorted = await readSegments(drive, segmentMap);
 
   // Group consecutive segments into driving sessions.
   const sessions: typeof sorted[] = [];
   let current: typeof sorted = [sorted[0]];
 
   for (let i = 1; i < sorted.length; i++) {
-    const prevEpoch = segmentTimestampToEpoch(sorted[i - 1][0]);
-    const curEpoch = segmentTimestampToEpoch(sorted[i][0]);
-    if (prevEpoch > 0 && curEpoch > 0 && curEpoch - prevEpoch > SCAN_CONFIG.sessionGapThresholdSec) {
+    if ((sorted[i].captureTimeMs - sorted[i - 1].captureTimeMs) / 1000 > SCAN_CONFIG.sessionGapThresholdSec) {
       sessions.push(current);
       current = [];
     }
@@ -155,15 +129,8 @@ export function scanRecentClips(
 
   // Convert sessions to events
   return sessions.map((session) => {
-    const clips: EventClip[] = session.map(([timestamp, cameras], i) => ({
-      timestamp,
-      cameras: sortCameras(Array.from(cameras.keys())),
-      sourceByCamera: sourceByCamera(drive, cameras),
-      thumbnailSource: cameras.has("front") ? drive.thumbnailSource(cameras.get("front")!) : undefined,
-      durationSec: estimateDuration(timestamp, session[i + 1]?.[0]),
-    }));
-
-    const firstTimestamp = session[0][0];
+    const clips = session;
+    const firstTimestamp = session[0].timestamp;
     return {
       id: firstTimestamp,
       type: "RecentClips" as const,
@@ -173,6 +140,37 @@ export function scanRecentClips(
       cameraCount: countUniqueCameras(clips),
     };
   });
+}
+
+async function readSegments(
+  drive: Pick<TeslacamDrive, "fileSource" | "thumbnailSource" | "captureTime">,
+  segments: Map<string, Map<string, DriveEntry>>,
+): Promise<EventClip[]> {
+  const entries = [...segments.entries()];
+  // One camera's movie header establishes the capture clock for its segment.
+  // Bounded workers stop scheduling this scan after a header fails. The Drive
+  // client also limits concurrent header reads across recording pages.
+  const clips = await mapLimit(entries, CAPTURE_CONFIG.concurrency, async ([timestamp, cameraFiles]): Promise<EventClip> => {
+    recordingWallTimeMs(timestamp);
+    const cameras = sortCameras([...cameraFiles.keys()]);
+    const captureTimeMs = await drive.captureTime(cameraFiles.get(cameras[0])!);
+    if (!Number.isSafeInteger(captureTimeMs)) throw new Error(`Invalid capture time: ${timestamp}`);
+    const clip: EventClip = {
+      timestamp, captureTimeMs, cameras,
+      sourceByCamera: sourceByCamera(drive, cameraFiles),
+      thumbnailSource: cameraFiles.has("front") ? drive.thumbnailSource(cameraFiles.get("front")!) : undefined,
+      durationSec: SCAN_CONFIG.clipDurationEstimateSec,
+    };
+    recordingOffsetMs(clip);
+    return clip;
+  });
+  clips.sort((a, b) => a.captureTimeMs - b.captureTimeMs);
+  for (let index = 0; index < clips.length - 1; index++) {
+    const gap = (clips[index + 1].captureTimeMs - clips[index].captureTimeMs) / 1000;
+    if (gap <= 0) throw new Error(`Recording segments have the same capture time: ${clips[index].timestamp} and ${clips[index + 1].timestamp}`);
+    clips[index].durationSec = Math.min(gap, SCAN_CONFIG.clipDurationEstimateSec);
+  }
+  return clips;
 }
 
 export function getEventThumbnail(event: DashcamEvent): DriveThumbnailSource | undefined {

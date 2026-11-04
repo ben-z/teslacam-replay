@@ -1,13 +1,111 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rm } from "node:fs/promises";
 import { DriveNotFoundError, GDriveLiteClient } from "./gdrive-lite";
+import { timingMp4, timingRangeResponse } from "./test-mp4";
+
+const { testCache } = vi.hoisted(() => ({ testCache: `/tmp/teslacam-drive-time-test-${process.pid}-${Math.random().toString(16).slice(2)}` }));
+vi.mock("./paths.js", () => ({ CACHE_DIR: testCache }));
 
 beforeEach(() => vi.spyOn(console, "info").mockImplementation(() => {}));
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+afterAll(async () => { await rm(testCache, { recursive: true, force: true }); });
 
 const file = { id: "clip", name: "front.mp4", mimeType: "video/mp4" };
+
+describe("recording capture metadata transport", () => {
+  const capturedAt = Date.UTC(2026, 10, 1, 9, 1, 34);
+  const bytes = timingMp4(capturedAt);
+  const video = () => ({
+    id: crypto.randomUUID(), name: "2026-11-01_01-01-34-front.mp4", mimeType: "video/mp4",
+    modifiedTime: "2026-11-03T00:00:00Z", size: String(bytes.length), resourceKey: "private-key",
+  });
+
+  it("authenticates bounded range reads and reuses the successful source revision", async () => {
+    const requests: { url: URL; headers: Headers }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: new URL(input instanceof Request ? input.url : input), headers: new Headers(init?.headers) });
+      return timingRangeResponse(bytes, input, init);
+    }));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test/prefix", username: "user", password: "pass" });
+    const source = video();
+    expect(await drive.captureTime(source)).toBe(capturedAt);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every(({ url, headers }) => url.origin === "http://drive.test"
+      && url.pathname.startsWith("/prefix/file/") && url.searchParams.get("resourceKey") === "private-key"
+      && headers.get("Authorization") === `Basic ${Buffer.from("user:pass").toString("base64")}`)).toBe(true);
+    expect(requests.every(({ headers }) => {
+      const [, start, end] = /^bytes=(\d+)-(\d+)$/.exec(headers.get("Range")!)!;
+      return Number(end) - Number(start) + 1 <= 4096;
+    })).toBe(true);
+    const reads = requests.length;
+    expect(await drive.captureTime(source)).toBe(capturedAt);
+    expect(requests).toHaveLength(reads);
+  });
+
+  it("bounds header work across recording folders and releases failed reads", async () => {
+    const files = Array.from({ length: 65 }, video);
+    const failing = new Set<string>(files.slice(0, 64).map((file) => file.id));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let started = 0;
+    let active = 0;
+    let maximum = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      started++;
+      active++;
+      maximum = Math.max(maximum, active);
+      await held;
+      active--;
+      const url = new URL(input instanceof Request ? input.url : input);
+      return failing.has(url.pathname.split("/")[2])
+        ? new Response("Provider unavailable", { status: 503 })
+        : timingRangeResponse(bytes, input, init);
+    }));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    const reads = Promise.allSettled(files.map((file) => drive.captureTime(file)));
+    await vi.waitFor(() => expect(started).toBe(64));
+    release();
+    const results = await reads;
+    expect(maximum).toBe(64);
+    expect(results.slice(0, 64).every((result) => result.status === "rejected")).toBe(true);
+    expect(results[64]).toEqual({ status: "fulfilled", value: capturedAt });
+  });
+
+  it.each([200, 403, 503])("rejects HTTP %s without consuming a full video body", async (status) => {
+    const response = new Response("not a range", { status });
+    const cancelled = vi.spyOn(response.body!, "cancel");
+    const body = vi.spyOn(response, "arrayBuffer");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    await expect(drive.captureTime(video())).rejects.toThrow(`expected HTTP 206, received ${status}`);
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(body).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "bytes 1-4096/65676", "bytes 0-4095/1"])("rejects mismatched Content-Range %s", async (range) => {
+    const headers = new Headers();
+    if (range) headers.set("Content-Range", range);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("wrong range", { status: 206, headers })));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    await expect(drive.captureTime(video())).rejects.toThrow("Invalid recording header Content-Range");
+  });
+
+  it.each(["truncated", "oversized", "declared length"])("rejects a %s range body", async (fault) => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const range = new Headers(init?.headers).get("Range")!;
+      const [, start, end] = /^bytes=(\d+)-(\d+)$/.exec(range)!;
+      const length = Number(end) - Number(start) + 1;
+      const headers: Record<string, string> = { "Content-Range": `bytes ${start}-${end}/${bytes.length}` };
+      if (fault === "declared length") headers["Content-Length"] = String(length + 1);
+      return new Response(new Uint8Array(length + (fault === "truncated" ? -1 : 1)), { status: 206, headers });
+    }));
+    const drive = new GDriveLiteClient({ baseUrl: "http://drive.test" });
+    await expect(drive.captureTime(video())).rejects.toThrow(fault === "truncated" ? "Truncated" : fault === "oversized" ? "Oversized" : "Content-Length");
+  });
+});
 
 describe("private source boundaries", () => {
   it("requests linked preview sources when resolving a bookmarked file", async () => {
@@ -46,6 +144,7 @@ describe("private source boundaries", () => {
       const source = { id: "clip", name: "front.mp4", url };
       expect(() => drive.streamSource(source)).toThrow("configured proxy origin");
       await expect(drive.fetchSource(source)).rejects.toThrow("configured proxy origin");
+      await expect(drive.captureTime({ ...file, url })).rejects.toThrow("configured proxy origin");
       expect(fetch).not.toHaveBeenCalled();
     });
 });

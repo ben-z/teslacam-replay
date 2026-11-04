@@ -1,3 +1,4 @@
+import { recordingWallTimeMs } from "./playback";
 import { describe, expect, it, vi } from "vitest";
 import { earlierTimelineDate, timelinePaging, TIMELINE_WINDOW_DAYS } from "./timelinePaging";
 import { buildTimeline } from "./components/Timeline";
@@ -11,7 +12,7 @@ function recording(timestamp: string, type: EventPageType, durationSec: number):
     timestamp: "2000-01-01T00:00:00",
     hasThumbnail: false,
     totalDurationSec: durationSec,
-    clips: [{ timestamp, durationSec, cameras: ["front"] }],
+    clips: [{ timestamp, captureTimeMs: recordingWallTimeMs(timestamp), durationSec, cameras: ["front"] }],
   };
 }
 

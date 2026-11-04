@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DriveEntry } from "./gdrive-lite.js";
+import { timingMp4, timingRangeResponse } from "./test-mp4";
 
 const { serve, ensureHlsSegments, extractTelemetryFromBuffer } = vi.hoisted(() => ({
   serve: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock("./hls.js", () => ({
 }));
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
+const TIMING_FILE_SIZE = timingMp4(Date.UTC(2026, 9, 2)).length;
 const LEGACY = "RecentClips-before-2026-10-02";
 let testDirectory: string;
 let provider: DriveProvider;
@@ -31,6 +33,9 @@ class DriveProvider {
   readonly resolveFailures = new Map<string, number>();
   readonly reads = new Map<string, { body: string; status: number }>();
   readonly thumbnails = new Map<string, { body: string; status: number }>();
+  readonly captureTimes = new Map<string, number>();
+  readonly videoReads: URL[] = [];
+  readonly headerReads: { url: URL; bytes: number }[] = [];
 
   add(filePath: string, folder = false): DriveEntry {
     const parentPath = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
@@ -39,9 +44,14 @@ class DriveProvider {
       id: `file-${this.entries.size}`,
       name: filePath.split("/").at(-1)!,
       mimeType: folder ? FOLDER_MIME : "video/mp4",
-      size: folder ? undefined : "1234",
+      size: folder ? undefined : String(TIMING_FILE_SIZE),
+      modifiedTime: "2026-11-03T00:00:00Z",
       hasThumbnail: false,
     };
+    if (!folder && entry.name.endsWith(".mp4") && /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(entry.name)) {
+      const parsed = Date.parse(entry.name.slice(0, 19).replace("_", "T").replace(/-(\d{2})-(\d{2})$/, ":$1:$2") + "Z");
+      this.captureTimes.set(entry.id, Number.isFinite(parsed) ? parsed : Date.UTC(2026, 9, 2));
+    }
     this.entries.set(filePath, entry);
     this.children.get(parentId)!.push(entry);
     if (folder) this.children.set(entry.id, []);
@@ -56,7 +66,7 @@ class DriveProvider {
     this.children.delete(entry.id);
   }
 
-  async fetch(input: string | URL | Request): Promise<Response> {
+  async fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
     const url = new URL(input instanceof Request ? input.url : input);
     this.requests.push(url);
     if (url.pathname === "/healthz") return Response.json({ status: "ok" });
@@ -66,7 +76,17 @@ class DriveProvider {
       return new Response(image.body, { status: image.status, headers: { "Content-Type": "image/jpeg" } });
     }
     if (url.pathname.startsWith("/file/")) {
-      const file = this.reads.get(url.pathname.split("/")[2]);
+      const id = url.pathname.split("/")[2];
+      const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+      if (headers.has("Range")) {
+        const capture = this.captureTimes.get(id);
+        if (capture === undefined) throw new Error(`Missing video capture fixture: ${url}`);
+        const response = timingRangeResponse(timingMp4(capture), input, init);
+        this.headerReads.push({ url, bytes: Number(response.headers.get("Content-Length")) });
+        return response;
+      }
+      if (this.captureTimes.has(id)) this.videoReads.push(url);
+      const file = this.reads.get(id);
       if (!file) throw new Error(`Missing file-read fixture: ${url}`);
       return new Response(file.body, { status: file.status });
     }
@@ -118,6 +138,7 @@ beforeEach(async () => {
   extractTelemetryFromBuffer.mockReset();
   extractTelemetryFromBuffer.mockResolvedValue(null);
   testDirectory = await mkdtemp(path.join(tmpdir(), "teslacam-archive-api-"));
+  vi.stubEnv("CACHE_DIR", testDirectory);
   await writeFile(path.join(testDirectory, "stream.m3u8"), "#EXTM3U\n#EXT-X-ENDLIST\n");
   priorSignals = new Set([...process.listeners("SIGTERM"), ...process.listeners("SIGINT")]);
   provider = new DriveProvider();
@@ -159,7 +180,38 @@ function hls(segment: string, camera: string): string {
 }
 
 describe("RecentClips archive API", () => {
-  it("serves each Recent recording's native still without reading its videos", async () => {
+  it("keeps a repeated local hour in capture order and reuses bounded header metadata", async () => {
+    const directory = "RecentClips/2026-11-01";
+    provider.add(directory, true);
+    const samples = [
+      ["2026-11-01_01-58-02", "2026-11-01T08:58:02Z"],
+      ["2026-11-01_01-59-02", "2026-11-01T08:59:02Z"],
+      ["2026-11-01_01-00-03", "2026-11-01T09:00:03Z"],
+      ["2026-11-01_01-01-03", "2026-11-01T09:01:03Z"],
+    ];
+    const files = samples.map(([timestamp, utc]) => {
+      const file = provider.add(`${directory}/${timestamp}-front.mp4`);
+      provider.captureTimes.set(file.id, Date.parse(utc));
+      return file;
+    });
+    await start();
+    const loaded = await page();
+    expect(loaded.events).toHaveLength(1);
+    expect(loaded.events[0].clips.map((clip: { timestamp: string; captureTimeMs: number }) => [clip.timestamp, clip.captureTimeMs]))
+      .toEqual(samples.map(([timestamp, utc]) => [timestamp, Date.parse(utc)]));
+    expect(provider.headerReads.length).toBeGreaterThan(0);
+    expect(provider.headerReads.every(({ bytes }) => bytes <= 4096)).toBe(true);
+    expect(provider.videoReads).toHaveLength(0);
+    const headerReads = provider.headerReads.length;
+    await page();
+    expect(provider.headerReads).toHaveLength(headerReads);
+    const eventId = loaded.events[0].id;
+    const response = await request(`/api/hls/RecentClips/${eventId}/${samples[2][0]}/front/stream.m3u8`);
+    expect(response.status).toBe(200);
+    expect(ensureHlsSegments.mock.calls.at(-1)![0].url).toContain(`/file/${files[2].id}/`);
+  });
+
+  it("serves native stills using only bounded recording-header reads", async () => {
     const folder = "RecentClips/2026-10-02";
     provider.add(folder, true);
     const ids = ["2026-10-02_10-00-00", "2026-10-02_11-00-00"];
@@ -174,7 +226,8 @@ describe("RecentClips archive API", () => {
     await start();
     const loaded = await page();
     expect(loaded.events).toHaveLength(2);
-    expect(provider.requests.some((url) => /^\/(file|thumbnail)\//.test(url.pathname))).toBe(false);
+    expect(provider.requests.some((url) => url.pathname.startsWith("/thumbnail/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
     for (const [index, id] of ids.entries()) {
       const event = loaded.events.find((item: { id: string }) => item.id === id);
       expect(event.hasThumbnail).toBe(true);
@@ -188,7 +241,7 @@ describe("RecentClips archive API", () => {
       expect(provider.requests.some((url) => url.pathname === `/thumbnail/${files[index].id}`
         && url.searchParams.get("resourceKey") === "PREVIEW_PRIVATE")).toBe(true);
     }
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
     expect(ensureHlsSegments).not.toHaveBeenCalled();
     expect(extractTelemetryFromBuffer).not.toHaveBeenCalled();
   });
@@ -233,7 +286,7 @@ describe("RecentClips archive API", () => {
     expect(failed.status).toBe(502);
     expect(await failed.json()).toEqual({ error: "Cannot read thumbnail: HTTP 503" });
     expect(provider.requests.filter((url) => url.pathname.startsWith("/thumbnail/"))).toHaveLength(1);
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
   });
 
   it.each(["missing availability", "external image URL"])("fails explicitly for %s", async (fault) => {
@@ -292,7 +345,7 @@ describe("RecentClips archive API", () => {
     expect(last.nextPageDate).toBeNull();
     expect([...first.events, ...second.events, ...last.events].map((event: { id: string }) => event.id))
       .toEqual(files.map((file) => file.split("/").at(-1)!.slice(0, 19)));
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
   });
 
   it("plays a backfilled recording from its canonical dated path without probing preserved roots", async () => {
@@ -334,10 +387,10 @@ describe("RecentClips archive API", () => {
   it("surfaces canonical root listing failure instead of serving a stale date list", async () => {
     await start();
     const rootId = provider.entries.get("RecentClips")!.id;
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === "/api/list" && url.searchParams.get("folderId") === rootId) return new Response("Provider failure", { status: 503 });
-      return provider.fetch(input);
+      return provider.fetch(input, init);
     });
     const response = await request("/api/events/page?type=RecentClips");
     expect(response.status).toBe(500);
@@ -379,7 +432,7 @@ describe("RecentClips archive API", () => {
       log.mockRestore();
     }
     expect(ensureHlsSegments).not.toHaveBeenCalled();
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
   });
 
   it("rejects unsupported camera files rather than counting footage the player cannot show", async () => {
@@ -738,7 +791,7 @@ describe("remaining archive calendar dates", () => {
       }
     }
     provider.add("RecentClips/2026-10-23", true);
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
         provider.requests.push(url);
@@ -746,7 +799,7 @@ describe("remaining archive calendar dates", () => {
         const offset = Number(url.searchParams.get("pageToken") || "0");
         return Response.json({ folderId: folder.id, files: files.slice(offset, offset + 1000), nextPageToken: offset + 1000 < files.length ? String(offset + 1000) : undefined });
       }
-      return provider.fetch(input);
+      return provider.fetch(input, init);
     });
     await start();
     const first = await page();
@@ -760,20 +813,20 @@ describe("remaining archive calendar dates", () => {
     expect(requests.map((url) => url.searchParams.get("pageToken"))).toEqual([null, ...Array.from({ length: 8 }, (_, index) => String((index + 1) * 1000))]);
     expect(requests.every((url) => url.searchParams.get("limit") === "1000")).toBe(true);
     expect(provider.listsFor("RecentClips/2026-10-23")).toHaveLength(0);
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
   });
 
   it("rejects repeated provider tokens before publishing a dated page", async () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
     const file = provider.add(`${directory}/2026-10-24_12-00-00-front.mp4`);
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id) {
         provider.requests.push(url);
         return Response.json({ folderId: folder.id, files: [file], nextPageToken: "private-repeated-token" });
       }
-      return provider.fetch(input);
+      return provider.fetch(input, init);
     });
     await start();
     const response = await request("/api/events/page?type=RecentClips");
@@ -786,10 +839,10 @@ describe("remaining archive calendar dates", () => {
     const directory = "RecentClips/2026-10-24";
     const folder = provider.add(directory, true);
     for (let hour = 0; hour < 3; hour++) provider.add(`${directory}/2026-10-24_0${hour}-00-00-front.mp4`);
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folder.id && url.searchParams.has("pageToken")) return new Response("Provider unavailable", { status: 503 });
-      return provider.fetch(input);
+      return provider.fetch(input, init);
     });
     await start();
     const failure = await request("/api/events/page?type=RecentClips");
@@ -803,7 +856,7 @@ describe("remaining archive calendar dates", () => {
     const retried = await page();
     expect(retried.events).toHaveLength(3);
     expect(retried.nextPageToken).toBeNull();
-    expect(provider.requests.some((url) => url.pathname.startsWith("/file/"))).toBe(false);
+    expect(provider.videoReads).toHaveLength(0);
   });
 
   it.each(["2026-02-30", "2026-10-25", "private-cursor", Buffer.from(JSON.stringify({ root: "old-root" })).toString("base64url")])(
@@ -902,12 +955,12 @@ describe("hosted API origin policy", () => {
     provider.add("SavedClips/2026-10-02_10-00-00/2026-10-02_10-00-00-front.mp4");
     const thumbnail = provider.add("SavedClips/2026-10-02_10-00-00/thumb.png");
     thumbnail.mimeType = "image/png";
-    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input);
       if (url.pathname === `/file/${thumbnail.id}/thumb.png`) {
         return new Response("thumbnail bytes", { headers: { "Content-Type": "image/png" } });
       }
-      return provider.fetch(input);
+      return provider.fetch(input, init);
     });
     await writeFile(path.join(testDirectory, "chunk_0123456789abcdef_000.ts"), "segment bytes");
     await start();

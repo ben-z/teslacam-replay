@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashcamEvent } from "../types";
 import { Player } from "./Player";
+import { recordingWallTimeMs } from "../playback";
 
 interface HlsDouble {
   url: string;
@@ -45,7 +46,7 @@ vi.mock("hls.js", () => ({
 function recording(timestamps: string[], cameras: string[]): DashcamEvent {
   return {
     id: timestamps[0], type: "RecentClips", timestamp: timestamps[0], hasThumbnail: false,
-    clips: timestamps.map((timestamp) => ({ timestamp, cameras, durationSec: 60 })),
+    clips: timestamps.map((timestamp) => ({ timestamp, captureTimeMs: recordingWallTimeMs(timestamp), cameras, durationSec: 60 })),
     totalDurationSec: timestamps.length * 60,
   };
 }
@@ -80,6 +81,13 @@ function position() {
 }
 
 describe("opening at a selected recording time", () => {
+  it("identifies the repeated hour even when a recording stays within one offset", async () => {
+    const event = recording(["2026-11-01_01-01-34"], ["front"]);
+    event.clips[0].captureTimeMs = Date.parse("2026-11-01T09:01:34Z");
+    await open(event, 0);
+    expect(container.querySelector(".player-wall-clock")!.textContent).toContain("UTC−08:00");
+  });
+
   it("loads only the selected source file when opening late in a long recording", async () => {
     const event = recording([
       "2026-10-21_00-00-00", "2026-10-21_20-00-00", "2026-10-21_20-01-00",
@@ -195,5 +203,59 @@ describe("native HLS final-segment seeking", () => {
     expect(video.currentTime).toBe(43);
     expect(container.querySelector('.player-time')!.textContent).toContain("0:43 / 0:43");
     expect((container.querySelector('[aria-label="Play"]') as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+
+describe("playback across recorded clock changes", () => {
+  it("opens the second occurrence by elapsed capture time and displays its UTC offset", async () => {
+    const event = recording(["2026-11-01_01-59-00", "2026-11-01_01-00-00", "2026-11-01_01-01-00"], ["front"]);
+    event.clips.forEach((clip, index) => { clip.captureTimeMs = Date.parse("2026-11-01T08:59:00Z") + index * 60_000; });
+    await open(event, 75);
+    expect(position()).toBe(75);
+    expect(instances[0].url).toContain("/2026-11-01_01-00-00/front/stream.m3u8");
+    expect(instances[0].video!.currentTime).toBe(15);
+    expect(container.querySelector('.player-wall-clock')!.textContent).toContain("1:00:15 AM UTC−08:00");
+    expect(container.querySelector('[aria-label="Recording position"]')!.getAttribute("aria-valuemax")).toBe("180");
+    expect(container.textContent).toContain("Recorded clock changes: UTC−07:00 → UTC−08:00");
+  });
+
+  it("keeps a spring-forward recording on its actual two-minute elapsed axis", async () => {
+    const event = recording(["2026-03-08_01-59-00", "2026-03-08_03-00-00"], ["front"]);
+    event.clips.forEach((clip, index) => { clip.captureTimeMs = Date.parse("2026-03-08T09:59:00Z") + index * 60_000; });
+    await open(event, 75);
+    expect(instances[0].url).toContain("/2026-03-08_03-00-00/front/stream.m3u8");
+    expect(instances[0].video!.currentTime).toBe(15);
+    expect(container.querySelector('.player-wall-clock')!.textContent).toContain("3:00:15 AM UTC−07:00");
+    expect(container.querySelector('[aria-label="Recording position"]')!.getAttribute("aria-valuemax")).toBe("120");
+  });
+
+  it("offers both possible event moments when the trigger's local time repeats", async () => {
+    const event = recording(["2026-11-01_01-00-00", "2026-11-01_01-00-01"], ["front"]);
+    event.type = "SavedClips";
+    event.timestamp = "2026-11-01T01:00:30";
+    event.clips[0].captureTimeMs = Date.parse("2026-11-01T08:00:00Z");
+    event.clips[0].durationSec = 3601;
+    event.clips[1].captureTimeMs = Date.parse("2026-11-01T09:00:01Z");
+    await open(event, 0);
+    const second = container.querySelector<HTMLButtonElement>('[aria-label="Jump to possible event moment UTC−08:00"]')!;
+    expect(container.querySelector('[aria-label="Jump to possible event moment UTC−07:00"]')).not.toBeNull();
+    expect(second).not.toBeNull();
+    await act(async () => second.click());
+    expect(position()).toBe(3630);
+    expect(instances.at(-1)!.video!.currentTime).toBe(29);
+  });
+
+  it("uses an explicit trigger offset to show only the matching event moment", async () => {
+    const event = recording(["2026-11-01_01-00-00", "2026-11-01_01-00-01"], ["front"]);
+    event.type = "SavedClips";
+    event.timestamp = "2026-11-01T01:00:30-08:00";
+    event.clips[0].captureTimeMs = Date.parse("2026-11-01T08:00:00Z");
+    event.clips[0].durationSec = 3601;
+    event.clips[1].captureTimeMs = Date.parse("2026-11-01T09:00:01Z");
+    await open(event, 0);
+    expect(container.querySelectorAll(".player-trigger-btn")).toHaveLength(1);
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Jump to event moment"]')!.click());
+    expect(position()).toBe(3630);
   });
 });

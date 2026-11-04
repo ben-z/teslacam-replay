@@ -1,6 +1,7 @@
 import { memo, useMemo, useState, useCallback, type ReactNode } from "react";
 import type { DashcamEvent } from "../types";
-import { recordingWallTimeMs } from "../playback";
+import { compareRecordingOrder } from "../events";
+import { formatUtcOffset, recordingOffsetMs, recordingWallTimeMs } from "../playback";
 import "./Timeline.css";
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
 
 interface DayData {
   dateStr: string;
+  utcOffsetMs: number;
+  offsetLabel: string | null;
   weekday: string;
   dateLabel: string;
   sessions: SessionBlock[];
@@ -64,11 +67,11 @@ function formatDurationShort(min: number): string {
 }
 
 /** Convert a calendar selection to the source recording clock, retaining gaps. */
-export function timelineSelectionTime(event: DashcamEvent, dateStr: string, hour: number): number {
+export function timelineSelectionTime(event: DashcamEvent, dateStr: string, hour: number, utcOffsetMs: number): number {
   if (!Number.isFinite(hour) || hour < 0 || hour > 24) throw new Error(`Invalid Timeline selection hour: ${hour}`);
   if (!event.clips.length) throw new Error("Cannot select a recording without clips");
   const selectedTime = recordingWallTimeMs(`${dateStr}T00:00:00`) + hour * 3_600_000;
-  return Math.max(0, (selectedTime - recordingWallTimeMs(event.clips[0].timestamp)) / 1000);
+  return Math.max(0, (selectedTime - utcOffsetMs - event.clips[0].captureTimeMs) / 1000);
 }
 
 /** Draw calendar ranges while retaining full source recordings for selection. */
@@ -77,19 +80,23 @@ export function buildTimeline(events: DashcamEvent[], fromDate?: string): { days
     throw new Error(`Invalid Timeline start date: ${fromDate}`);
   }
   const fromDay = fromDate === undefined ? undefined : recordingWallTimeMs(`${fromDate}T00:00:00`);
-  const dayMap = new Map<number, Map<string, SessionBlock>>();
+  const dayMap = new Map<string, { day: number; utcOffsetMs: number; firstCaptureTimeMs: number; sessions: Map<string, SessionBlock> }>();
   for (const event of events) {
     const key = `${event.type}/${event.id}`;
     for (const clip of event.clips) {
       if (!Number.isFinite(clip.durationSec) || clip.durationSec <= 0) {
         throw new Error(`Invalid clip duration: ${event.type}/${event.id}/${clip.timestamp}`);
       }
-      const start = recordingWallTimeMs(clip.timestamp);
+      const utcOffsetMs = recordingOffsetMs(clip);
+      const start = clip.captureTimeMs + utcOffsetMs;
       const end = start + clip.durationSec * 1000;
       const firstDay = Math.floor(start / DAY_MS) * DAY_MS;
       for (let day = fromDay === undefined ? firstDay : Math.max(firstDay, fromDay); day < end; day += DAY_MS) {
-        if (!dayMap.has(day)) dayMap.set(day, new Map());
-        const sessions = dayMap.get(day)!;
+        const dayKey = `${day}/${utcOffsetMs}`;
+        if (!dayMap.has(dayKey)) dayMap.set(dayKey, { day, utcOffsetMs, firstCaptureTimeMs: Infinity, sessions: new Map() });
+        const entry = dayMap.get(dayKey)!;
+        entry.firstCaptureTimeMs = Math.min(entry.firstCaptureTimeMs, Math.max(start, day) - utcOffsetMs);
+        const sessions = entry.sessions;
         if (!sessions.has(key)) {
           sessions.set(key, { startHour: 24, endHour: 0, durationMin: 0, event, ranges: [] });
         }
@@ -101,37 +108,47 @@ export function buildTimeline(events: DashcamEvent[], fromDate?: string): { days
       }
     }
   }
-  const days: DayData[] = [...dayMap.entries()].sort(([a], [b]) => b - a).map(([day, sessions]) => ({
-    dateStr: new Date(day).toISOString().slice(0, 10),
-    weekday: WEEKDAY_FORMATTER.format(day),
-    dateLabel: DATE_LABEL_FORMATTER.format(day),
-    sessions: [...sessions.values()].map((session) => {
-      const merged: SessionBlock["ranges"] = [];
-      for (const range of session.ranges.sort((a, b) => a.startHour - b.startHour)) {
-        const last = merged.at(-1);
-        if (last && range.startHour <= last.endHour) last.endHour = Math.max(last.endHour, range.endHour);
-        else merged.push({ ...range });
-      }
-      return {
-        ...session,
-        ranges: merged,
-        startHour: merged[0].startHour,
-        endHour: merged.at(-1)!.endHour,
-        durationMin: Math.round(merged.reduce((sum, range) => sum + range.endHour - range.startHour, 0) * 60),
-      };
-    }).sort((a, b) => {
-      const aOrder = a.event.type === "RecentClips" ? 0 : 1;
-      const bOrder = b.event.type === "RecentClips" ? 0 : 1;
-      return aOrder - bOrder || a.startHour - b.startHour;
-    }),
-  }));
+  const dayOffsets = new Map<number, Set<number>>();
+  for (const { day, utcOffsetMs } of dayMap.values()) {
+    if (!dayOffsets.has(day)) dayOffsets.set(day, new Set());
+    dayOffsets.get(day)!.add(utcOffsetMs);
+  }
+  const days: DayData[] = [...dayMap.values()]
+    .sort((a, b) => b.day - a.day || a.firstCaptureTimeMs - b.firstCaptureTimeMs)
+    .map(({ day, utcOffsetMs, sessions }) => ({
+      utcOffsetMs,
+      offsetLabel: dayOffsets.get(day)!.size > 1 ? formatUtcOffset(utcOffsetMs) : null,
+      dateStr: new Date(day).toISOString().slice(0, 10),
+      weekday: WEEKDAY_FORMATTER.format(day),
+      dateLabel: DATE_LABEL_FORMATTER.format(day),
+      sessions: [...sessions.values()].map((session) => {
+        const merged: SessionBlock["ranges"] = [];
+        for (const range of session.ranges.sort((a, b) => a.startHour - b.startHour)) {
+          const last = merged.at(-1);
+          if (last && range.startHour <= last.endHour) last.endHour = Math.max(last.endHour, range.endHour);
+          else merged.push({ ...range });
+        }
+        return {
+          ...session,
+          ranges: merged,
+          startHour: merged[0].startHour,
+          endHour: merged.at(-1)!.endHour,
+          durationMin: Math.round(merged.reduce((sum, range) => sum + range.endHour - range.startHour, 0) * 60),
+        };
+      }).sort((a, b) => {
+        const aOrder = a.event.type === "RecentClips" ? 0 : 1;
+        const bOrder = b.event.type === "RecentClips" ? 0 : 1;
+        return aOrder - bOrder || a.startHour - b.startHour;
+      }),
+    }));
+
   const visibleEvents = new Map<string, DashcamEvent>();
   for (const day of days) {
     for (const { event } of day.sessions) visibleEvents.set(`${event.type}/${event.id}`, event);
   }
   return {
     days,
-    sessionList: [...visibleEvents.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    sessionList: [...visibleEvents.values()].sort(compareRecordingOrder),
   };
 }
 
@@ -139,9 +156,10 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const { days, sessionList } = useMemo(() => buildTimeline(events, fromDate), [events, fromDate]);
+  const dayCount = new Set(days.map((day) => day.dateStr)).size;
 
-  const handleSessionClick = useCallback((session: SessionBlock, dateStr: string, hour: number) => {
-    onSelectEvent?.(session.event, sessionList, timelineSelectionTime(session.event, dateStr, hour));
+  const handleSessionClick = useCallback((session: SessionBlock, day: DayData, hour: number) => {
+    onSelectEvent?.(session.event, sessionList, timelineSelectionTime(session.event, day.dateStr, hour, day.utcOffsetMs));
   }, [onSelectEvent, sessionList]);
 
   const handleBarPointerMove = useCallback((e: React.PointerEvent, day: DayData) => {
@@ -168,7 +186,7 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
     }
     const typeClass = EVENT_TYPE_CLASS[session.event.type];
     const typeLabel = typeClass === "recent" ? "" : ` ${typeClass}`;
-    const text = `${timeStr} — ${formatDurationShort(session.durationMin)}${typeLabel} session`;
+    const text = `${timeStr}${day.offsetLabel ? ` ${day.offsetLabel}` : ""} — ${formatDurationShort(session.durationMin)}${typeLabel} session`;
     setTooltip({ x: e.clientX, y: e.clientY - 32, text });
   }, []);
 
@@ -189,7 +207,7 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
         <div className="timeline-toolbar">
           <div className="timeline-summary">
             <strong>{sessionList.length}</strong> recording{sessionList.length !== 1 ? "s" : ""} shown
-            {" "}· Video on <strong>{days.length}</strong> day{days.length !== 1 ? "s" : ""}
+            {" "}· Video on <strong>{dayCount}</strong> day{dayCount !== 1 ? "s" : ""}
             <span className="timeline-coverage-note">Approximate recording coverage</span>
           </div>
           <div className="timeline-legend">
@@ -214,7 +232,7 @@ export function Timeline({ events, fromDate, onSelectEvent, footer }: Props) {
       </div>
       {days.map((day) => (
         <TimelineDayRow
-          key={day.dateStr}
+          key={`${day.dateStr}/${day.utcOffsetMs}`}
           day={day}
           onSessionClick={handleSessionClick}
           onBarPointerMove={handleBarPointerMove}
@@ -242,7 +260,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
   onTooltipClear,
 }: {
   day: DayData;
-  onSessionClick: (session: SessionBlock, dateStr: string, hour: number) => void;
+  onSessionClick: (session: SessionBlock, day: DayData, hour: number) => void;
   onBarPointerMove: (e: React.PointerEvent, day: DayData) => void;
   onTooltipClear: () => void;
 }) {
@@ -252,6 +270,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
         <div className="timeline-day-label">
           <span className="timeline-day-label-weekday">{day.weekday}</span>
           <span className="timeline-day-label-date">{day.dateLabel}</span>
+          {day.offsetLabel && <span className="timeline-day-label-date">{day.offsetLabel}</span>}
         </div>
         <div className="timeline-bar-container">
           <div
@@ -273,7 +292,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
                       if (!bar) throw new Error("Timeline recording is missing its calendar track");
                       const rect = bar.getBoundingClientRect();
                       const hour = Math.max(0, Math.min(24, (e.clientX - rect.left) / rect.width * 24));
-                      onSessionClick(session, day.dateStr, hour);
+                      onSessionClick(session, day, hour);
                     }}
                   />
                 ))}
@@ -290,7 +309,7 @@ const TimelineDayRow = memo(function TimelineDayRow({
         </div>
       </div>
       <details className="timeline-recordings">
-        <summary>{day.sessions.length} recording{day.sessions.length !== 1 ? "s" : ""} on {day.dateStr}</summary>
+        <summary>{day.sessions.length} recording{day.sessions.length !== 1 ? "s" : ""} on {day.dateStr}{day.offsetLabel ? ` ${day.offsetLabel}` : ""}</summary>
         <div className="timeline-session-list">
           {[...day.sessions].sort((a, b) => b.startHour - a.startHour).map((session) => {
             const type = EVENT_TYPE_CLASS[session.event.type];
@@ -299,8 +318,8 @@ const TimelineDayRow = memo(function TimelineDayRow({
                 type="button"
                 key={`${session.event.type}/${session.event.id}`}
                 className="timeline-session-button"
-                aria-label={`Open ${type} recording at ${formatTimeDetailed(session.startHour)} on ${day.dateStr}`}
-                onClick={() => onSessionClick(session, day.dateStr, session.startHour)}
+                aria-label={`Open ${type} recording at ${formatTimeDetailed(session.startHour)} on ${day.dateStr}${day.offsetLabel ? ` ${day.offsetLabel}` : ""}`}
+                onClick={() => onSessionClick(session, day, session.startHour)}
               >
                 <span className={`timeline-session-type timeline-segment--${type}`}>{type}</span>
                 <span>{formatTimeDetailed(session.startHour)}</span>

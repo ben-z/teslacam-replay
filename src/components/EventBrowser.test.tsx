@@ -1,3 +1,4 @@
+import { recordingWallTimeMs } from "../playback";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
@@ -33,7 +34,7 @@ function recording(type: DashcamEvent["type"]): DashcamEvent {
     type,
     timestamp: "2026-10-22T12:00:00",
     hasThumbnail: false,
-    clips: type === "RecentClips" ? [{ timestamp: "2026-10-22_12-00-00", cameras: ["front"], durationSec: 60 }] : [],
+    clips: type === "RecentClips" ? [{ timestamp: "2026-10-22_12-00-00", captureTimeMs: recordingWallTimeMs("2026-10-22_12-00-00"), cameras: ["front"], durationSec: 60 }] : [],
     totalDurationSec: type === "RecentClips" ? 60 : 0,
   };
 }
@@ -186,5 +187,44 @@ describe("recording list archive scope", () => {
     expect(markup).toContain("No recordings in the loaded pages");
     expect(markup).not.toContain('role="status"');
     expect(markup).not.toContain('role="alert"');
+  });
+});
+
+
+function clockRecording(timestamp: string, captureTime: string): DashcamEvent {
+  const event = recording("RecentClips");
+  return { ...event, id: timestamp, timestamp, clips: [{ ...event.clips[0], timestamp, captureTimeMs: Date.parse(captureTime) }] };
+}
+
+describe("recording cards across clock changes", () => {
+  it("shows the second occurrence before the first and identifies their offsets", () => {
+    const first = clockRecording("2026-11-01T01:50:00", "2026-11-01T08:50:00Z");
+    const second = clockRecording("2026-11-01T01:20:00", "2026-11-01T09:20:00Z");
+    const noVideo = { ...first, id: "metadata-only", timestamp: "2026-11-01T02:30:00", clips: [], totalDurationSec: 0 };
+    const markup = render([first, noVideo, second]);
+    const labels = [...markup.matchAll(/aria-label="Open Recent recording from ([^"]+)"/g)].map((match) => match[1]);
+    expect(labels).toEqual([
+      "Sun, Nov 1, 2026, 1:20 AM; UTC−08:00",
+      "Sun, Nov 1, 2026, 1:50 AM; UTC−07:00",
+      "Sun, Nov 1, 2026, 2:30 AM",
+    ]);
+    expect(markup.match(/class="browse-card-clock"/g)).toHaveLength(2);
+  });
+
+  it("keeps ordinary single-offset dates free of offset labels", () => {
+    const markup = render([clockRecording("2026-11-02T01:20:00", "2026-11-02T09:20:00Z")]);
+    expect(markup).not.toContain("browse-card-clock");
+    expect(markup).not.toContain("UTC−08:00");
+  });
+
+  it("labels a recording crossing a clock change without assigning an offset to its trigger", () => {
+    const event = clockRecording("2026-11-01T01:50:00", "2026-11-01T08:50:00Z");
+    event.type = "SavedClips";
+    event.clips.push({ ...event.clips[0], timestamp: "2026-11-01T01:20:00", captureTimeMs: Date.parse("2026-11-01T09:20:00Z") });
+    const markup = render([event]);
+    expect(markup).toContain("1:50 AM; Clock changes");
+    expect(markup).toContain('<span class="browse-card-clock">Clock changes</span>');
+    expect(markup).not.toContain("UTC−07:00");
+    expect(markup).not.toContain("UTC−08:00");
   });
 });

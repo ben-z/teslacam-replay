@@ -1,5 +1,15 @@
 import type { DashcamEvent } from "./types";
 
+/** Recorded dates stay grouped; video uses capture order and video-free entries follow it. */
+export function compareRecordingOrder(first: Pick<DashcamEvent, "timestamp" | "clips">, later: Pick<DashcamEvent, "timestamp" | "clips">): number {
+  const dateOrder = later.timestamp.slice(0, 10).localeCompare(first.timestamp.slice(0, 10));
+  if (dateOrder !== 0) return dateOrder;
+  if (first.clips.length > 0 && later.clips.length > 0) return later.clips[0].captureTimeMs - first.clips[0].captureTimeMs;
+  if (first.clips.length > 0) return -1;
+  if (later.clips.length > 0) return 1;
+  return later.timestamp.localeCompare(first.timestamp);
+}
+
 export function mergeRecentFragments<T extends Pick<DashcamEvent, "id" | "type" | "clips">>(
   existing: T[],
   incoming: T,
@@ -46,7 +56,7 @@ function mergeRecentCameras(existing: DashcamEvent, incoming: DashcamEvent): Das
       durationSec: Math.max(previous.durationSec, clip.durationSec),
     } : clip);
   }
-  const mergedClips = [...clips.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const mergedClips = [...clips.values()].sort((a, b) => a.captureTimeMs - b.captureTimeMs);
   return {
     ...existing,
     ...incoming,

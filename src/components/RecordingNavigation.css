@@ -37,7 +37,7 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
-.recording-clock-labels span { text-align: center; }
+.recording-clock-labels span { text-align: center; min-width: 0; flex: 1; }
 .recording-clock-labels span:first-child { text-align: left; }
 .recording-clock-labels span:last-child { text-align: right; }
 .recording-navigation .player-timeline { touch-action: none; height: 32px; }
@@ -56,3 +56,8 @@
   .recording-gaps { top: 16px; }
   .recording-overview input { min-height: 32px; }
 }
+
+.recording-clock-changes { margin-bottom: 6px; color: var(--text-muted); font-size: 12px; }
+.recording-jump-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.recording-jump-choices span { flex-basis: 100%; color: var(--text-muted); font-size: 12px; }
+.recording-clock-change-marker { position: absolute; top: 2px; bottom: 2px; border-left: 2px dashed var(--accent); pointer-events: none; }

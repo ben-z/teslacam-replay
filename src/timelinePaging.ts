@@ -1,5 +1,5 @@
 import { EVENT_PAGE_TYPES, type EventPagePositions, type EventPageType } from "./api";
-import { recordingWallTimeMs } from "./playback";
+import { recordingOffsetMs, recordingWallTimeMs } from "./playback";
 import type { DashcamEvent } from "./types";
 
 export const TIMELINE_WINDOW_DAYS = 7;
@@ -28,10 +28,11 @@ export function timelinePaging(events: DashcamEvent[], pages: EventPagePositions
       if (!Number.isFinite(clip.durationSec) || clip.durationSec <= 0) {
         throw new Error(`Invalid clip duration: ${event.type}/${event.id}/${clip.timestamp}`);
       }
-      const lastDay = new Date(recordingWallTimeMs(clip.timestamp) + clip.durationSec * 1000 - 1)
+      const start = clip.captureTimeMs + recordingOffsetMs(clip);
+      const lastDay = new Date(start + clip.durationSec * 1000 - 1)
         .toISOString().slice(0, 10);
       if (newestLoadedDay === undefined || lastDay > newestLoadedDay) newestLoadedDay = lastDay;
-      const firstDay = clip.timestamp.slice(0, 10);
+      const firstDay = new Date(start).toISOString().slice(0, 10);
       if (oldestLoadedDay === undefined || firstDay < oldestLoadedDay) oldestLoadedDay = firstDay;
     }
   }

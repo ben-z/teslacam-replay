@@ -2,6 +2,7 @@ export const HLS_CACHE_VERSION = "2";
 
 export interface EventClip {
   timestamp: string;
+  captureTimeMs: number; // absolute capture time from the MP4 movie header
   cameras: string[];
   durationSec: number; // estimated from timestamp gaps, ~60s
 }
