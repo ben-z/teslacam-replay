@@ -1,14 +1,24 @@
 import { recordingWallTimeMs } from "./playback";
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashcamEvent } from "./types";
 import { fetchEvent, fetchEventPage } from "./api";
+import { readRecordingCache, writeRecordingCache, type CachedRecordingSource } from "./recordingCache";
+import type { EventPagePositions, EventPageType } from "./api";
 import { App } from "./App";
 
 interface BrowserProps {
   active: boolean;
+  events: DashcamEvent[];
+  pagePositions: EventPagePositions;
+  pendingTypes: EventPageType[];
+  errorsByType: Partial<Record<EventPageType, string>>;
+  cacheError: string | null;
+  onRefresh: () => Promise<void>;
+  onLoadMore: (types: EventPageType[]) => void;
+  onRetry: (type: EventPageType) => void;
   onSelectEvent: (event: DashcamEvent, list: DashcamEvent[], startTime?: number) => void;
 }
 interface PlayerProps {
@@ -19,6 +29,11 @@ interface PlayerProps {
   onNavigate: (direction: -1 | 1) => void;
 }
 const state = vi.hoisted(() => ({ browser: null as BrowserProps | null }));
+
+vi.mock("./recordingCache", () => ({
+  readRecordingCache: vi.fn(),
+  writeRecordingCache: vi.fn(),
+}));
 
 vi.mock("./api", () => ({
   EVENT_PAGE_TYPES: ["SavedClips", "SentryClips", "RecentClips"],
@@ -58,6 +73,8 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   history.replaceState(null, "", "/");
   state.browser = null;
+  vi.mocked(readRecordingCache).mockReset().mockResolvedValue([]);
+  vi.mocked(writeRecordingCache).mockReset().mockResolvedValue();
   vi.mocked(fetchEvent).mockReset();
   vi.mocked(fetchEventPage).mockReset().mockImplementation(async (type) => ({ type, events: [], nextPageToken: null, nextPageDate: null }));
   // Browser history traversal itself is outside this component's responsibility.
@@ -182,4 +199,116 @@ it("navigates between repeated-hour recordings in the same order as the browser 
   expect(container.querySelector('[data-testid="player"]')!.getAttribute("data-recording")).toBe(second.id);
   await click("Next recording");
   expect(container.querySelector('[data-testid="player"]')!.getAttribute("data-recording")).toBe(first.id);
+});
+
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function cachedSource(events: DashcamEvent[], pageCount: number): CachedRecordingSource {
+  return { type: "RecentClips", events, pageCount, nextPageToken: "cached-older", nextPageDate: "2026-10-20" };
+}
+
+describe("saved recording list and background refresh", () => {
+  it("restores recordings and their cursor before the network finishes, including in StrictMode", async () => {
+    const page = deferred<Awaited<ReturnType<typeof fetchEventPage>>>();
+    const cached = cachedSource([selected], 1);
+    vi.mocked(readRecordingCache).mockResolvedValue([cached]);
+    vi.mocked(fetchEventPage).mockImplementation(() => page.promise);
+    await act(async () => root.render(<StrictMode><App /></StrictMode>));
+    expect(state.browser!.events).toEqual([selected]);
+    expect(state.browser!.pagePositions.RecentClips).toEqual({ nextPageToken: "cached-older", nextPageDate: "2026-10-20" });
+    expect(state.browser!.pendingTypes).toContain("RecentClips");
+    expect(readRecordingCache).toHaveBeenCalledTimes(1);
+    expect(fetchEventPage).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes the loaded depth with fresh cursors and replaces removed recordings atomically", async () => {
+    const newer = recording("2026-10-22_00-00-00");
+    const older = recording("2026-10-20_00-00-00");
+    const secondPage = deferred<Awaited<ReturnType<typeof fetchEventPage>>>();
+    vi.mocked(readRecordingCache).mockResolvedValue([cachedSource([selected, older], 2)]);
+    vi.mocked(fetchEventPage).mockImplementation(async (type, token) => {
+      if (type !== "RecentClips") return { type, events: [], nextPageToken: null, nextPageDate: null };
+      if (token === null) return { type, events: [newer], nextPageToken: "fresh-next", nextPageDate: "2026-10-21" };
+      expect(token).toBe("fresh-next");
+      return secondPage.promise;
+    });
+    await open();
+    expect(state.browser!.events).toEqual([selected, older]);
+    expect(state.browser!.pagePositions.RecentClips!.nextPageToken).toBe("cached-older");
+    await act(async () => secondPage.resolve({ type: "RecentClips", events: [older], nextPageToken: "fresh-older", nextPageDate: "2026-10-20" }));
+    expect(state.browser!.events).toEqual([newer, older]);
+    expect(state.browser!.pagePositions.RecentClips!.nextPageToken).toBe("fresh-older");
+    expect(writeRecordingCache).toHaveBeenCalledWith({ type: "RecentClips", events: [newer, older], pageCount: 2, nextPageToken: "fresh-older", nextPageDate: "2026-10-20" });
+    expect(fetchEventPage).not.toHaveBeenCalledWith("RecentClips", "cached-older", expect.anything());
+  });
+
+  it("retains the complete saved source on a later-page failure and retries from the first page", async () => {
+    const cached = cachedSource([selected], 2);
+    vi.mocked(readRecordingCache).mockResolvedValue([cached]);
+    vi.mocked(fetchEventPage).mockImplementation(async (type, token) => {
+      if (type !== "RecentClips") return { type, events: [], nextPageToken: null, nextPageDate: null };
+      if (token !== null) throw new Error("Older refresh failed");
+      return { type, events: [], nextPageToken: "fresh-next", nextPageDate: "2026-10-21" };
+    });
+    await open();
+    expect(state.browser!.events).toEqual([selected]);
+    expect(state.browser!.pagePositions.RecentClips!.nextPageToken).toBe("cached-older");
+    expect(state.browser!.errorsByType.RecentClips).toBe("Older refresh failed");
+    expect(writeRecordingCache).not.toHaveBeenCalledWith(expect.objectContaining({ type: "RecentClips" }));
+    vi.mocked(fetchEventPage).mockResolvedValue({ type: "RecentClips", events: [], nextPageToken: null, nextPageDate: null });
+    await act(async () => state.browser!.onRetry("RecentClips"));
+    expect(fetchEventPage).toHaveBeenLastCalledWith("RecentClips", null, 24);
+    expect(state.browser!.events).toEqual([]);
+    expect(state.browser!.errorsByType.RecentClips).toBeUndefined();
+  });
+
+  it("persists additional loaded pages and refreshes the resulting depth", async () => {
+    const older = recording("2026-10-20_00-00-00");
+    vi.mocked(fetchEventPage).mockImplementation(async (type, token) => ({
+      type, events: type === "RecentClips" ? [token === null ? selected : older] : [],
+      nextPageToken: type === "RecentClips" && token === null ? "older" : null,
+      nextPageDate: type === "RecentClips" && token === null ? "2026-10-21" : null,
+    }));
+    await open();
+    await act(async () => state.browser!.onLoadMore(["RecentClips"]));
+    expect(writeRecordingCache).toHaveBeenCalledWith(expect.objectContaining({ type: "RecentClips", events: [selected, older], pageCount: 2, nextPageToken: null }));
+    vi.mocked(fetchEventPage).mockClear();
+    await act(async () => state.browser!.onRefresh());
+    expect(vi.mocked(fetchEventPage).mock.calls.filter(([type]) => type === "RecentClips")).toEqual([["RecentClips", null, 24], ["RecentClips", "older", 24]]);
+  });
+
+  it("reports cache read and write errors while still displaying live recordings", async () => {
+    vi.mocked(readRecordingCache).mockRejectedValue(new Error("Storage access denied"));
+    vi.mocked(writeRecordingCache).mockRejectedValue(new Error("Quota exceeded"));
+    vi.mocked(fetchEventPage).mockImplementation(async (type) => ({ type, events: type === "RecentClips" ? [selected] : [], nextPageToken: null, nextPageDate: null }));
+    await open();
+    expect(state.browser!.events).toEqual([selected]);
+    expect(state.browser!.cacheError).toContain("Quota exceeded");
+    expect(state.browser!.errorsByType).toEqual({});
+    expect(state.browser!.pendingTypes).toEqual([]);
+  });
+
+  it("keeps route details fetched during cache restoration and background refresh authoritative", async () => {
+    const cache = deferred<CachedRecordingSource[]>();
+    const page = deferred<Awaited<ReturnType<typeof fetchEventPage>>>();
+    vi.mocked(readRecordingCache).mockReturnValue(cache.promise);
+    vi.mocked(fetchEventPage).mockImplementation(async (type) => type === "RecentClips" ? page.promise : { type, events: [], nextPageToken: null, nextPageDate: null });
+    vi.mocked(fetchEvent).mockResolvedValue({ ...selected, city: "Fresh route detail" });
+    await open();
+    await select(selected, undefined);
+    await act(async () => cache.resolve([cachedSource([{ ...selected, city: "Old cached detail" }], 1)]));
+    expect(state.browser!.events[0].city).toBe("Fresh route detail");
+    // Fetch new route details after the page request has started.
+    vi.mocked(fetchEvent).mockResolvedValue({ ...selected, city: "Newer route detail" });
+    await click("Refresh recording");
+    await act(async () => page.resolve({ type: "RecentClips", events: [{ ...selected, city: "Page detail" }], nextPageToken: null, nextPageDate: null }));
+    expect(state.browser!.events[0].city).toBe("Newer route detail");
+    expect(writeRecordingCache).toHaveBeenLastCalledWith(expect.objectContaining({ type: "RecentClips", events: [expect.objectContaining({ city: "Newer route detail" })] }));
+  });
 });
