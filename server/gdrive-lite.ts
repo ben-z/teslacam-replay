@@ -8,7 +8,7 @@ const DEFAULT_LIST_TIMEOUT_MS = 120_000;
 const DEFAULT_METADATA_TIMEOUT_MS = 30_000;
 const DEFAULT_READ_TIMEOUT_MS = 300_000;
 // One pool bounds header requests across all recording folders being scanned.
-export const CAPTURE_CONFIG = { concurrency: 256 } as const;
+export const CAPTURE_CONFIG = { concurrency: 128 } as const;
 
 export interface DriveShortcutDetails {
   targetId?: string;
