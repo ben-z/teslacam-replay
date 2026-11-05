@@ -1,69 +1,42 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchEventPage } from "./api";
+import { fetchArchiveCatalog, fetchArchiveDay } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
-
-function reply(position: Record<string, unknown>) {
-  const fetch = vi.fn().mockImplementation(() => Promise.resolve(Response.json({
-    type: "RecentClips", events: [], ...position,
-  })));
+const key = { type: "RecentClips", date: "2026-11-01" } as const;
+function reply(data: unknown, status: number) {
+  const fetch = vi.fn().mockResolvedValue(Response.json(data, { status }));
   vi.stubGlobal("fetch", fetch);
   return fetch;
 }
 
-describe("recording page date contract", () => {
-  it.each(["2026-10-24", null])("rejects a repeated immediate cursor with date %s", async (date) => {
-    const fetch = reply({ nextPageToken: "same-page", nextPageDate: date });
-    await expect(fetchEventPage("RecentClips", "same-page", 24)).rejects.toThrow("did not advance");
-    expect(fetch).toHaveBeenCalledTimes(1);
+describe("archive resource API", () => {
+  it("fetches independently addressed catalogs and days without browser HTTP cache", async () => {
+    const fetch = reply({ type: "RecentClips", dates: ["2026-11-01", "2026-10-31"] }, 200);
+    expect((await fetchArchiveCatalog("RecentClips")).dates).toHaveLength(2);
+    expect(fetch).toHaveBeenLastCalledWith("/api/archive/RecentClips", { cache: "no-store" });
+    fetch.mockResolvedValue(Response.json({ ...key, events: [] }));
+    expect(await fetchArchiveDay(key)).toEqual({ ...key, events: [] });
+    expect(fetch).toHaveBeenLastCalledWith("/api/archive/RecentClips/2026-11-01", { cache: "no-store" });
   });
 
-  it("accepts an advancing cursor even when an empty page retains the same boundary date", async () => {
-    const fetch = reply({ nextPageToken: "next-page", nextPageDate: "2026-10-24" });
-    expect(await fetchEventPage("RecentClips", "current-page", 24)).toMatchObject({
-      events: [], nextPageToken: "next-page", nextPageDate: "2026-10-24",
-    });
-    expect(fetch).toHaveBeenCalledTimes(1);
+  it("rejects incomplete or incorrectly ordered date catalogs", async () => {
+    reply({ type: "RecentClips", dates: ["2026-10-31", "2026-11-01"] }, 200);
+    await expect(fetchArchiveCatalog("RecentClips")).rejects.toThrow("sorted newest first");
+    reply({ type: "RecentClips" }, 200);
+    await expect(fetchArchiveCatalog("RecentClips")).rejects.toThrow("Invalid archive catalog");
   });
 
-  it("accepts exhaustion after a continuation without treating null as a repeated cursor", async () => {
-    reply({ nextPageToken: null, nextPageDate: null });
-    expect(await fetchEventPage("RecentClips", "last-page", 24)).toMatchObject({
-      nextPageToken: null, nextPageDate: null,
-    });
-    expect(await fetchEventPage("RecentClips", null, 24)).toMatchObject({
-      nextPageToken: null, nextPageDate: null,
-    });
+  it("rejects a response belonging to another source or day", async () => {
+    reply({ type: "SavedClips", dates: [] }, 200);
+    await expect(fetchArchiveCatalog("RecentClips")).rejects.toThrow("Expected RecentClips");
+    reply({ ...key, date: "2026-10-31", events: [] }, 200);
+    await expect(fetchArchiveDay(key)).rejects.toThrow("Expected RecentClips/2026-11-01");
   });
 
-  it("preserves opaque continuation tokens in the requested page URL", async () => {
-    const token = "next &/+?==";
-    const fetch = reply({ nextPageToken: "different-page", nextPageDate: "2026-10-24" });
-    await fetchEventPage("RecentClips", token, 24);
-    const url = new URL(fetch.mock.calls[0][0] as string, "https://app.example");
-    expect(url.searchParams.get("pageToken")).toBe(token);
-    expect(url.searchParams.get("type")).toBe("RecentClips");
-    expect(url.searchParams.get("limit")).toBe("24");
-  });
-  it("retains an unknown date with its continuation instead of treating it as exhausted", async () => {
-    reply({ nextPageToken: "more", nextPageDate: null });
-    expect(await fetchEventPage("RecentClips", null, 24)).toMatchObject({ nextPageToken: "more", nextPageDate: null });
-  });
-
-  it.each([undefined, "2026-02-30", "2026-13-01", "Oct 24", 20261024])("rejects an invalid date: %s", async (date) => {
-    reply({ nextPageToken: "more", nextPageDate: date });
-    await expect(fetchEventPage("RecentClips", null, 24)).rejects.toThrow("Invalid recording page date");
-  });
-
-  it("rejects a date on an exhausted source", async () => {
-    reply({ nextPageToken: null, nextPageDate: "2026-10-24" });
-    await expect(fetchEventPage("RecentClips", null, 24)).rejects.toThrow("exhausted recording source");
-  });
-
-  it("rejects a missing or empty cursor instead of silently exhausting the source", async () => {
-    for (const token of [undefined, ""]) {
-      reply({ nextPageToken: token, nextPageDate: null });
-      await expect(fetchEventPage("RecentClips", null, 24)).rejects.toThrow("Invalid recording page token");
-    }
+  it("reports catalog and day failures rather than treating them as empty resources", async () => {
+    reply({}, 503);
+    await expect(fetchArchiveCatalog("RecentClips")).rejects.toThrow("HTTP 503");
+    reply({}, 404);
+    await expect(fetchArchiveDay(key)).rejects.toThrow("HTTP 404");
   });
 });

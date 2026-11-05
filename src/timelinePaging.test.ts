@@ -1,11 +1,11 @@
-import { recordingWallTimeMs } from "./playback";
 import { describe, expect, it, vi } from "vitest";
-import { earlierTimelineDate, timelinePaging, TIMELINE_WINDOW_DAYS } from "./timelinePaging";
+import { archiveDayKey, RECORDING_TYPES, type ArchiveCatalogs, type ArchiveDayKey, type ArchiveDays, type RecordingType } from "./archive";
 import { buildTimeline } from "./components/Timeline";
-import { EVENT_PAGE_TYPES, type EventPagePositions, type EventPageType } from "./api";
+import { recordingWallTimeMs } from "./playback";
+import { earlierTimelineDate, timelinePaging, TIMELINE_WINDOW_DAYS } from "./timelinePaging";
 import type { DashcamEvent } from "./types";
 
-function recording(timestamp: string, type: EventPageType, durationSec: number): DashcamEvent {
+function recording(timestamp: string, type: RecordingType, durationSec: number): DashcamEvent {
   return {
     id: timestamp,
     type,
@@ -15,299 +15,274 @@ function recording(timestamp: string, type: EventPageType, durationSec: number):
     clips: [{ timestamp, captureTimeMs: recordingWallTimeMs(timestamp), durationSec, cameras: ["front"] }],
   };
 }
-
+function catalogs(dates: Partial<Record<RecordingType, string[]>>): ArchiveCatalogs {
+  return Object.fromEntries(RECORDING_TYPES.map((type) => [type, { type, dates: dates[type] ?? [] }]));
+}
+function loaded(...keys: ArchiveDayKey[]): ArchiveDays {
+  return Object.fromEntries(keys.map((key) => [archiveDayKey(key), { ...key, events: [] }]));
+}
+const recent = (date: string): ArchiveDayKey => ({ type: "RecentClips", date });
+const saved = (date: string): ArchiveDayKey => ({ type: "SavedClips", date });
+const sentry = (date: string): ArchiveDayKey => ({ type: "SentryClips", date });
 const LATEST = recording("2026-10-24_12-00-00", "RecentClips", 60);
-const EXHAUSTED: EventPagePositions = Object.fromEntries(EVENT_PAGE_TYPES.map((type) => [
-  type, Object.freeze({ nextPageToken: null, nextPageDate: null }),
-]));
-const INITIAL: EventPagePositions = {
-  SavedClips: { nextPageToken: "saved", nextPageDate: "2026-10-04" },
-  SentryClips: { nextPageToken: "sentry", nextPageDate: "2026-10-20" },
-  RecentClips: { nextPageToken: "recent", nextPageDate: "2026-10-24" },
-};
+const CATALOGS = catalogs({ RecentClips: ["2026-10-24"] });
+const DAYS = loaded(recent("2026-10-24"));
 
-describe("requested Timeline range", () => {
-  it("requests seven consecutive calendar days ending on the latest clip day", () => {
+describe("requested Timeline archive days", () => {
+  it("requests seven calendar days ending on the latest actual clip day", () => {
     expect(TIMELINE_WINDOW_DAYS).toBe(7);
-    expect(timelinePaging([LATEST], EXHAUSTED)).toEqual({
-      fromDate: "2026-10-18", requestedFromDate: "2026-10-18", newestDate: "2026-10-24",
-      loadTypes: [], manualTypes: [], rangeIncomplete: false, hasOlder: false,
+    expect(timelinePaging([LATEST], CATALOGS, DAYS)).toEqual({
+      fromDate: "2026-10-18", newestDate: "2026-10-24",
+      requiredDays: [recent("2026-10-24")], loadDays: [], rangeIncomplete: false, hasOlder: false,
     });
   });
 
-  it("loads every source still inside the requested week, skipping an already deeper sparse source", () => {
-    expect(timelinePaging([LATEST], INITIAL)).toEqual({
-      fromDate: "2026-10-24", requestedFromDate: "2026-10-18", newestDate: "2026-10-24",
-      loadTypes: ["SentryClips", "RecentClips"], manualTypes: [], rangeIncomplete: true, hasOlder: true,
+  it("plans only missing known day keys independently across dense and sparse sources", () => {
+    const sources = catalogs({
+      SavedClips: ["2026-10-22", "2026-10-04"],
+      SentryClips: ["2026-10-20", "2026-10-17", "2026-10-01"],
+      RecentClips: ["2026-10-24", "2026-10-23", "2026-10-18", "2026-10-17", "2026-10-16"],
     });
-    expect(timelinePaging([LATEST], {
-      ...INITIAL,
-      SavedClips: { nextPageToken: "saved-in-range", nextPageDate: "2026-10-22" },
-    }).loadTypes).toEqual(EVENT_PAGE_TYPES);
+    const days = loaded(recent("2026-10-24"), recent("2026-10-17"), saved("2026-10-04"), sentry("2026-10-17"));
+    expect(timelinePaging([LATEST], sources, days)).toEqual({
+      fromDate: "2026-10-18", newestDate: "2026-10-24",
+      requiredDays: [recent("2026-10-24"), recent("2026-10-23"), saved("2026-10-22"), sentry("2026-10-20"), recent("2026-10-18"), sentry("2026-10-17"), recent("2026-10-17"), saved("2026-10-04")],
+      loadDays: [recent("2026-10-23"), saved("2026-10-22"), sentry("2026-10-20"), recent("2026-10-18")],
+      rangeIncomplete: true, hasOlder: true,
+    });
   });
 
-  it("keeps the common date guard while dense and sparse sources advance independently", () => {
-    const saved = recording("2026-10-23_12-00-00", "SavedClips", 60);
-    const older = recording("2026-10-12_12-00-00", "SavedClips", 60);
-    const events = [LATEST, saved, older];
-    let pages = { ...INITIAL };
-    let result = timelinePaging(events, pages);
-    expect(result.loadTypes).toEqual(["SentryClips", "RecentClips"]);
-    expect(buildTimeline(events, result.fromDate).sessionList).toEqual([LATEST]);
+  it("renders loaded recordings while other archive days in the window remain missing", () => {
+    const oldSaved = recording("2026-10-22_12-00-00", "SavedClips", 60);
+    const events = [LATEST, oldSaved];
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-23", "2026-10-21"] });
+    const first = timelinePaging(events, sources, DAYS);
+    expect(first.fromDate).toBe("2026-10-18");
+    expect(buildTimeline(events, first.fromDate).sessionList).toEqual([LATEST, oldSaved]);
+    const second = timelinePaging(events, sources, { ...DAYS, ...loaded(recent("2026-10-23")) });
+    expect(second.fromDate).toBe("2026-10-18");
+    expect(buildTimeline(events, second.fromDate).sessionList).toContain(oldSaved);
+    expect(timelinePaging(events, sources, { ...DAYS, ...loaded(recent("2026-10-23"), recent("2026-10-21")) })).toMatchObject({
+      fromDate: "2026-10-18", loadDays: [], rangeIncomplete: false,
+    });
+  });
 
-    pages = { ...pages, SentryClips: { nextPageToken: "sentry-deeper", nextPageDate: "2026-10-17" } };
-    result = timelinePaging(events, pages);
-    expect(result.fromDate).toBe("2026-10-24");
-    expect(result.loadTypes).toEqual(["RecentClips"]);
+  it("keeps the cached week visible while a newly discovered head day is still loading", () => {
+    const cached = recording("2026-11-04_12-00-00", "RecentClips", 60);
+    const sources = catalogs({ RecentClips: ["2026-11-05", "2026-11-04", "2026-10-29"] });
+    const days = loaded(recent("2026-11-04"), recent("2026-10-29"));
+    const result = timelinePaging([cached], sources, days);
+    expect(result).toMatchObject({
+      fromDate: "2026-10-30", newestDate: "2026-11-05",
+      loadDays: [recent("2026-11-05")], rangeIncomplete: true,
+    });
+    expect(buildTimeline([cached], result.fromDate).sessionList).toEqual([cached]);
+  });
 
-    pages = { ...pages, RecentClips: { nextPageToken: "recent-same-day", nextPageDate: "2026-10-24" } };
-    expect(timelinePaging(events, pages)).toEqual(result);
-
-    pages = { ...pages, RecentClips: { nextPageToken: "recent-21", nextPageDate: "2026-10-21" } };
-    result = timelinePaging(events, pages);
-    expect(result.fromDate).toBe("2026-10-21");
-    expect(result.loadTypes).toEqual(["RecentClips"]);
-    expect(buildTimeline(events, result.fromDate).sessionList).toEqual([LATEST, saved]);
-
-    pages = { ...pages, RecentClips: { nextPageToken: "recent-boundary", nextPageDate: "2026-10-18" } };
-    result = timelinePaging(events, pages);
+  it("includes exactly the nearest preceding archive day as a boundary read", () => {
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-18", "2026-10-17", "2026-10-15", "2026-09-01"] });
+    const result = timelinePaging([LATEST], sources, DAYS);
+    expect(result.loadDays).toEqual([recent("2026-10-18"), recent("2026-10-17")]);
     expect(result.fromDate).toBe("2026-10-18");
     expect(result.rangeIncomplete).toBe(true);
-    expect(result.loadTypes).toEqual(["RecentClips"]);
-
-    pages = { ...pages, RecentClips: { nextPageToken: "recent-beyond-week", nextPageDate: "2026-10-17" } };
-    result = timelinePaging(events, pages);
-    expect(result).toEqual({
-      fromDate: "2026-10-18", requestedFromDate: "2026-10-18", newestDate: "2026-10-24",
-      loadTypes: [], manualTypes: [], rangeIncomplete: false, hasOlder: true,
-    });
-    expect(buildTimeline(events, result.fromDate).sessionList).toEqual([LATEST, saved]);
   });
 
-  it("keeps older Saved footage hidden until the canonical Recent day arrives", () => {
-    const saved = recording("2026-10-23_12-00-00", "SavedClips", 60);
-    const initial = [LATEST, saved];
-    const pages: EventPagePositions = {
-      SavedClips: { nextPageToken: "saved", nextPageDate: "2026-10-17" },
-      SentryClips: EXHAUSTED.SentryClips,
-      RecentClips: { nextPageToken: "2026-10-23", nextPageDate: "2026-10-24" },
-    };
-    const first = timelinePaging(initial, pages);
+  it("uses available archive dates for a sparse boundary rather than a fixed lookback", () => {
+    const sources = catalogs({ SavedClips: ["2026-09-01", "2026-01-01"] });
+    expect(timelinePaging([LATEST], sources, {}).loadDays).toEqual([saved("2026-09-01")]);
+  });
+
+  it("retains a Recent clip crossing midnight from the preceding archive day", () => {
+    const crossing = recording("2026-10-17_23-59-30", "RecentClips", 60);
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-17"] });
+    expect(timelinePaging([LATEST], sources, DAYS).loadDays).toEqual([recent("2026-10-17")]);
+    const result = timelinePaging([LATEST, crossing], sources, { ...DAYS, ...loaded(recent("2026-10-17")) });
+    expect(result).toMatchObject({ fromDate: "2026-10-18", loadDays: [], rangeIncomplete: false });
+    const timeline = buildTimeline([LATEST, crossing], result.fromDate);
+    expect(timeline.days.map((day) => day.dateStr)).toEqual(["2026-10-24", "2026-10-18"]);
+    expect(timeline.sessionList).toContain(crossing);
+  });
+
+  it("loads newer Saved trigger folders whose clips belong to the displayed day", () => {
+    const sources = catalogs({ SavedClips: ["2026-10-25"] });
+    const first = timelinePaging([LATEST], sources, {}, "2026-10-24");
+    expect(first.loadDays).toEqual([saved("2026-10-25")]);
     expect(first.fromDate).toBe("2026-10-24");
-    expect(first.loadTypes).toEqual(["RecentClips"]);
-    expect(buildTimeline(initial, first.fromDate).sessionList).toEqual([LATEST]);
-    const loaded = [...initial, recording("2026-10-23_10-00-00", "RecentClips", 60)];
-    const next = timelinePaging(loaded, {
-      ...pages, RecentClips: { nextPageToken: "2026-10-22", nextPageDate: "2026-10-23" },
-    });
-    expect(next.fromDate).toBe("2026-10-23");
-    expect(buildTimeline(loaded, next.fromDate).sessionList).toContain(saved);
+    const event = { ...recording("2026-10-24_23-58-00", "SavedClips", 60), id: "2026-10-25_00-01-00" };
+    const result = timelinePaging([LATEST, event], sources, loaded(saved("2026-10-25")), "2026-10-24");
+    expect(result.rangeIncomplete).toBe(false);
+    expect(buildTimeline([LATEST, event], result.fromDate).sessionList).toContain(event);
   });
 
-  it("extends by a week without reloading sources that already cover the earlier target", () => {
-    const events = [LATEST, recording("2026-10-12_12-00-00", "SavedClips", 60)];
-    let pages: EventPagePositions = {
-      ...INITIAL,
-      SentryClips: { nextPageToken: "sentry-17", nextPageDate: "2026-10-17" },
-      RecentClips: { nextPageToken: "recent-17", nextPageDate: "2026-10-17" },
-    };
-    const earlier = earlierTimelineDate(timelinePaging(events, pages).requestedFromDate!, TIMELINE_WINDOW_DAYS);
-    expect(earlier).toBe("2026-10-11");
-    const result = timelinePaging(events, pages, earlier);
-    expect(result.fromDate).toBe("2026-10-17");
-    expect(result.loadTypes).toEqual(["SentryClips", "RecentClips"]);
-    expect(buildTimeline(events, result.fromDate).sessionList).toEqual([LATEST]);
-
-    pages = {
-      ...pages,
-      SentryClips: { nextPageToken: "sentry-10", nextPageDate: "2026-10-10" },
-      RecentClips: { nextPageToken: "recent-10", nextPageDate: "2026-10-10" },
-    };
-    const completed = timelinePaging(events, pages, earlier);
-    expect(completed.fromDate).toBe("2026-10-11");
-    expect(completed.loadTypes).toEqual([]);
-    expect(completed.rangeIncomplete).toBe(false);
-    expect(buildTimeline(events, completed.fromDate).sessionList).toEqual(events);
+  it("loads a Saved boundary folder containing clips after its trigger day", () => {
+    const event = { ...recording("2026-10-18_00-00-30", "SavedClips", 60), id: "2026-10-17_23-59-59" };
+    const sources = catalogs({ SavedClips: ["2026-10-17"] });
+    expect(timelinePaging([LATEST], sources, DAYS).loadDays).toEqual([saved("2026-10-17")]);
+    const result = timelinePaging([LATEST, event], sources, loaded(saved("2026-10-17")));
+    expect(buildTimeline([LATEST, event], result.fromDate).sessionList).toContain(event);
   });
 
-  it("does not let exhaustion hold back a range and stops requesting exhausted sources", () => {
-    const pages = { ...INITIAL, RecentClips: EXHAUSTED.RecentClips };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-20", loadTypes: ["SentryClips"], rangeIncomplete: true,
-    });
-    expect(timelinePaging([LATEST], { ...pages, SentryClips: EXHAUSTED.SentryClips })).toMatchObject({
-      fromDate: "2026-10-18", loadTypes: [], rangeIncomplete: false, hasOlder: true,
+  it("keeps an empty loaded day complete without depending on request or freshness state", () => {
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-23"] });
+    const result = timelinePaging([LATEST], sources, loaded(recent("2026-10-24"), recent("2026-10-23")));
+    expect(result).toMatchObject({ loadDays: [], rangeIncomplete: false });
+  });
+
+  it("requests a newly cataloged backfill without replaying previously loaded days", () => {
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-23", "2026-10-21"] });
+    const days = loaded(recent("2026-10-24"), recent("2026-10-23"), recent("2026-10-21"));
+    expect(timelinePaging([LATEST], sources, days).loadDays).toEqual([]);
+    expect(timelinePaging([LATEST], catalogs({ RecentClips: ["2026-10-24", "2026-10-23", "2026-10-22", "2026-10-21"] }), days).loadDays)
+      .toEqual([recent("2026-10-22")]);
+  });
+
+  it("does not request removed catalog dates or treat orphaned cache entries as available archive days", () => {
+    const days = loaded(recent("2026-10-24"), recent("2026-10-01"));
+    expect(timelinePaging([LATEST], CATALOGS, days)).toMatchObject({ loadDays: [], rangeIncomplete: false, hasOlder: false });
+    expect(timelinePaging([LATEST], catalogs({ RecentClips: ["2026-10-24", "2026-10-01"] }), days).hasOlder).toBe(true);
+  });
+
+  it("extends by a week without requesting already loaded day snapshots", () => {
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-17", "2026-10-12", "2026-10-10", "2026-10-01"] });
+    const days = loaded(recent("2026-10-24"), recent("2026-10-17"));
+    const initial = timelinePaging([LATEST], sources, days);
+    expect(initial).toMatchObject({ requiredDays: [recent("2026-10-24"), recent("2026-10-17")], loadDays: [], rangeIncomplete: false, hasOlder: true });
+    const target = earlierTimelineDate(initial.fromDate!, TIMELINE_WINDOW_DAYS);
+    expect(target).toBe("2026-10-11");
+    expect(timelinePaging([LATEST], sources, days, target)).toMatchObject({
+      requiredDays: [recent("2026-10-24"), recent("2026-10-17"), recent("2026-10-12"), recent("2026-10-10")],
+      loadDays: [recent("2026-10-12"), recent("2026-10-10")],
     });
   });
 
-  it("keeps already loaded older history discoverable after all remote cursors are exhausted", () => {
+  it("keeps already loaded older footage discoverable after every catalog day is loaded", () => {
     const older = recording("2026-10-12_12-00-00", "SavedClips", 60);
-    const events = [LATEST, older];
-    const initial = timelinePaging(events, EXHAUSTED);
-    expect(initial).toMatchObject({ fromDate: "2026-10-18", rangeIncomplete: false, hasOlder: true });
-    expect(buildTimeline(events, initial.fromDate).sessionList).toEqual([LATEST]);
-
-    const earlier = timelinePaging(events, EXHAUSTED, "2026-10-11");
-    expect(earlier).toMatchObject({ fromDate: "2026-10-11", loadTypes: [], rangeIncomplete: false, hasOlder: false });
-    expect(buildTimeline(events, earlier.fromDate).sessionList).toEqual(events);
+    const sources = catalogs({ RecentClips: ["2026-10-24"], SavedClips: ["2026-10-12"] });
+    const days = loaded(recent("2026-10-24"), saved("2026-10-12"));
+    const initial = timelinePaging([LATEST, older], sources, days);
+    expect(initial).toMatchObject({ loadDays: [], rangeIncomplete: false, hasOlder: true });
+    expect(buildTimeline([LATEST, older], initial.fromDate).sessionList).toEqual([LATEST]);
+    const earlier = timelinePaging([LATEST, older], sources, days, "2026-10-11");
+    expect(earlier).toMatchObject({ fromDate: "2026-10-11", loadDays: [], rangeIncomplete: false, hasOlder: false });
+    expect(buildTimeline([LATEST, older], earlier.fromDate).sessionList).toContain(older);
   });
 
-  it("requires one explicit continuation for an unknown date before automatic range loading can resume", () => {
-    let pages: EventPagePositions = {
-      ...EXHAUSTED,
-      RecentClips: { nextPageToken: "unknown-a", nextPageDate: null },
-    };
-    const first = timelinePaging([LATEST], pages);
-    expect(first).toEqual({
-      fromDate: "2026-10-24", requestedFromDate: "2026-10-18", newestDate: "2026-10-24",
-      loadTypes: [], manualTypes: ["RecentClips"], rangeIncomplete: true, hasOlder: true,
-    });
+  it("keeps cached clip ranges discoverable when their source folder date is inside the window", () => {
+    const older = { ...recording("2026-10-12_12-00-00", "SavedClips", 60), id: "2026-10-24_13-00-00" };
+    const sources = catalogs({ SavedClips: ["2026-10-24"] });
+    const days = loaded(saved("2026-10-24"));
+    expect(timelinePaging([LATEST, older], sources, days).hasOlder).toBe(true);
+    expect(timelinePaging([LATEST, older], sources, days, "2026-10-11")).toMatchObject({ hasOlder: false, loadDays: [] });
+  });
 
-    // An explicit Continue may return no recordings and another unknown bound.
-    // The new token remains manual; it cannot initiate an automatic archive walk.
-    pages = { ...pages, RecentClips: { nextPageToken: "unknown-b", nextPageDate: null } };
-    expect(timelinePaging([LATEST], pages)).toEqual(first);
-
-    pages = { ...pages, RecentClips: { nextPageToken: "known-23", nextPageDate: "2026-10-23" } };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-23", loadTypes: ["RecentClips"], manualTypes: [], rangeIncomplete: true,
-    });
-
-    pages = { ...pages, RecentClips: { nextPageToken: "known-17", nextPageDate: "2026-10-17" } };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-18", loadTypes: [], manualTypes: [], rangeIncomplete: false,
+  it("marks an unknown catalog incomplete while allowing known sources to load", () => {
+    const sources: ArchiveCatalogs = { RecentClips: { type: "RecentClips", dates: ["2026-10-24", "2026-10-23"] } };
+    expect(timelinePaging([LATEST], sources, DAYS)).toEqual({
+      fromDate: "2026-10-18", newestDate: "2026-10-24",
+      requiredDays: [recent("2026-10-24"), recent("2026-10-23")], loadDays: [recent("2026-10-23")], rangeIncomplete: true, hasOlder: true,
     });
   });
 
-  it("allows dated sources to fill the target while an unknown source retains the common date guard", () => {
-    let pages: EventPagePositions = {
-      ...INITIAL,
-      SavedClips: { nextPageToken: "unknown-saved", nextPageDate: null },
-    };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-24", loadTypes: ["SentryClips", "RecentClips"],
-      manualTypes: ["SavedClips"], rangeIncomplete: true,
+  it("does not infer a range or exhaustion before catalogs arrive", () => {
+    expect(timelinePaging([], {}, {})).toEqual({
+      fromDate: undefined, newestDate: undefined,
+      requiredDays: [], loadDays: [], rangeIncomplete: true, hasOlder: true,
     });
-    pages = {
-      ...pages,
-      SentryClips: { nextPageToken: "sentry-17", nextPageDate: "2026-10-17" },
-      RecentClips: { nextPageToken: "recent-17", nextPageDate: "2026-10-17" },
-    };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-24", loadTypes: [], manualTypes: ["SavedClips"], rangeIncomplete: true,
-    });
-    pages = { ...pages, SavedClips: { nextPageToken: "saved-17", nextPageDate: "2026-10-17" } };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-18", loadTypes: [], manualTypes: [], rangeIncomplete: false,
+    expect(timelinePaging([], catalogs({}), {})).toEqual({
+      fromDate: undefined, newestDate: undefined,
+      requiredDays: [], loadDays: [], rangeIncomplete: false, hasOlder: false,
     });
   });
 
-  it("does not infer exhaustion from an empty unknown-date continuation", () => {
-    const pages: EventPagePositions = {
-      ...EXHAUSTED,
-      RecentClips: { nextPageToken: "empty-next", nextPageDate: null },
-    };
-    expect(timelinePaging([], pages)).toEqual({
-      fromDate: undefined, requestedFromDate: undefined, newestDate: undefined,
-      loadTypes: [], manualTypes: ["RecentClips"], rangeIncomplete: true, hasOlder: true,
+  it("bootstraps a bounded calendar window from catalog dates before any video is loaded", () => {
+    const sources = catalogs({ RecentClips: ["2026-10-24", "2026-10-23", "2026-10-01", "2025-01-01"] });
+    expect(timelinePaging([], sources, {})).toEqual({
+      fromDate: "2026-10-18", newestDate: "2026-10-24",
+      requiredDays: [recent("2026-10-24"), recent("2026-10-23"), recent("2026-10-01")],
+      loadDays: [recent("2026-10-24"), recent("2026-10-23"), recent("2026-10-01")], rangeIncomplete: true, hasOlder: true,
     });
-    expect(timelinePaging([], { ...pages, RecentClips: EXHAUSTED.RecentClips })).toEqual({
-      fromDate: undefined, requestedFromDate: undefined, newestDate: undefined,
-      loadTypes: [], manualTypes: [], rangeIncomplete: false, hasOlder: false,
+    expect(timelinePaging([], sources, loaded(recent("2026-10-24"), recent("2026-10-23"), recent("2026-10-01")))).toMatchObject({
+      fromDate: "2026-10-18", loadDays: [], rangeIncomplete: false, hasOlder: true,
     });
   });
 
-  it("does not mistake an unresolved initial source for a completed range", () => {
-    const pages: EventPagePositions = {
-      SavedClips: EXHAUSTED.SavedClips,
-      RecentClips: { nextPageToken: "recent-deeper", nextPageDate: "2026-10-17" },
-    };
-    expect(timelinePaging([LATEST], pages)).toMatchObject({
-      fromDate: "2026-10-24", requestedFromDate: "2026-10-18",
-      loadTypes: [], manualTypes: [], rangeIncomplete: true, hasOlder: true,
-    });
-    expect(timelinePaging([LATEST], { ...pages, SentryClips: EXHAUSTED.SentryClips })).toMatchObject({
-      fromDate: "2026-10-18", rangeIncomplete: false,
-    });
-  });
-
-  it("does not infer a requested date or exhaustion from an empty initial catalog", () => {
-    expect(timelinePaging([], {})).toEqual({
-      fromDate: undefined, requestedFromDate: undefined, newestDate: undefined,
-      loadTypes: [], manualTypes: [], rangeIncomplete: true, hasOlder: true,
-    });
-    expect(timelinePaging([], EXHAUSTED)).toEqual({
-      fromDate: undefined, requestedFromDate: undefined, newestDate: undefined,
-      loadTypes: [], manualTypes: [], rangeIncomplete: false, hasOlder: false,
-    });
-  });
-
-  it("ignores video-free metadata when choosing the latest recording day", () => {
+  it("uses the latest archive day even when its newest recording contains metadata only", () => {
     const metadataOnly = { ...recording("2050-01-01_12-00-00", "SavedClips", 0), clips: [] };
-    expect(timelinePaging([LATEST, metadataOnly], EXHAUSTED).newestDate).toBe("2026-10-24");
+    const sources = catalogs({ SavedClips: ["2050-01-01"], RecentClips: ["2026-10-24"] });
+    const result = timelinePaging([LATEST, metadataOnly], sources, loaded(saved("2050-01-01"), recent("2026-10-24")));
+    expect(result.newestDate).toBe("2050-01-01");
+    expect(result.fromDate).toBe("2049-12-26");
+    expect(result.loadDays).toEqual([]);
   });
 
-  it("keeps loaded footage visible when a remaining archive-entry day is newer", () => {
-    expect(timelinePaging([recording("2026-10-21_12-00-00", "RecentClips", 60)], INITIAL)).toMatchObject({
-      fromDate: "2026-10-21", newestDate: "2026-10-21", requestedFromDate: "2026-10-15",
-      loadTypes: ["SentryClips", "RecentClips"], manualTypes: [], rangeIncomplete: true,
-    });
-    expect(timelinePaging([], INITIAL)).toMatchObject({
-      fromDate: "2026-10-24", requestedFromDate: undefined, newestDate: undefined, rangeIncomplete: true,
+  it("does not let an old cached clip turn the initial week into a full archive scan", () => {
+    const dates = Array.from({ length: 365 }, (_, index) =>
+      new Date(Date.UTC(2026, 10, 5) - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+    const oldDate = dates.at(-1)!;
+    const oldClip = recording(`${oldDate}_12-00-00`, "RecentClips", 60);
+    const result = timelinePaging([oldClip], catalogs({ RecentClips: dates }), loaded(recent(oldDate)));
+    expect(result.newestDate).toBe("2026-11-05");
+    expect(result.fromDate).toBe("2026-10-30");
+    expect(result.requiredDays).toEqual(dates.slice(0, 8).map(recent));
+    expect(result.loadDays).toEqual(result.requiredDays);
+  });
+
+  it("keeps the current archive window when an older sparse source finishes first", () => {
+    const oldSaved = recording("2026-01-01_12-00-00", "SavedClips", 60);
+    const sources = catalogs({ SavedClips: ["2026-01-01"], RecentClips: ["2026-11-05", "2026-11-04", "2026-10-29", "2026-10-28"] });
+    const result = timelinePaging([oldSaved], sources, loaded(saved("2026-01-01")));
+    expect(result).toMatchObject({
+      newestDate: "2026-11-05", fromDate: "2026-10-30",
+      loadDays: [recent("2026-11-05"), recent("2026-11-04"), recent("2026-10-29")],
     });
   });
 
   it("anchors the requested week to the clip end day with an exclusive midnight endpoint", () => {
-    expect(timelinePaging([recording("2026-10-24_23-59-30", "RecentClips", 60)], EXHAUSTED)).toMatchObject({
-      fromDate: "2026-10-19", requestedFromDate: "2026-10-19", newestDate: "2026-10-25",
+    expect(timelinePaging([recording("2026-10-24_23-59-30", "RecentClips", 60)], CATALOGS, DAYS)).toMatchObject({
+      fromDate: "2026-10-19", newestDate: "2026-10-25",
     });
-    expect(timelinePaging([recording("2026-10-24_23-59-00", "RecentClips", 60)], EXHAUSTED)).toMatchObject({
-      fromDate: "2026-10-18", requestedFromDate: "2026-10-18", newestDate: "2026-10-24",
+    expect(timelinePaging([recording("2026-10-24_23-59-00", "RecentClips", 60)], CATALOGS, DAYS)).toMatchObject({
+      fromDate: "2026-10-18", newestDate: "2026-10-24",
     });
   });
 
-  it("does not mutate events or page positions while planning a range", () => {
+  it("does not mutate recordings, catalogs, or loaded days", () => {
     const events = structuredClone([LATEST]);
-    const pages = structuredClone(INITIAL);
-    const before = structuredClone({ events, pages });
-    Object.freeze(events[0].clips[0].cameras);
-    Object.freeze(events[0].clips[0]);
-    Object.freeze(events[0].clips);
-    Object.freeze(events[0]);
-    Object.freeze(events);
-    for (const position of Object.values(pages)) Object.freeze(position);
-    Object.freeze(pages);
-    expect(() => timelinePaging(events, pages)).not.toThrow();
-    expect({ events, pages }).toEqual(before);
+    const sources = structuredClone(CATALOGS);
+    const days = structuredClone(DAYS);
+    const before = structuredClone({ events, sources, days });
+    for (const clip of events[0].clips) { Object.freeze(clip.cameras); Object.freeze(clip); }
+    Object.freeze(events[0].clips); Object.freeze(events[0]); Object.freeze(events);
+    for (const source of Object.values(sources)) { Object.freeze(source!.dates); Object.freeze(source); }
+    Object.freeze(sources);
+    for (const day of Object.values(days)) { Object.freeze(day.events); Object.freeze(day); }
+    Object.freeze(days);
+    expect(() => timelinePaging(events, sources, days)).not.toThrow();
+    expect({ events, sources, days }).toEqual(before);
   });
 
   it.each([0, -1, NaN, Infinity])("rejects invalid clip duration %s", (duration) => {
-    expect(() => timelinePaging([recording("2026-10-24_12-00-00", "RecentClips", duration)], EXHAUSTED))
+    expect(() => timelinePaging([recording("2026-10-24_12-00-00", "RecentClips", duration)], CATALOGS, DAYS))
       .toThrow("Invalid clip duration");
   });
 });
 
 describe("Timeline calendar navigation", () => {
   it.each([
-    ["2026-01-01", 7, "2025-12-25"],
-    ["2024-03-01", 1, "2024-02-29"],
-    ["2026-03-01", 1, "2026-02-28"],
-    ["2026-03-10", 7, "2026-03-03"],
-    ["2026-11-03", 7, "2026-10-27"],
-    ["2026-10-24", 0, "2026-10-24"],
+    ["2026-01-01", 7, "2025-12-25"], ["2024-03-01", 1, "2024-02-29"],
+    ["2026-03-01", 1, "2026-02-28"], ["2026-03-10", 7, "2026-03-03"],
+    ["2026-11-03", 7, "2026-10-27"], ["2026-10-24", 0, "2026-10-24"],
   ])("subtracts %s by %s recorded calendar days", (date, days, expected) => {
     expect(earlierTimelineDate(date, days)).toBe(expected);
   });
 
-  it("keeps the range and calendar arithmetic independent of the device timezone", () => {
-    const before = timelinePaging([LATEST], INITIAL);
+  it("keeps range and calendar arithmetic independent of the device timezone", () => {
+    const before = timelinePaging([LATEST], CATALOGS, DAYS);
     vi.stubEnv("TZ", "Pacific/Auckland");
     try {
-      expect(timelinePaging([LATEST], INITIAL)).toEqual(before);
+      expect(timelinePaging([LATEST], CATALOGS, DAYS)).toEqual(before);
       expect(earlierTimelineDate("2026-03-10", 7)).toBe("2026-03-03");
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it.each([-1, 0.5, NaN, Infinity])("rejects invalid day count %s", (days) => {
@@ -316,6 +291,6 @@ describe("Timeline calendar navigation", () => {
 
   it.each(["2026-2-01", "2026-02-30", "2026-10-24T00:00:00", "not-a-date"])("rejects invalid date %s", (date) => {
     expect(() => earlierTimelineDate(date, 7)).toThrow();
-    expect(() => timelinePaging([LATEST], EXHAUSTED, date)).toThrow();
+    expect(() => timelinePaging([LATEST], CATALOGS, DAYS, date)).toThrow();
   });
 });

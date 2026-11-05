@@ -6,7 +6,7 @@ Web app for browsing and replaying Tesla dashcam footage with synchronized multi
 
 - **Multi-camera player** — Recordings open with a single active camera in Focus. Choose Grid for synchronized playback of all 6 cameras. Switching cameras preserves playback position and speed.
 - **Recording browser** — Browse Saved, Sentry, and Recent recordings or view loaded recordings on a timeline. Search loaded recordings by displayed date, time, city, or reason.
-- **Timeline view** — Automatically load seven calendar days ending at the newest recording day, with a common loaded range across Recent, Saved, and Sentry footage. Earlier 7 days extends that range.
+- **Timeline view** — Load a seven-day archive window across Recent, Saved, and Sentry footage. Saved day indices appear immediately; loaded footage stays visible while missing days load. Earlier 7 days extends the window independently of background updates.
 - **HLS streaming** — ffmpeg segments footage on demand so the browser loads video in chunks
 - **Driving data on demand** — Select Driving data or press T to show speed, GPS coordinates, and other data extracted from H.264 SEI metadata
 - **Zoomable seek bar** — Scroll to zoom, drag to pan, minimap for orientation
