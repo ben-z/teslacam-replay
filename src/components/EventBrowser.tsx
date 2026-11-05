@@ -16,6 +16,7 @@ import "./EventBrowser.css";
 interface Props {
   active: boolean;
   events: DashcamEvent[];
+  cacheError: string | null;
   pendingTypes: EventPageType[];
   errorsByType: Partial<Record<EventPageType, string>>;
   pagePositions: EventPagePositions;
@@ -71,6 +72,7 @@ function dateKey(ts: string): string {
 export function EventBrowser({
   active,
   events,
+  cacheError,
   pendingTypes,
   errorsByType,
   pagePositions,
@@ -359,9 +361,11 @@ export function EventBrowser({
       </header>
 
       <div className="browse-content">
+        {cacheError && <p className="browse-error" role="alert">{cacheError}</p>}
         {pending && (
           <p className="browse-scope" role="status">
-            Loading {pendingTypes.map((type) => BADGE_STYLES[type].label).join(", ")} recordings…
+            {pendingTypes.some((type) => pagePositions[type] === undefined) ? "Loading" : "Updating"}{" "}
+            {pendingTypes.map((type) => BADGE_STYLES[type].label).join(", ")} recordings…
           </p>
         )}
         {failedTypes.map((type) => (
