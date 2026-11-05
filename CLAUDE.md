@@ -66,15 +66,15 @@ docker run -p 3001:3001 -e GDRIVE_BASE_URL=http://host.docker.internal:8765 tesl
 ### Frontend
 - **State management**: React hooks only (no external state library)
 - **Routing**: Hash-based (`#/event/SavedClips/...`), parsed in App.tsx
-- **Browsing state**: loaded pages remain in React state while the browser stays mounted during playback
+- **Browsing state**: `RecordingArchive` owns catalogs and complete day snapshots, exposed to React with `useSyncExternalStore` and persisted independently in IndexedDB. Pending requests and errors use the same source/day keys. Recording details are separate view overrides and do not establish day coverage. Visits check catalogs and the newest archive day; Refresh checks the visible window.
 - **Styling**: Component-scoped CSS files + global CSS variables in `index.css` (dark theme)
 - **Error handling**: React ErrorBoundary class component in App.tsx
 
 ### Backend
 - **Drive access**: `gdrive-lite.ts` talks to `gdrive-serve-lite`; file IDs and direct read URLs are retained while building pages so playback does not re-resolve paths
-- **Event index**: In-memory index of pages/events touched by the current server process; gdrive-serve-lite owns listing and pagination
+- **Event index**: In-memory index of recordings touched by the current server process. A successful archive-day read replaces that folder-date partition, including removed recordings and bookmark aliases; gdrive-serve-lite owns remote metadata caching and pagination.
 - **HLS streaming**: On-demand ffmpeg transcoding/remuxing with segment caching below the configured `CACHE_DIR`
-- **Page-first browsing**: `/api/events/page` returns its cursor plus `nextPageDate`, the newest archive-entry day that may remain. Saved/Sentry scan a bounded event-folder page. Recent reads one complete `RecentClips/YYYY-MM-DD` day, following Drive metadata pages internally. Timeline uses a common loaded-day window and prioritizes unfinished sources at that day. Player routes use the in-memory event index or single-folder resolution.
+- **Day browsing**: `/api/archive/:type` lists available archive dates from folder names; `/api/archive/:type/:date` returns one complete partition. Saved/Sentry use the event-folder date; Recent uses its native date folder. Clip dates can cross partition boundaries. Timeline requests the visible window plus each source’s nearest preceding archive day, draws loaded footage while missing days arrive, and never gates navigation on background checks or disk writes. `/api/events/page` remains available for already-open clients from the previous interface. Player routes use the in-memory event index or single-folder resolution.
 
 ### Multi-Camera Sync
 - 6 cameras: front, back, left_repeater, right_repeater, left_pillar, right_pillar

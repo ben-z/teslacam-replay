@@ -8,6 +8,7 @@ import {
 import { scanRecentClips, type DashcamEvent } from "./scan.js";
 import { recordingWallTimeMs } from "../src/playback.js";
 import { compareRecordingOrder } from "../src/events.js";
+import { assertArchiveDate } from "../src/archive.js";
 import { ALL_CAMERAS } from "../src/types.js";
 
 const DATE_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -16,12 +17,18 @@ const CLIP_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$/;
 export class RecentArchive {
   constructor(private readonly drive: GDriveLiteClient) {}
 
-  async page(pageToken: string | undefined): Promise<{
-    events: DashcamEvent[];
-    nextPageToken?: string;
-    nextPageDate: string | null;
-  }> {
-    const requestedDate = pageToken ? parseDateCursor(pageToken) : undefined;
+  async catalog(): Promise<string[]> {
+    return (await this.dateFolders()).map((folder) => folder.name);
+  }
+
+  async day(date: string): Promise<DashcamEvent[]> {
+    assertArchiveDate(date);
+    const folder = await this.findPath(`/RecentClips/${date}`, "folder");
+    if (!folder) throw new HTTPException(404, { message: "RecentClips archive day not found" });
+    return (await this.readDay(folder)).sort(compareRecordingOrder);
+  }
+
+  private async dateFolders(): Promise<DriveEntry[]> {
     const root = await this.drive.resolvePath("/RecentClips", "folder");
     const entries = (await this.drive.listFolder(this.drive.folderRef(root))).files;
     const dates: DriveEntry[] = [];
@@ -36,7 +43,16 @@ export class RecentArchive {
       seen.add(entry.name);
       dates.push(entry);
     }
-    dates.sort((a, b) => b.name.localeCompare(a.name));
+    return dates.sort((a, b) => b.name.localeCompare(a.name));
+  }
+
+  async page(pageToken: string | undefined): Promise<{
+    events: DashcamEvent[];
+    nextPageToken?: string;
+    nextPageDate: string | null;
+  }> {
+    const requestedDate = pageToken ? parseDateCursor(pageToken) : undefined;
+    const dates = await this.dateFolders();
     const index = requestedDate === undefined ? 0 : dates.findIndex((date) => date.name === requestedDate);
     if (index < 0) throw invalidCursor();
     if (!dates.length) return { events: [], nextPageDate: null };

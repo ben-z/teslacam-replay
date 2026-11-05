@@ -1,48 +1,25 @@
+import { assertArchiveCatalog, assertArchiveDay, type ArchiveCatalog, type ArchiveDay, type ArchiveDayKey, type RecordingType } from "./archive";
 import type { DashcamEvent, TelemetryData } from "./types";
 import { HLS_CACHE_VERSION } from "./types";
 
 const API_BASE = "/api";
 
-export type EventPageType = DashcamEvent["type"];
-export const EVENT_PAGE_TYPES: EventPageType[] = ["SavedClips", "SentryClips", "RecentClips"];
-
-export interface EventPagePosition {
-  nextPageToken: string | null;
-  nextPageDate: string | null;
+export async function fetchArchiveCatalog(type: RecordingType): Promise<ArchiveCatalog> {
+  const res = await fetch(`${API_BASE}/archive/${type}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Recording dates could not be checked (HTTP ${res.status}).`);
+  const catalog: unknown = await res.json();
+  assertArchiveCatalog(catalog);
+  if (catalog.type !== type) throw new Error(`Expected ${type} recording dates, received ${catalog.type}.`);
+  return catalog;
 }
 
-export type EventPagePositions = Partial<Record<EventPageType, EventPagePosition>>;
-
-export interface EventPage extends EventPagePosition {
-  type: EventPageType;
-  events: DashcamEvent[];
-}
-export async function fetchEventPage(
-  type: EventPageType,
-  pageToken: string | null,
-  limit: number
-): Promise<EventPage> {
-  const params = new URLSearchParams({ type, limit: String(limit) });
-  if (pageToken) params.set("pageToken", pageToken);
-  const res = await fetch(`${API_BASE}/events/page?${params.toString()}`);
-  if (!res.ok) throw new Error(`Recordings could not be loaded (HTTP ${res.status}).`);
-  const page: EventPage = await res.json();
-  if (page.type !== type) throw new Error(`Expected ${type} recordings, received ${page.type}.`);
-  if (page.nextPageToken !== null && (typeof page.nextPageToken !== "string" || !page.nextPageToken)) {
-    throw new Error("Invalid recording page token.");
-  }
-  if (page.nextPageDate !== null && (
-    typeof page.nextPageDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(page.nextPageDate) ||
-    !Number.isFinite(Date.parse(`${page.nextPageDate}T00:00:00Z`)) ||
-    new Date(`${page.nextPageDate}T00:00:00Z`).toISOString().slice(0, 10) !== page.nextPageDate
-  )) throw new Error("Invalid recording page date.");
-  if (page.nextPageToken === null && page.nextPageDate !== null) {
-    throw new Error("An exhausted recording source cannot have an older-page date.");
-  }
-  if (pageToken !== null && page.nextPageToken === pageToken) {
-    throw new Error("The recording page did not advance. Refresh recordings to continue.");
-  }
-  return page;
+export async function fetchArchiveDay({ type, date }: ArchiveDayKey): Promise<ArchiveDay> {
+  const res = await fetch(`${API_BASE}/archive/${type}/${date}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Recordings for ${date} could not be loaded (HTTP ${res.status}).`);
+  const day: unknown = await res.json();
+  assertArchiveDay(day);
+  if (day.type !== type || day.date !== date) throw new Error(`Expected ${type}/${date} recordings, received ${day.type}/${day.date}.`);
+  return day;
 }
 
 export async function fetchEvent(type: string, id: string, refresh: boolean): Promise<DashcamEvent> {

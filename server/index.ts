@@ -24,6 +24,8 @@ import { RecentArchive } from "./recent-archive.js";
 import { compareRecordingOrder, mergeRecentFragments } from "../src/events.js";
 import { oldestArchiveDate } from "./archive-date-bounds.js";
 import { mapLimit } from "./map-limit.js";
+import { assertArchiveDate, RECORDING_TYPES } from "../src/archive.js";
+import { recordingWallTimeMs } from "../src/playback.js";
 import type { DashcamEvent as PublicDashcamEvent } from "../src/types.js";
 
 const appOrigin = process.env.APP_ORIGIN;
@@ -86,15 +88,22 @@ app.get("/healthz", async (c) => {
 
 app.get("/api/version", (c) => c.json({ version: appVersion }));
 
-app.use("/api/events/*", async (c, next) => {
+app.use("/api/*", async (c, next) => {
   const parts = c.req.path.split("/");
   const type = parts[3] === "page" ? c.req.query("type") : parts[3];
   if (type !== "SavedClips" && type !== "SentryClips" && type !== "RecentClips") return next();
-  const route = parts[3] === "page" && parts.length === 4 ? "page"
-    : parts.length === 5 && validateParams(type, parts[4]) ? "recording" : undefined;
+  let route: "catalog" | "day" | "page" | "recording" | undefined;
+  if (parts[2] === "archive") {
+    if (parts.length === 4) route = "catalog";
+    else if (parts.length === 5) route = "day";
+  } else if (parts[2] === "events") {
+    if (parts[3] === "page" && parts.length === 4) route = "page";
+    else if (parts.length === 5 && validateParams(type, parts[4])) route = "recording";
+  }
   if (!route) return next();
   const context = {
     event: "archive_request", requestId: randomUUID(), route, type,
+    ...(route === "day" ? { date: parts[4] } : {}),
     startedAt: new Date().toISOString(),
   };
   const started = performance.now();
@@ -137,7 +146,6 @@ if (EVENT_FOLDER_ORDER_BY !== "name desc") {
 const EVENT_FOLDER_PATTERN = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
 
 const eventIndex = new Map<string, DashcamEvent>();
-const typeFolders = new Map<EventType, DriveEntry>();
 
 function positiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -241,12 +249,54 @@ function publicEvents(events: DashcamEvent[]): PublicDashcamEvent[] {
   return events.map(publicEvent);
 }
 
-async function getTypeFolder(type: EventType): Promise<DriveEntry> {
-  const cached = typeFolders.get(type);
-  if (cached) return cached;
-  const folder = await drive.resolvePath(`/${type}`, "folder");
-  typeFolders.set(type, folder);
-  return folder;
+async function eventFolders(type: "SavedClips" | "SentryClips"): Promise<DriveEntry[]> {
+  const root = await drive.resolvePath(`/${type}`, "folder");
+  const entries = (await drive.listFolder(drive.folderRef(root))).files;
+  const folders = entries.filter((entry) => drive.isFolder(entry) && EVENT_FOLDER_PATTERN.test(entry.name));
+  const names = new Set<string>();
+  for (const folder of folders) {
+    recordingWallTimeMs(folder.name);
+    if (names.has(folder.name)) throw new Error(`Duplicate ${type} recording folder: ${folder.name}`);
+    names.add(folder.name);
+  }
+  return folders;
+}
+
+function forgetDay(type: EventType, date: string): void {
+  for (const [key, event] of eventIndex) {
+    if (event.type === type && (event.id.startsWith(date) || key.startsWith(`${type}:${date}`))) eventIndex.delete(key);
+  }
+}
+
+async function archiveCatalog(type: EventType): Promise<string[]> {
+  const dates = type === "RecentClips" ? await recentArchive.catalog()
+    : [...new Set((await eventFolders(type)).map((folder) => folder.name.slice(0, 10)))].sort().reverse();
+  const available = new Set(dates);
+  for (const [key, event] of eventIndex) {
+    if (event.type === type && !available.has(event.id.slice(0, 10))) eventIndex.delete(key);
+  }
+  return dates;
+}
+
+async function archiveDay(type: EventType, date: string): Promise<DashcamEvent[]> {
+  let events: DashcamEvent[];
+  try {
+    if (type === "RecentClips") events = await recentArchive.day(date);
+    else {
+      const folders = (await eventFolders(type)).filter((folder) => folder.name.startsWith(date));
+      if (folders.length === 0) throw new HTTPException(404, { message: `${type} archive day not found` });
+      const scanned = await mapLimit(folders, EVENT_PAGE_SCAN_CONCURRENCY, (folder) => scanEventFolder(drive, type, folder));
+      events = scanned.filter((event): event is DashcamEvent => event !== null).sort(compareRecordingOrder);
+    }
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 404) forgetDay(type, date);
+    throw error;
+  }
+  // Each resource owns a complete folder-date partition, including bookmark
+  // aliases. Replacing it must remove recordings and cameras deleted in Drive.
+  forgetDay(type, date);
+  rememberEvents(events, "snapshot");
+  return events;
 }
 
 async function getEventPage(
@@ -259,7 +309,7 @@ async function getEventPage(
     return { ...page, events: rememberEvents(page.events, "page") };
   }
 
-  const folder = await getTypeFolder(type);
+  const folder = await drive.resolvePath(`/${type}`, "folder");
   const page = await drive.listFolderPage(drive.folderRef(folder), {
     type: "folders",
     pageToken,
@@ -350,6 +400,30 @@ app.get("/api/status", (c) => {
   });
 });
 
+function isEventType(type: string): type is EventType {
+  return RECORDING_TYPES.some((supported) => supported === type);
+}
+
+app.get("/api/archive/:type", async (c) => {
+  const { type } = c.req.param();
+  if (!isEventType(type)) return c.json({ error: "Invalid event type" }, 400);
+  c.header("Cache-Control", "no-cache");
+  return c.json({ type, dates: await archiveCatalog(type) });
+});
+
+app.get("/api/archive/:type/:date", async (c) => {
+  const { type, date } = c.req.param();
+  if (!isEventType(type)) return c.json({ error: "Invalid event type" }, 400);
+  try {
+    assertArchiveDate(date);
+  } catch {
+    return c.json({ error: "Invalid archive date" }, 400);
+  }
+  c.header("Cache-Control", "no-cache");
+  return c.json({ type, date, events: publicEvents(await archiveDay(type, date)) });
+});
+
+// Already-open clients from the previous release still page through this route.
 app.get("/api/events/page", async (c) => {
   c.header("Cache-Control", "no-cache");
   const type = c.req.query("type") as EventType | undefined;

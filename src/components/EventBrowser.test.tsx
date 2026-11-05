@@ -4,34 +4,34 @@ import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 import type { DashcamEvent } from "../types";
 import { EventBrowser } from "./EventBrowser";
-import { EVENT_PAGE_TYPES, type EventPagePositions, type EventPageType } from "../api";
+import { RECORDING_TYPES, archiveDayKey } from "../archive";
+import { catalogKey, type ArchiveState } from "../recordingArchive";
 
-function positions(hasMore: Record<EventPageType, boolean>): EventPagePositions {
-  return Object.fromEntries(EVENT_PAGE_TYPES.map((type) => [type, {
-    nextPageToken: hasMore[type] ? `older-${type}` : null,
-    nextPageDate: hasMore[type] ? "2026-10-22" : null,
-  }]));
+function snapshot(events: DashcamEvent[], changes: Partial<ArchiveState>): ArchiveState {
+  return {
+    restored: true, pending: new Set(), errors: {}, cacheError: null, details: [],
+    catalogs: Object.fromEntries(RECORDING_TYPES.map((type) => [type, { type, dates: events.some((event) => event.type === type) ? ["2026-10-22"] : [] }])),
+    days: Object.fromEntries(RECORDING_TYPES.filter((type) => events.some((event) => event.type === type)).map((type) => [archiveDayKey({ type, date: "2026-10-22" }), { type, date: "2026-10-22", events: events.filter((event) => event.type === type) }])),
+    ...changes,
+  };
 }
 
 function render(events: DashcamEvent[], overrides: Partial<ComponentProps<typeof EventBrowser>> = {}) {
   return renderToStaticMarkup(<EventBrowser
     active={true}
     events={events}
-    cacheError={null}
-    pendingTypes={[]}
-    errorsByType={{}}
-    pagePositions={positions({ SavedClips: false, SentryClips: false, RecentClips: false })}
+    archive={snapshot(events, {})}
     onSelectEvent={() => {}}
     onRefresh={() => {}}
-    onRetry={() => {}}
-    onLoadMore={() => {}}
+    onLoadCatalog={() => {}}
+    onLoadDays={() => {}}
     {...overrides}
   />);
 }
 
 function recording(type: DashcamEvent["type"]): DashcamEvent {
   return {
-    id: `${type}-2026-10-22_12-00-00`,
+    id: "2026-10-22_12-00-00",
     type,
     timestamp: "2026-10-22T12:00:00",
     hasThumbnail: false,
@@ -41,168 +41,81 @@ function recording(type: DashcamEvent["type"]): DashcamEvent {
 }
 
 describe("recording list archive scope", () => {
-  it("reports storage failures without hiding recordings", () => {
-    const markup = render([recording("RecentClips")], { cacheError: "Could not save the recording list on this device: quota exceeded" });
-    expect(markup).toContain('role="alert">Could not save');
-    expect(markup).toContain("Open Recent recording");
-  });
-
-  it("labels a restored list as updating while keeping its cards available", () => {
-    const markup = render([recording("SavedClips")], { pendingTypes: ["SavedClips"] });
-    expect(markup).toContain("Updating Saved recordings…");
-    expect(markup).toContain("Open Saved recording");
-  });
-
   it("loads advertised previews lazily only while browsing is active", () => {
     const event = { ...recording("RecentClips"), hasThumbnail: true, thumbnailVersion: "preview-version" };
-    const active = render([event]);
-    expect(active).toContain('loading="lazy"');
-    expect(active).toContain("thumbnail?v=preview-version");
-    expect(active).not.toContain("No preview");
+    expect(render([event])).toContain('loading="lazy"');
+    expect(render([event])).toContain("thumbnail?v=preview-version");
     const hidden = render([event], { active: false });
     expect(hidden).not.toContain("<img");
     expect(hidden).not.toContain("thumbnail?v=");
     expect(hidden).not.toContain("No archived video");
   });
-  it("includes every loaded recording type in All and its count", () => {
-    const markup = render([recording("SavedClips"), recording("SentryClips"), recording("RecentClips")]);
+
+  it("includes every loaded source in All and its count", () => {
+    const markup = render(RECORDING_TYPES.map(recording));
     expect(markup).toContain("Recordings (3)");
     expect(markup).toContain("3 recordings loaded");
-    expect(markup).toContain("Open Saved recording");
-    expect(markup).toContain("Open Sentry recording");
-    expect(markup).toContain("Open Recent recording");
+    for (const label of ["Saved", "Sentry", "Recent"]) expect(markup).toContain(`Open ${label} recording`);
     expect(markup).toContain("No archived video");
   });
 
   it("keeps a Recent-only recording discoverable", () => {
     const markup = render([recording("RecentClips")]);
     expect(markup).toContain("Recordings (1)");
-    expect(markup).toContain("Open Recent recording");
     expect(markup).toContain("1 segment");
-    expect(markup).not.toContain("No recordings in the loaded pages");
+    expect(markup).not.toContain("No recordings in the loaded archive days");
   });
 
-  it("shows completed sources while another source is pending", () => {
-    const markup = render([recording("RecentClips"), recording("SentryClips")], {
-      pendingTypes: ["SavedClips"],
-    });
-    expect(markup).toContain("Updating Saved recordings…");
+  it("shows saved recordings during independent background checks", () => {
+    const events = [recording("RecentClips")];
+    const markup = render(events, { archive: snapshot(events, { pending: new Set([catalogKey("SavedClips")]) }) });
+    expect(markup).toContain("Checking for recording updates…");
+    expect(markup).toContain("Open Recent recording");
     expect(markup).toContain('role="status"');
-    expect(markup).toContain("Open Recent recording");
-    expect(markup).toContain("Open Sentry recording");
-    expect(markup).toContain("2 recordings loaded");
-    expect(markup).not.toContain("No recordings in the loaded pages");
   });
 
-  it("names a failed source without hiding successful recordings", () => {
-    const markup = render([recording("RecentClips")], {
-      errorsByType: { SavedClips: "Could not load recordings (HTTP 500)." },
-    });
-    expect(markup).toContain("Saved: Could not load recordings (HTTP 500).");
-    expect(markup).toContain('role="alert"');
-    expect(markup).toContain(">Retry Saved</button>");
-    expect(markup).toContain("Open Recent recording");
-    expect(markup).not.toContain("Previously loaded Saved");
-  });
-
-  it("discloses retained recordings when their source fails", () => {
-    const markup = render([recording("SavedClips"), recording("RecentClips")], {
-      errorsByType: { SavedClips: "Refresh failed." },
-    });
-    expect(markup).toContain("Open Saved recording");
-    expect(markup).toContain("Previously loaded Saved recordings are still shown.");
-    expect(markup).toContain(">Retry Saved</button>");
+  it("reports storage failures without hiding recordings", () => {
+    const events = [recording("RecentClips")];
+    const markup = render(events, { archive: snapshot(events, { cacheError: "Could not save recordings: quota exceeded" }) });
+    expect(markup).toContain('role="alert">Could not save');
     expect(markup).toContain("Open Recent recording");
   });
 
-  it("keeps retries available while an unrelated source is pending", () => {
-    const markup = render([], {
-      pendingTypes: ["SentryClips"],
-      errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
-    });
-    expect(markup).toContain("Updating Sentry recordings…");
-    expect(markup).toContain("Saved listing failed.");
-    expect(markup).toContain("Recent listing failed.");
-    expect(markup).toContain("<button>Retry Saved</button>");
-    expect(markup).toContain("<button>Retry Recent</button>");
-    expect(markup).toMatch(/<button disabled="" class="browse-refresh-btn"/);
-    expect(markup).not.toContain("No recordings in the loaded pages");
+  it("keeps older dates available during a head refresh or freshness failure", () => {
+    const events = [recording("RecentClips")];
+    const catalogs = snapshot(events, {}).catalogs;
+    catalogs.RecentClips!.dates.push("2026-10-21");
+    const key = "RecentClips/2026-10-22";
+    for (const changes of [{ pending: new Set([key]) }, { errors: { [key]: "Update failed." } }]) {
+      const markup = render(events, { archive: snapshot(events, { catalogs, ...changes }) });
+      expect(markup).toContain('class="browse-load-more-hint">Load more recordings</button>');
+      expect(markup).not.toContain('class="browse-load-more-hint" disabled');
+      if (changes.errors) {
+        expect(markup).toContain("Previously loaded recordings are still shown.");
+        expect(markup).toContain(">Retry Recent 2026-10-22</button>");
+      }
+    }
   });
 
-  it("keeps a pending source retry focusable and reports its loading status", () => {
-    const markup = render([], {
-      pendingTypes: ["SavedClips"],
-      errorsByType: { SavedClips: "Saved listing failed.", RecentClips: "Recent listing failed." },
-    });
-    expect(markup).toContain('<button aria-disabled="true">Retry Saved</button>');
-    expect(markup).toContain('role="status">Retrying Saved recordings…');
-    expect(markup).not.toContain("Saved listing failed.");
-    expect(markup).toContain("<button>Retry Recent</button>");
+  it("does not render errors for dates removed from the catalog", () => {
+    const markup = render([], { archive: snapshot([], { errors: { "RecentClips/2026-10-21": "Obsolete failure" } }) });
+    expect(markup).not.toContain("Obsolete failure");
+    expect(markup).not.toContain("Retry Recent");
   });
 
-  it("allows an idle continuation while another source is pending", () => {
-    const markup = render([recording("SavedClips")], {
-      pendingTypes: ["SentryClips"],
-      pagePositions: positions({ SavedClips: true, SentryClips: true, RecentClips: false }),
-    });
-    expect(markup).toContain("Updating Sentry recordings…");
-    expect(markup).toContain('class="browse-load-more-hint">Load more recordings</button>');
-    expect(markup).not.toContain('class="browse-load-more-hint" disabled=""');
-    expect(markup).toContain("Older recordings are available");
+  it("does not claim an empty archive when catalog discovery fails", () => {
+    const markup = render([], { archive: snapshot([], { catalogs: {}, errors: { [catalogKey("SavedClips")]: "Dates unavailable." } }) });
+    expect(markup).toContain("Saved dates: Dates unavailable.");
+    expect(markup).toContain(">Retry Saved dates</button>");
+    expect(markup).not.toContain("No recordings in the loaded archive days");
   });
 
-  it("keeps a pending continuation visible without reporting exhaustion", () => {
-    const markup = render([recording("SavedClips")], {
-      pendingTypes: ["SavedClips"],
-      pagePositions: positions({ SavedClips: true, SentryClips: false, RecentClips: false }),
-    });
-    expect(markup).toContain('class="browse-load-more-hint" disabled="">Load more recordings</button>');
-    expect(markup).toContain("Older recordings are available");
-    expect(markup).not.toContain("No older recordings");
-  });
-
-  it("keeps loaded recordings revealable while their source is pending", () => {
-    const events = Array.from({ length: 49 }, (_, index) => ({
-      ...recording("RecentClips"),
-      id: `recent-${index}`,
-    }));
-    const markup = render(events, { pendingTypes: ["RecentClips"] });
-    expect(markup).toContain('class="browse-load-more-hint">Show more recordings</button>');
-    expect(markup).not.toContain('class="browse-load-more-hint" disabled=""');
-  });
-
-  it("does not claim an empty archive before its sources finish", () => {
-    const markup = render([], { pendingTypes: ["SavedClips", "SentryClips", "RecentClips"], pagePositions: {} });
-    expect(markup).toContain("Loading Saved, Sentry, Recent recordings…");
-    expect(markup.match(/role="status"/g)).toHaveLength(1);
-    expect(markup).not.toContain("No recordings in the loaded pages");
-    expect(markup).not.toContain("Loading recordings...");
-  });
-
-  it("does not report a failed listing as an empty archive", () => {
-    const markup = render([], { errorsByType: { SavedClips: "Listing failed." } });
-    expect(markup).toContain("Saved: Listing failed.");
-    expect(markup).not.toContain("No recordings in the loaded pages");
-  });
-
-  it("keeps failed continuation pages behind their explicit Retry action", () => {
-    const markup = render([recording("RecentClips")], {
-      errorsByType: { RecentClips: "Older page failed." },
-      pagePositions: positions({ SavedClips: false, SentryClips: false, RecentClips: true }),
-    });
-    expect(markup).toContain(">Retry Recent</button>");
-    expect(markup).not.toContain("Load more recordings");
-    expect(markup).not.toContain("Older recordings are available");
-  });
-
-  it("shows an empty state after successful sources settle", () => {
-    const markup = render([]);
-    expect(markup).toContain("No recordings in the loaded pages");
-    expect(markup).not.toContain('role="status"');
-    expect(markup).not.toContain('role="alert"');
+  it("shows an empty state only after successful catalogs settle", () => {
+    expect(render([])).toContain("No recordings in the loaded archive days");
+    const markup = render([], { archive: snapshot([], { restored: false }) });
+    expect(markup).not.toContain("No recordings in the loaded archive days");
   });
 });
-
 
 function clockRecording(timestamp: string, captureTime: string): DashcamEvent {
   const event = recording("RecentClips");

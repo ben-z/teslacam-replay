@@ -1,16 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Component, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore, Component, lazy, Suspense } from "react";
 import type { ReactNode } from "react";
-import {
-  fetchEvent,
-  fetchEventPage,
-  EVENT_PAGE_TYPES,
-  type EventPagePositions,
-  type EventPageType,
-} from "./api";
-import { readRecordingCache, writeRecordingCache } from "./recordingCache";
+import { fetchEvent } from "./api";
+import { archiveEvents, RecordingArchive } from "./recordingArchive";
+import type { ArchiveDayKey } from "./archive";
 import { EventBrowser } from "./components/EventBrowser";
 import type { DashcamEvent, ViewMode } from "./types";
-import { compareRecordingOrder, mergeEvents, replaceEventSnapshot } from "./events";
+import { compareRecordingOrder } from "./events";
 
 const loadPlayer = () => import("./components/Player");
 const Player = lazy(async () => ({ default: (await loadPlayer()).Player }));
@@ -59,20 +54,12 @@ function parseHash(): { type: string; id: string } | null {
   return m ? { type: m[1], id: m[2] } : null;
 }
 
-const PAGE_LOAD_LIMIT = 24;
-type PageRequest = { type: EventPageType; pageToken: string | null };
-type PageLoadError = { message: string; pageToken: string | null };
-
 export function App() {
-  const [events, setEvents] = useState<DashcamEvent[]>([]);
-  const [pendingTypes, setPendingTypes] = useState<EventPageType[]>(EVENT_PAGE_TYPES);
-  const [pagePositions, setPagePositions] = useState<EventPagePositions>({});
-  const [pageErrors, setPageErrors] = useState<Partial<Record<EventPageType, PageLoadError>>>({});
-  const [cacheError, setCacheError] = useState<string | null>(null);
-  const loadedPageCounts = useRef<Partial<Record<EventPageType, number>>>({});
+  const [recordings] = useState(() => new RecordingArchive());
+  const archive = useSyncExternalStore(recordings.subscribe, recordings.getSnapshot);
+  const events = useMemo(() => archiveEvents(archive), [archive.days, archive.details]);
   const [eventError, setEventError] = useState<string | null>(null);
   const routeRequest = useRef(0);
-  const browseRequested = useRef(false);
   const [view, setView] = useState<ViewMode>(() =>
     parseHash() ? "player" : "browse"
   );
@@ -84,11 +71,6 @@ export function App() {
   const pushedHashRef = useRef(false);
   const browseFocusRef = useRef<HTMLElement | null>(null);
   const recordingBackRef = useRef<HTMLButtonElement>(null);
-  const eventsRef = useRef(events);
-  const pagePositionsRef = useRef(pagePositions);
-  const pendingPageTypesRef = useRef(new Set<EventPageType>());
-  eventsRef.current = events;
-  pagePositionsRef.current = pagePositions;
 
   useEffect(() => {
     if (view !== "browse") return;
@@ -109,21 +91,6 @@ export function App() {
     setView("player");
   }, []);
 
-  const persistSource = useCallback(async (type: EventPageType) => {
-    const position = pagePositionsRef.current[type];
-    if (!position) return; // A direct recording route has no browsable page yet.
-    try {
-      await writeRecordingCache({
-        type,
-        events: eventsRef.current.filter((event) => event.type === type),
-        ...position,
-        pageCount: loadedPageCounts.current[type]!,
-      });
-    } catch (error) {
-      setCacheError(`Could not save the recording list on this device: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, []);
-
   const loadRoute = useCallback(async (route: { type: string; id: string }, refresh: boolean) => {
     const request = ++routeRequest.current;
     const pending = pendingStartTime.current;
@@ -135,112 +102,24 @@ export function App() {
     try {
       const [found] = await Promise.all([fetchEvent(route.type, route.id, refresh), loadPlayer()]);
       if (request !== routeRequest.current) return;
-      const merged = refresh
-        ? replaceEventSnapshot(eventsRef.current, found)
-        : mergeEvents(eventsRef.current, [found]);
-      setEvents(merged);
-      eventsRef.current = merged;
-      const canonical = merged.find((event) => event.type === found.type && event.id === found.id);
+      recordings.rememberRecording(found);
+      const canonical = archiveEvents(recordings.getSnapshot()).find((event) => event.type === found.type && event.id === found.id);
       if (!canonical) throw new Error("Loaded recording is missing from the event list");
       history.replaceState(null, "", `#/event/${canonical.type}/${canonical.id}`);
       setInitialTime(requestedCaptureTime === undefined ? 0 : Math.max(0,
         (requestedCaptureTime - canonical.clips[0].captureTimeMs) / 1000));
       pendingStartTime.current = null;
       selectEvent(canonical);
-      void persistSource(found.type);
     } catch (error) {
       if (request === routeRequest.current) {
         setEventError(error instanceof Error ? error.message : String(error));
       }
     }
-  }, [selectEvent, persistSource]);
-
-  const loadPages = useCallback(async (pages: PageRequest[]) => {
-    const requested: PageRequest[] = [];
-    for (const page of pages) {
-      if (pendingPageTypesRef.current.has(page.type)) continue;
-      pendingPageTypesRef.current.add(page.type);
-      requested.push(page);
-    }
-    if (requested.length === 0) return;
-    const catalogAtStart = eventsRef.current;
-    setPendingTypes([...pendingPageTypesRef.current]);
-    await Promise.all(requested.map(async ({ type, pageToken }) => {
-      try {
-        // Refresh the loaded depth using fresh cursors. Cached cursors must not
-        // describe coverage in a newly changed archive.
-        const pageCount = pageToken === null ? loadedPageCounts.current[type] ?? 1 : 1;
-        let token = pageToken;
-        let refreshedEvents: DashcamEvent[] = [];
-        let result;
-        let fetchedPages = 0;
-        do {
-          result = await fetchEventPage(type, token, PAGE_LOAD_LIMIT);
-          refreshedEvents = mergeEvents(refreshedEvents, result.events);
-          token = result.nextPageToken;
-          fetchedPages++;
-        } while (token !== null && fetchedPages < pageCount);
-        // Recording details loaded after this page began remain authoritative.
-        const updatedRecordings = eventsRef.current.filter((event) =>
-          event.type === type && !catalogAtStart.includes(event));
-        const previous = pageToken === null
-          ? eventsRef.current.filter((event) => event.type !== type)
-          : eventsRef.current;
-        const merged = updatedRecordings.reduce(replaceEventSnapshot, mergeEvents(previous, refreshedEvents));
-        const nextPositions = {
-          ...pagePositionsRef.current,
-          [type]: { nextPageToken: result.nextPageToken, nextPageDate: result.nextPageDate },
-        };
-        loadedPageCounts.current[type] = pageToken === null
-          ? fetchedPages : loadedPageCounts.current[type]! + fetchedPages;
-        eventsRef.current = merged;
-        pagePositionsRef.current = nextPositions;
-        setEvents(merged);
-        setPagePositions(nextPositions);
-        setPageErrors((previous) => {
-          if (previous[type] === undefined) return previous;
-          const errors = { ...previous };
-          delete errors[type];
-          return errors;
-        });
-        await persistSource(type);
-      } catch (err) {
-        setPageErrors((previous) => ({
-          ...previous,
-          [type]: { message: err instanceof Error ? err.message : String(err), pageToken },
-        }));
-      } finally {
-        pendingPageTypesRef.current.delete(type);
-        setPendingTypes([...pendingPageTypesRef.current]);
-      }
-    }));
-  }, [persistSource]);
+  }, [selectEvent, recordings]);
 
   useEffect(() => {
-    if (view !== "browse" || browseRequested.current) return;
-    browseRequested.current = true;
-    void (async () => {
-      try {
-        const sources = await readRecordingCache();
-        const cachedEvents = sources.flatMap((source) => source.events);
-        // Details fetched through a recording route outrank the saved list.
-        const restored = eventsRef.current.reduce(replaceEventSnapshot, cachedEvents);
-        for (const source of sources) {
-          loadedPageCounts.current[source.type] = source.pageCount;
-          pagePositionsRef.current[source.type] = {
-            nextPageToken: source.nextPageToken, nextPageDate: source.nextPageDate,
-          };
-        }
-        eventsRef.current = restored;
-        pagePositionsRef.current = { ...pagePositionsRef.current };
-        setEvents(restored);
-        setPagePositions(pagePositionsRef.current);
-      } catch (error) {
-        setCacheError(`Could not restore the saved recording list: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      await loadPages(EVENT_PAGE_TYPES.map((type) => ({ type, pageToken: null })));
-    })();
-  }, [view, loadPages]);
+    if (view === "browse") void recordings.start();
+  }, [view, recordings]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -262,27 +141,9 @@ export function App() {
     };
   }, [loadRoute]);
 
-  const handleRefresh = async () => {
-    if (pendingPageTypesRef.current.size > 0) return;
-    setBrowseList([]);
-    await loadPages(EVENT_PAGE_TYPES.map((type) => ({ type, pageToken: null })));
-  };
-
-  const handleLoadMore = useCallback((types: EventPageType[]) => {
-    const pages: PageRequest[] = [];
-    for (const type of types) {
-      const token = pagePositionsRef.current[type]?.nextPageToken;
-      if (token && !pageErrors[type]) pages.push({ type, pageToken: token });
-    }
-    void loadPages(pages);
-  }, [loadPages, pageErrors]);
-
-  const handleRetry = (type: EventPageType) => {
-    const error = pageErrors[type];
-    if (error) {
-      void loadPages([{ type, pageToken: error.pageToken }]);
-    }
-  };
+  const handleLoadDays = useCallback((days: ArchiveDayKey[], refresh: boolean) => {
+    for (const day of days) void recordings.loadDay(day, refresh);
+  }, [recordings]);
 
   const handleSelectEvent = (event: DashcamEvent, filteredList?: DashcamEvent[], startTime?: number) => {
     pendingStartTime.current = startTime === undefined ? null : {
@@ -357,14 +218,11 @@ export function App() {
           <EventBrowser
             active={view === "browse"}
             events={events}
-            cacheError={cacheError}
-            pendingTypes={pendingTypes}
-            errorsByType={Object.fromEntries(Object.entries(pageErrors).map(([type, error]) => [type, error.message]))}
+            archive={archive}
             onSelectEvent={handleSelectEvent}
-            onRefresh={handleRefresh}
-            onRetry={handleRetry}
-            onLoadMore={handleLoadMore}
-            pagePositions={pagePositions}
+            onRefresh={recordings.refresh}
+            onLoadCatalog={recordings.loadCatalog}
+            onLoadDays={handleLoadDays}
           />
         </div>
         {view === "player" && (selectedEvent ? (

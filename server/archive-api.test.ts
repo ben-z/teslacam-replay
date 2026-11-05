@@ -990,3 +990,226 @@ describe("hosted API origin policy", () => {
     expect(provider.requests).toHaveLength(0);
   });
 });
+
+
+describe("date-partitioned recording archive", () => {
+  it("catalogs all Saved/Sentry folder dates without scanning recordings", async () => {
+    for (const type of ["SavedClips", "SentryClips"] as const) {
+      provider.add(type, true);
+      for (const timestamp of ["2026-10-22_12-00-00", "2026-10-21_12-00-00", "2026-10-22_14-00-00", "2026-10-20_12-00-00", "2026-10-19_12-00-00"]) {
+        provider.add(`${type}/${timestamp}`, true);
+        provider.add(`${type}/${timestamp}/${timestamp}-front.mp4`);
+      }
+      provider.add(`${type}/metadata`, true);
+      provider.add(`${type}/notes.txt`);
+    }
+    await start();
+    provider.requests.length = 0;
+    for (const type of ["SavedClips", "SentryClips"] as const) {
+      const response = await request(`/api/archive/${type}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-cache");
+      expect(await response.json()).toEqual({ type, dates: ["2026-10-22", "2026-10-21", "2026-10-20", "2026-10-19"] });
+      expect(provider.listsFor(type)).toHaveLength(4);
+    }
+    expect(provider.requests.every((url) => ["/api/resolve", "/api/list"].includes(url.pathname))).toBe(true);
+    const rootIds = new Set([provider.entries.get("SavedClips")!.id, provider.entries.get("SentryClips")!.id]);
+    expect(provider.requests.filter((url) => url.pathname === "/api/list").every((url) => rootIds.has(url.searchParams.get("folderId")!))).toBe(true);
+    expect(provider.headerReads).toEqual([]);
+  });
+
+  it("catalogs Recent day folders without reading their video listings", async () => {
+    for (const date of ["2026-10-20", "2026-10-22", "2026-10-21"]) provider.add(`RecentClips/${date}`, true);
+    provider.add("RecentClips/metadata", true);
+    await start();
+    provider.requests.length = 0;
+    const response = await request("/api/archive/RecentClips");
+    expect(await response.json()).toEqual({ type: "RecentClips", dates: ["2026-10-22", "2026-10-21", "2026-10-20"] });
+    expect(provider.listsFor("RecentClips")).toHaveLength(2);
+    expect(provider.listsFor("RecentClips/2026-10-22")).toHaveLength(0);
+    expect(provider.headerReads).toEqual([]);
+  });
+
+  it("reads a complete Saved day and owns it by folder date across midnight", async () => {
+    provider.add("SavedClips", true);
+    const day = "2026-10-22";
+    const ids = ["2026-10-22_00-00-10", "2026-10-22_12-00-00", "2026-10-22_14-00-00"];
+    for (const id of ids) {
+      const folder = `SavedClips/${id}`;
+      provider.add(folder, true);
+      provider.add(`${folder}/${id}-front.mp4`);
+    }
+    const crossing = provider.add(`SavedClips/${ids[0]}/2026-10-21_23-59-30-back.mp4`);
+    const metadata = provider.add(`SavedClips/${ids[0]}/event.json`);
+    provider.reads.set(metadata.id, { body: JSON.stringify({ timestamp: "2026-10-21T23:59:59", city: "Across midnight" }), status: 200 });
+    const unrelated = "SavedClips/2026-10-21_12-00-00";
+    provider.add(unrelated, true);
+    provider.add(`${unrelated}/2026-10-21_12-00-00-front.mp4`);
+    await start();
+    const response = await request(`/api/archive/SavedClips/${day}`);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result).toMatchObject({ type: "SavedClips", date: day });
+    expect(result.events).toHaveLength(3);
+    const event = result.events.find((candidate: { id: string }) => candidate.id === ids[0]);
+    expect(event).toMatchObject({ timestamp: "2026-10-21T23:59:59", city: "Across midnight" });
+    expect(event.clips[0]).toMatchObject({ timestamp: "2026-10-21_23-59-30", captureTimeMs: provider.captureTimes.get(crossing.id) });
+    expect(provider.listsFor(unrelated)).toHaveLength(0);
+  });
+
+  it("starts older day reads while another day is still waiting", async () => {
+    for (const date of ["2026-10-21", "2026-10-22"]) {
+      provider.add(`RecentClips/${date}`, true);
+      provider.add(`RecentClips/${date}/${date}_12-00-00-front.mp4`);
+    }
+    await start();
+    let unblock!: () => void;
+    const held = new Promise<void>((resolve) => { unblock = resolve; });
+    const newestId = provider.entries.get("RecentClips/2026-10-22")!.id;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === newestId) await held;
+      return provider.fetch(input, init);
+    });
+    const newest = request("/api/archive/RecentClips/2026-10-22");
+    const older = await request("/api/archive/RecentClips/2026-10-21");
+    expect(older.status).toBe(200);
+    expect((await older.json()).events[0].id).toBe("2026-10-21_12-00-00");
+    unblock();
+    expect((await newest).status).toBe(200);
+  });
+
+  it("replaces a Saved day's removed recordings and cameras in the recording index", async () => {
+    provider.add("SavedClips", true);
+    const ids = ["2026-10-22_12-00-00", "2026-10-22_14-00-00"];
+    for (const id of ids) {
+      provider.add(`SavedClips/${id}`, true);
+      for (const camera of ["front", "back"]) provider.add(`SavedClips/${id}/${id}-${camera}.mp4`);
+    }
+    await start();
+    expect((await request("/api/archive/SavedClips/2026-10-22")).status).toBe(200);
+    provider.remove(`SavedClips/${ids[0]}/${ids[0]}-back.mp4`);
+    provider.remove(`SavedClips/${ids[1]}`);
+    const response = await request("/api/archive/SavedClips/2026-10-22");
+    const day = await response.json();
+    expect(day.events).toHaveLength(1);
+    expect(day.events[0].clips[0].cameras).toEqual(["front"]);
+    expect((await (await request(`/api/events/SavedClips/${ids[0]}`)).json()).clips[0].cameras).toEqual(["front"]);
+    expect((await request(`/api/events/SavedClips/${ids[1]}`)).status).toBe(404);
+  });
+
+  it("replaces Recent canonical IDs and removes all stale bookmark aliases", async () => {
+    const date = "2026-10-22";
+    const directory = `RecentClips/${date}`;
+    const [early, middle, late] = ["2026-10-22_12-00-00", "2026-10-22_12-01-00", "2026-10-22_12-02-00"];
+    provider.add(directory, true);
+    for (const timestamp of [early, middle, late]) {
+      for (const camera of ["front", "back"]) provider.add(`${directory}/${timestamp}-${camera}.mp4`);
+    }
+    await start();
+    // A middle-segment bookmark is an alias of the complete driving session.
+    expect((await request(`/api/events/RecentClips/${middle}`)).status).toBe(200);
+    provider.remove(`${directory}/${early}-front.mp4`);
+    provider.remove(`${directory}/${early}-back.mp4`);
+    provider.remove(`${directory}/${middle}-back.mp4`);
+    const response = await request(`/api/archive/RecentClips/${date}`);
+    const day = await response.json();
+    expect(day.events[0].id).toBe(middle);
+    expect(day.events[0].clips.map((clip: { timestamp: string }) => clip.timestamp)).toEqual([middle, late]);
+    expect(day.events[0].clips[0].cameras).toEqual(["front"]);
+    const bookmark = await (await request(`/api/events/RecentClips/${middle}`)).json();
+    expect(bookmark).toEqual(day.events[0]);
+    expect((await request(`/api/events/RecentClips/${early}`)).status).toBe(404);
+  });
+
+  it("returns an existing empty Recent day, and evicts an indexed day when it disappears", async () => {
+    const date = "2026-10-22";
+    const directory = `RecentClips/${date}`;
+    const timestamp = `${date}_12-00-00`;
+    provider.add(directory, true);
+    provider.add(`${directory}/${timestamp}-front.mp4`);
+    await start();
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(200);
+    provider.remove(`${directory}/${timestamp}-front.mp4`);
+    const empty = await request(`/api/archive/RecentClips/${date}`);
+    expect(await empty.json()).toEqual({ type: "RecentClips", date, events: [] });
+    expect((await request(`/api/events/RecentClips/${timestamp}`)).status).toBe(404);
+    provider.add(`${directory}/${timestamp}-front.mp4`);
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(200);
+    provider.remove(directory);
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(404);
+    expect((await request(`/api/events/RecentClips/${timestamp}`)).status).toBe(404);
+  });
+
+  it("prunes indexed dates removed from a successful catalog and retains them on provider failure", async () => {
+    const date = "2026-10-22";
+    const directory = `RecentClips/${date}`;
+    const timestamp = `${date}_12-00-00`;
+    provider.add(directory, true);
+    provider.add(`${directory}/${timestamp}-front.mp4`);
+    await start();
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(200);
+    provider.resolveFailures.set("RecentClips", 503);
+    expect((await request("/api/archive/RecentClips")).status).toBe(500);
+    expect((await request(`/api/events/RecentClips/${timestamp}`)).status).toBe(200);
+    provider.resolveFailures.clear();
+    provider.remove(directory);
+    expect(await (await request("/api/archive/RecentClips")).json()).toEqual({ type: "RecentClips", dates: [] });
+    expect((await request(`/api/events/RecentClips/${timestamp}`)).status).toBe(404);
+  });
+
+  it("retains the last indexed day after a failed refresh", async () => {
+    const date = "2026-10-22";
+    const directory = `RecentClips/${date}`;
+    const timestamp = `${date}_12-00-00`;
+    provider.add(directory, true);
+    provider.add(`${directory}/${timestamp}-front.mp4`);
+    await start();
+    const original = await (await request(`/api/archive/RecentClips/${date}`)).json();
+    provider.resolveFailures.set(directory, 503);
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(500);
+    expect(await (await request(`/api/events/RecentClips/${timestamp}`)).json()).toEqual(original.events[0]);
+  });
+
+  it.each(["SavedClips", "SentryClips"] as const)("returns404 for a missing %s day without scanning another day", async (type) => {
+    provider.add(type, true);
+    const existing = `${type}/2026-10-21_12-00-00`;
+    provider.add(existing, true);
+    provider.add(`${existing}/2026-10-21_12-00-00-front.mp4`);
+    await start();
+    expect((await request(`/api/archive/${type}/2026-10-22`)).status).toBe(404);
+    expect(provider.listsFor(existing)).toEqual([]);
+  });
+
+  it("retains the complete Saved snapshot when a refreshed child folder fails", async () => {
+    provider.add("SavedClips", true);
+    const timestamp = "2026-10-22_12-00-00";
+    const folder = `SavedClips/${timestamp}`;
+    provider.add(folder, true);
+    provider.add(`${folder}/${timestamp}-front.mp4`);
+    await start();
+    const original = await (await request("/api/archive/SavedClips/2026-10-22")).json();
+    const folderId = provider.entries.get(folder)!.id;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname === "/api/list" && url.searchParams.get("folderId") === folderId) return new Response("Provider failure", { status: 503 });
+      return provider.fetch(input, init);
+    });
+    expect((await request("/api/archive/SavedClips/2026-10-22")).status).toBe(500);
+    expect(await (await request(`/api/events/SavedClips/${timestamp}`)).json()).toEqual(original.events[0]);
+  });
+
+  it.each(["2026-02-30", "2026-13-01", "2026-1-01", "not-a-day"])("rejects invalid day %s before querying Drive", async (date) => {
+    await start();
+    provider.requests.length = 0;
+    expect((await request(`/api/archive/RecentClips/${date}`)).status).toBe(400);
+    expect(provider.requests).toEqual([]);
+  });
+
+  it.each(["/api/archive/UnknownClips", "/api/archive/UnknownClips/2026-10-22"])("rejects an unsupported source %s", async (route) => {
+    await start();
+    provider.requests.length = 0;
+    expect((await request(route)).status).toBe(400);
+    expect(provider.requests).toEqual([]);
+  });
+});

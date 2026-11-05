@@ -1,10 +1,7 @@
 import { Fragment, memo, useState, useMemo, useCallback, useEffect, useRef } from "react";
-import {
-  thumbnailUrl,
-  EVENT_PAGE_TYPES,
-  type EventPagePositions,
-  type EventPageType,
-} from "../api";
+import { thumbnailUrl } from "../api";
+import { archiveDayKey, RECORDING_TYPES, type ArchiveDayKey, type RecordingType } from "../archive";
+import { catalogKey, type ArchiveState } from "../recordingArchive";
 import type { DashcamEvent } from "../types";
 import { formatReason } from "../types";
 import { Timeline } from "./Timeline";
@@ -16,21 +13,18 @@ import "./EventBrowser.css";
 interface Props {
   active: boolean;
   events: DashcamEvent[];
-  cacheError: string | null;
-  pendingTypes: EventPageType[];
-  errorsByType: Partial<Record<EventPageType, string>>;
-  pagePositions: EventPagePositions;
+  archive: ArchiveState;
   onSelectEvent: (event: DashcamEvent, filteredList: DashcamEvent[], startTime?: number) => void;
-  onRefresh: () => void;
-  onRetry: (type: EventPageType) => void;
-  onLoadMore: (types: EventPageType[]) => void;
+  onRefresh: (days: ArchiveDayKey[]) => void;
+  onLoadCatalog: (type: RecordingType) => void;
+  onLoadDays: (days: ArchiveDayKey[], refresh: boolean) => void;
 }
 
-type FilterType = "all" | EventPageType;
+type FilterType = "all" | RecordingType;
 type ViewType = "events" | "timeline";
 
 const PAGE_SIZE = 48;
-const SOURCE_TYPES = EVENT_PAGE_TYPES;
+const SOURCE_TYPES = RECORDING_TYPES;
 const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   weekday: "short",
   month: "short",
@@ -72,14 +66,11 @@ function dateKey(ts: string): string {
 export function EventBrowser({
   active,
   events,
-  cacheError,
-  pendingTypes,
-  errorsByType,
-  pagePositions,
+  archive,
   onSelectEvent,
   onRefresh,
-  onRetry,
-  onLoadMore,
+  onLoadCatalog,
+  onLoadDays,
 }: Props) {
   const [view, setView] = useState<ViewType>("events");
   const [filter, setFilter] = useState<FilterType>("all");
@@ -91,9 +82,14 @@ export function EventBrowser({
   const recordingsTabRef = useRef<HTMLButtonElement>(null);
   const timelineTabRef = useRef<HTMLButtonElement>(null);
   const retryFocusRef = useRef<HTMLButtonElement | null>(null);
-  const pending = pendingTypes.length > 0;
-  const failedTypes = SOURCE_TYPES.filter((type) => errorsByType[type] !== undefined);
-
+  const pending = archive.pending.size > 0;
+  const failedResources = SOURCE_TYPES.flatMap((type) => {
+    const resources = [{ key: catalogKey(type), label: `${BADGE_STYLES[type].label} dates`, type, date: null as string | null }];
+    for (const date of archive.catalogs[type]?.dates ?? []) {
+      resources.push({ key: archiveDayKey({ type, date }), label: `${BADGE_STYLES[type].label} ${date}`, type, date });
+    }
+    return resources.filter((resource) => archive.errors[resource.key] !== undefined);
+  });
   useEffect(() => {
     const retryButton = retryFocusRef.current;
     if (!retryButton || retryButton.isConnected) return;
@@ -101,7 +97,7 @@ export function EventBrowser({
     if (active && document.hasFocus() && document.activeElement === document.body) {
       (view === "events" ? recordingsTabRef : timelineTabRef).current!.focus();
     }
-  }, [active, errorsByType, view]);
+  }, [active, archive.errors, view]);
 
   const clearSearch = () => {
     setSearchInput("");
@@ -169,36 +165,37 @@ export function EventBrowser({
 
   const visible = filtered.slice(0, visibleCount);
   const hasMoreLoaded = view !== "timeline" && visibleCount < filtered.length;
-  const timelinePage = useMemo(() => timelinePaging(events, pagePositions, timelineFromDate),
-    [events, pagePositions, timelineFromDate]);
-  const pageTypesToLoad = useMemo<EventPageType[]>(() => {
-    if (view === "timeline" || filter === "all") return SOURCE_TYPES;
-    return [filter];
-  }, [filter, view]);
-  const knownRemoteTypes = useMemo(
-    () => pageTypesToLoad.filter((type) => pagePositions[type]?.nextPageToken && errorsByType[type] === undefined),
-    [pagePositions, pageTypesToLoad, errorsByType]
-  );
-  const remoteTypesToLoad = (view === "timeline" ? timelinePage.loadTypes : knownRemoteTypes)
-    .filter((type) => !pendingTypes.includes(type) && errorsByType[type] === undefined);
-  const scopeIncomplete = pageTypesToLoad.some((type) => pendingTypes.includes(type) || errorsByType[type] !== undefined);
-  const hasMoreRemote = view === "timeline" ? timelinePage.hasOlder : knownRemoteTypes.length > 0;
-  const canLoadRemote = remoteTypesToLoad.length > 0;
+  const timelinePage = useMemo(() => timelinePaging(events, archive.catalogs, archive.days, timelineFromDate),
+    [events, archive.catalogs, archive.days, timelineFromDate]);
+  const sources = filter === "all" ? SOURCE_TYPES : [filter];
+  const nextDays = sources.flatMap((type) => {
+    const date = archive.catalogs[type]?.dates.find((date) => {
+      const key = archiveDayKey({ type, date });
+      return !archive.days[key] && !archive.pending.has(key) && archive.errors[key] === undefined;
+    });
+    return date ? [{ type, date }] : [];
+  });
+  const hasMoreRemote = sources.some((type) => archive.catalogs[type]?.dates.some((date) => !archive.days[archiveDayKey({ type, date })]));
+  const canLoadRemote = nextDays.length > 0;
   const hasMore = hasMoreLoaded || hasMoreRemote;
   const loadedEventCount = events.length;
-  const timelineFailedTypes = failedTypes.filter((type) =>
-    !pagePositions[type] || timelinePage.loadTypes.includes(type) || timelinePage.manualTypes.includes(type));
-  const timelinePending = [...timelinePage.loadTypes, ...timelinePage.manualTypes].some((type) => pendingTypes.includes(type));
-  const initialPagesReady = SOURCE_TYPES.every((type) => pagePositions[type] || errorsByType[type] !== undefined);
+  const listReady = archive.restored && sources.every((type) => {
+    const catalog = archive.catalogs[type];
+    return catalog !== undefined && (catalog.dates.length === 0
+      || archive.days[archiveDayKey({ type, date: catalog.dates[0] })] !== undefined);
+  });
   useEffect(() => {
-    if (!active || view !== "timeline" || !initialPagesReady || !timelinePage.requestedFromDate
-      || !timelinePage.rangeIncomplete) return;
-    const failed = SOURCE_TYPES.some((type) => errorsByType[type] !== undefined
-      && (!pagePositions[type] || timelinePage.loadTypes.includes(type) || timelinePage.manualTypes.includes(type)));
-    if (failed) return;
-    const next = timelinePage.loadTypes.filter((type) => !pendingTypes.includes(type));
-    if (next.length > 0) onLoadMore(next);
-  }, [active, view, initialPagesReady, timelinePage, pendingTypes, errorsByType, pagePositions, onLoadMore]);
+    if (!active || !archive.restored) return;
+    const missing = view === "timeline" ? timelinePage.loadDays : SOURCE_TYPES.flatMap((type) => {
+      const date = archive.catalogs[type]?.dates[0];
+      return date && !archive.days[archiveDayKey({ type, date })] ? [{ type, date }] : [];
+    });
+    const needed = missing.filter((day) => {
+      const key = archiveDayKey(day);
+      return !archive.pending.has(key) && archive.errors[key] === undefined;
+    });
+    if (needed.length > 0) onLoadDays(needed, false);
+  }, [active, view, archive.restored, archive.catalogs, archive.days, archive.pending, archive.errors, timelinePage, onLoadDays]);
   const scopeSummary = search.trim()
     ? `${filtered.length} matches in ${loadedEvents.length} loaded recordings`
     : `${filtered.length} recordings loaded`;
@@ -206,66 +203,28 @@ export function EventBrowser({
     (event: DashcamEvent) => onSelectEvent(event, filtered),
     [onSelectEvent, filtered]
   );
-  const handleLoadMore = useCallback(() => {
-    if (hasMoreLoaded) {
-      setVisibleCount((c) => c + PAGE_SIZE);
-    } else if (canLoadRemote) {
-      onLoadMore(remoteTypesToLoad);
-    }
-  }, [hasMoreLoaded, canLoadRemote, onLoadMore, remoteTypesToLoad]);
-
-  let timelineLoadLabel = "Load older recordings";
-  let timelineActionPending = !canLoadRemote;
-  if (timelinePage.requestedFromDate) {
-    timelineLoadLabel = timelinePage.rangeIncomplete ? "Loading timeline…" : `Earlier ${TIMELINE_WINDOW_DAYS} days`;
-    timelineActionPending = timelinePage.rangeIncomplete;
-  } else if (timelinePending && !canLoadRemote) {
-    timelineLoadLabel = "Loading older recordings…";
-  }
-  if (timelinePage.manualTypes.length > 0) {
-    const labels = timelinePage.manualTypes.map((type) => BADGE_STYLES[type].label).join(", ");
-    timelineActionPending = timelinePage.manualTypes.every((type) => pendingTypes.includes(type));
-    timelineLoadLabel = timelineActionPending
-      ? `Checking older ${labels} recordings…`
-      : `Check older ${labels} recordings`;
-  }
-  if (timelineFailedTypes.length > 0) {
-    timelineActionPending = timelineFailedTypes.every((type) => pendingTypes.includes(type));
-    timelineLoadLabel = `${timelineActionPending ? "Retrying" : "Retry"} ${timelineFailedTypes.map((type) => BADGE_STYLES[type].label).join(", ")}`;
-  }
-  let timelineRangeStatus = "Archive loaded for this range.";
-  if (timelineFailedTypes.length > 0) timelineRangeStatus = timelineActionPending
-    ? "Retrying archive for this range…"
-    : "Archive loading paused. Retry the failed source to continue.";
-  else if (timelinePage.manualTypes.length > 0) timelineRangeStatus = "Check older recordings below to establish this range.";
-  else if (timelinePage.rangeIncomplete) timelineRangeStatus = "Loading archive for this range…";
-
-  const timelineFooter = hasMoreRemote ? (
+  const handleLoadMore = () => {
+    if (hasMoreLoaded) setVisibleCount((count) => count + PAGE_SIZE);
+    else onLoadDays(nextDays, false);
+  };
+  const refreshDays = view === "timeline" ? timelinePage.requiredDays : Object.values(archive.days).filter((day) =>
+    sources.includes(day.type) && (day.date === archive.catalogs[day.type]?.dates[0]
+      || visible.some((event) => event.type === day.type && event.id.slice(0, 10) === day.date)));
+  const missingFailed = timelinePage.loadDays.some((day) => archive.errors[archiveDayKey(day)] !== undefined)
+    || SOURCE_TYPES.some((type) => !archive.catalogs[type] && archive.errors[catalogKey(type)] !== undefined);
+  let timelineRangeStatus = "Archive days loaded for this range.";
+  if (missingFailed) timelineRangeStatus = "Archive loading paused. Retry the failed request to continue.";
+  else if (timelinePage.rangeIncomplete) timelineRangeStatus = `Showing loaded recordings; ${timelinePage.loadDays.length} archive days still need loading.`;
+  const timelineFooter = timelinePage.hasOlder ? (
     <div className="browse-load-more">
       <button
         type="button"
         className="browse-load-more-hint"
-        aria-describedby={timelineFailedTypes.length > 0
-          ? timelineFailedTypes.map((type) => `browse-error-${type}`).join(" ")
-          : undefined}
-        aria-disabled={timelineActionPending || undefined}
-        onBlur={() => { retryFocusRef.current = null; }}
-        onClick={(event) => {
-          if (timelineActionPending) return;
-          if (timelineFailedTypes.length > 0) {
-            retryFocusRef.current = event.currentTarget;
-            for (const type of timelineFailedTypes) {
-              if (!pendingTypes.includes(type)) onRetry(type);
-            }
-          } else if (timelinePage.manualTypes.length > 0) {
-            onLoadMore(timelinePage.manualTypes.filter((type) => !pendingTypes.includes(type)));
-          } else if (timelinePage.requestedFromDate) {
-            setTimelineFromDate(earlierTimelineDate(timelinePage.requestedFromDate, TIMELINE_WINDOW_DAYS));
-          } else handleLoadMore();
+        onClick={() => {
+          if (!timelinePage.fromDate) return;
+          setTimelineFromDate(earlierTimelineDate(timelinePage.fromDate, TIMELINE_WINDOW_DAYS));
         }}
-      >
-        {timelineLoadLabel}
-      </button>
+      >Earlier {TIMELINE_WINDOW_DAYS} days</button>
     </div>
   ) : null;
 
@@ -276,8 +235,8 @@ export function EventBrowser({
           <h1 className="browse-title">TeslaCam Replay</h1>
           <div className="browse-header-actions">
             <button
-              onClick={onRefresh}
-              disabled={pending}
+              onClick={() => onRefresh(refreshDays)}
+              disabled={!archive.restored}
               className="browse-refresh-btn"
               title="Refresh recordings"
             >
@@ -361,30 +320,26 @@ export function EventBrowser({
       </header>
 
       <div className="browse-content">
-        {cacheError && <p className="browse-error" role="alert">{cacheError}</p>}
+        {archive.cacheError && <p className="browse-error" role="alert">{archive.cacheError}</p>}
         {pending && (
           <p className="browse-scope" role="status">
-            {pendingTypes.some((type) => pagePositions[type] === undefined) ? "Loading" : "Updating"}{" "}
-            {pendingTypes.map((type) => BADGE_STYLES[type].label).join(", ")} recordings…
+            {events.length > 0 ? "Checking for recording updates…" : "Loading recordings…"}
           </p>
         )}
-        {failedTypes.map((type) => (
-          <div className="browse-error" id={`browse-error-${type}`} role={pendingTypes.includes(type) ? "status" : "alert"} key={type}>
-            {pendingTypes.includes(type)
-              ? `Retrying ${BADGE_STYLES[type].label} recordings…`
-              : `${BADGE_STYLES[type].label}: ${errorsByType[type]}`}
-            {!pendingTypes.includes(type) && events.some((event) => event.type === type) && (
-              <> Previously loaded {BADGE_STYLES[type].label} recordings are still shown.</>
+        {failedResources.map((resource) => (
+          <div className="browse-error" role="alert" key={resource.key}>
+            {resource.label}: {archive.errors[resource.key]}
+            {(resource.date ? archive.days[resource.key] : archive.catalogs[resource.type]) && (
+              <> Previously loaded recordings are still shown.</>
             )}
             {" "}<button
-              aria-disabled={pendingTypes.includes(type) || undefined}
               onBlur={() => { retryFocusRef.current = null; }}
               onClick={(event) => {
-                if (pendingTypes.includes(type)) return;
                 retryFocusRef.current = event.currentTarget;
-                onRetry(type);
+                if (resource.date) onLoadDays([{ type: resource.type, date: resource.date }], true);
+                else onLoadCatalog(resource.type);
               }}
-            >Retry {BADGE_STYLES[type].label}</button>
+            >Retry {resource.label}</button>
           </div>
         ))}
         {view === "events" && (
@@ -401,17 +356,15 @@ export function EventBrowser({
           <>
             <div className="recent-scan-status" aria-live="polite">
               <span>
-                {timelinePage.requestedFromDate && timelinePage.newestDate
-                  ? <>Timeline range: {timelinePage.requestedFromDate}–{timelinePage.newestDate}.
-                    {" "}{timelineRangeStatus}
-                    {timelinePage.rangeIncomplete && timelinePage.fromDate
-                      && ` Showing loaded recordings from ${timelinePage.fromDate} onward.`}</>
-                  : timelinePage.rangeIncomplete || scopeIncomplete
+                {timelinePage.fromDate && timelinePage.newestDate
+                  ? <>Timeline range: {timelinePage.fromDate}–{timelinePage.newestDate}.
+                    {" "}{timelineRangeStatus}</>
+                  : timelinePage.rangeIncomplete
                     ? "The common time range is not available yet."
                     : "No older recordings."}
               </span>
             </div>
-            {!scopeIncomplete || events.some((event) => event.clips.length > 0) ? (
+            {!timelinePage.rangeIncomplete || events.some((event) => event.clips.length > 0) ? (
               <Timeline
                 events={events}
                 fromDate={timelinePage.fromDate}
@@ -422,7 +375,7 @@ export function EventBrowser({
           </>
         ) : filtered.length === 0 ? (
           <div className="browse-empty">
-            {!scopeIncomplete && (search.trim() || filter !== "all" ? (
+            {listReady && (search.trim() || filter !== "all" ? (
               <>
                 <p>No loaded recordings match your filters</p>
                 <button
@@ -433,7 +386,7 @@ export function EventBrowser({
                 </button>
               </>
             ) : (
-              <p>No recordings in the loaded pages</p>
+              <p>No recordings in the loaded archive days</p>
             ))}
             {hasMoreRemote && (
               <button className="browse-clear-filters-btn" onClick={handleLoadMore} disabled={!canLoadRemote}>
